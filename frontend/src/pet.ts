@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 const PET_EXPRESSIONS = [
@@ -18,6 +19,7 @@ const PET_SVG = `
       overflow: visible;
       cursor: move;
       opacity: 1;
+      pointer-events: none;
       transition: opacity 180ms ease;
       user-select: none;
     }
@@ -30,6 +32,11 @@ const PET_SVG = `
       transform-box: view-box;
       transform-origin: 100px 108px;
       animation: pet-breathe 3.5s ease-in-out infinite;
+      pointer-events: visiblePainted;
+    }
+
+    #pet-breath * {
+      pointer-events: visiblePainted;
     }
 
     .pet.is-dimmed #pet-breath {
@@ -47,7 +54,7 @@ const PET_SVG = `
       }
     }
   </style>
-  <g id="pet-breath">
+  <g id="pet-breath" data-pet-interactive>
     <path
       d="M54 151C37 136 35 104 48 79L47 48L76 64C91 57 109 57 124 64L153 48L152 79C165 104 163 136 146 151C126 169 74 169 54 151Z"
       fill="none"
@@ -97,6 +104,11 @@ const FACE_MARKUP: Record<PetExpression, string> = {
   `,
 };
 
+const PET_INTERACTION_MARGIN_DIP = 6;
+const PET_CONTEXT_MENU_COMMAND = "show_pet_menu";
+const REPORT_PET_INTERACTION_REGION_COMMAND = "report_pet_interaction_region";
+const MARK_PET_DRAGGING_COMMAND = "mark_pet_dragging";
+
 const host = document.getElementById("app");
 
 if (!(host instanceof HTMLDivElement)) {
@@ -111,18 +123,67 @@ pet.setAttribute("viewBox", "0 0 200 200");
 pet.innerHTML = PET_SVG;
 host.replaceChildren(pet);
 
+function isPaintedPetTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof SVGElement)) {
+    return false;
+  }
+
+  const interactiveGroup = target.closest("g[data-pet-interactive]");
+  return (
+    interactiveGroup instanceof SVGGElement &&
+    interactiveGroup.ownerSVGElement === pet
+  );
+}
+
+function reportPetInteractionRegion(): void {
+  const petBounds = pet.getBoundingClientRect();
+  const windowBounds = document.documentElement.getBoundingClientRect();
+
+  void invoke(REPORT_PET_INTERACTION_REGION_COMMAND, {
+    x: petBounds.left - windowBounds.left - PET_INTERACTION_MARGIN_DIP,
+    y: petBounds.top - windowBounds.top - PET_INTERACTION_MARGIN_DIP,
+    width: petBounds.width + PET_INTERACTION_MARGIN_DIP * 2,
+    height: petBounds.height + PET_INTERACTION_MARGIN_DIP * 2,
+  }).catch((error: unknown) => {
+    console.error("failed to report the pet interaction region", error);
+  });
+}
+
+async function startPetDragging(): Promise<void> {
+  try {
+    await invoke(MARK_PET_DRAGGING_COMMAND);
+    await getCurrentWebviewWindow().startDragging();
+  } catch (error: unknown) {
+    console.error("failed to start dragging the pet window", error);
+  }
+}
+
 pet.addEventListener("mousedown", (event) => {
-  if (event.button !== 0) {
+  if (event.button !== 0 || !isPaintedPetTarget(event.target)) {
     return;
   }
 
   event.preventDefault();
-  void getCurrentWebviewWindow()
-    .startDragging()
-    .catch((error: unknown) => {
-      console.error("failed to start dragging the pet window", error);
-    });
+  void startPetDragging();
 });
+
+window.addEventListener(
+  "contextmenu",
+  (event) => {
+    event.preventDefault();
+
+    if (!isPaintedPetTarget(event.target)) {
+      return;
+    }
+
+    void invoke(PET_CONTEXT_MENU_COMMAND, {
+      position: { x: event.clientX, y: event.clientY },
+    }).catch((error: unknown) => {
+      console.error("failed to show the pet context menu", error);
+    });
+  },
+  { capture: true },
+);
 
 const face = pet.querySelector<SVGGElement>("#pet-face");
 
@@ -161,3 +222,4 @@ export function setPetDimmed(isDimmed: boolean): void {
 }
 
 renderExpression();
+requestAnimationFrame(reportPetInteractionRegion);
