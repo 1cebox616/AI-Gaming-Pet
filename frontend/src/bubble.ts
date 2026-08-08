@@ -1,7 +1,7 @@
-const TYPEWRITER_INTERVAL_MS = 55;
+const TYPEWRITER_INTERVAL_MS = 40;
 const DISPLAY_DURATION_MS = 4_000;
 const MAX_LINES = 3;
-const MAX_CHARACTERS = 32;
+const MAX_CHARACTERS = 30;
 const FADE_DURATION_MS = 180;
 
 const BUBBLE_STYLE = `
@@ -30,6 +30,18 @@ const BUBBLE_STYLE = `
       visibility 0s linear ${FADE_DURATION_MS}ms;
     user-select: none;
     visibility: hidden;
+  }
+
+  .speech-bubble::before {
+    position: absolute;
+    right: 22px;
+    bottom: -10px;
+    width: 0;
+    height: 0;
+    border-top: 12px solid rgb(255 255 255 / 72%);
+    border-right: 9px solid transparent;
+    border-left: 9px solid transparent;
+    content: "";
   }
 
   .speech-bubble::after {
