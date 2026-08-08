@@ -137,6 +137,10 @@ export function getPetExpression(): string {
   return currentExpression;
 }
 
+export function isPetExpression(value: string): value is PetExpression {
+  return PET_EXPRESSIONS.some((expression) => expression === value);
+}
+
 export function setPetDimmed(isDimmed: boolean): void {
   pet.classList.toggle("is-dimmed", isDimmed);
 }

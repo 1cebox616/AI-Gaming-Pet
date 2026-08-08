@@ -1,4 +1,4 @@
-import { setPetDimmed, setPetExpression } from "./pet";
+import { isPetExpression, setPetDimmed, setPetExpression } from "./pet";
 import { showSpeech } from "./bubble";
 
 const BACKEND_HOST = "127.0.0.1";
@@ -7,8 +7,6 @@ const BACKEND_WEBSOCKET_URL = `ws://${BACKEND_HOST}:${BACKEND_PORT}/ws`;
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 10_000;
 const RECONNECT_BACKOFF_MULTIPLIER = 2;
-
-type PetExpression = Exclude<Parameters<typeof setPetExpression>[0], undefined>;
 
 interface UtteranceMessage {
   type: "utterance";
@@ -85,7 +83,15 @@ function handleMessage(event: MessageEvent<unknown>): void {
   }
 
   lastUtteranceId = message.id;
-  setPetExpression(message.emotion as PetExpression);
+  if (!isPetExpression(message.emotion)) {
+    console.warn(
+      "received an invalid pet emotion; falling back to neutral",
+      message.emotion,
+    );
+    setPetExpression("neutral");
+  } else {
+    setPetExpression(message.emotion);
+  }
   showSpeech(message.text);
 }
 

@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 from pet.lines import Utterance, next_idle_utterance
+from pet.speech import SpeechService
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +19,9 @@ REQUEST_IDLE_LINE_MESSAGE_TYPE = "request_idle_line"
 class PetBridge:
     """Manage active pet WebSocket connections and their dialogue requests."""
 
-    def __init__(self) -> None:
+    def __init__(self, speech_service: SpeechService) -> None:
         self._connections: set[WebSocket] = set()
+        self._speech_service = speech_service
 
     async def serve(self, websocket: WebSocket) -> None:
         """Accept one client, greet it, and process messages until it disconnects."""
@@ -63,3 +65,4 @@ class PetBridge:
                 "emotion": utterance.emotion,
             }
         )
+        self._speech_service.speak(utterance.text)

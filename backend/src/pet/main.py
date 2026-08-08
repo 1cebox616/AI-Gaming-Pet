@@ -1,5 +1,9 @@
 """Local HTTP entry point for the AI Gaming Pet backend."""
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 from importlib.metadata import version
 
 from fastapi import FastAPI, WebSocket
@@ -8,6 +12,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from pet.bridge import PetBridge
+from pet.speech import SpeechService
 
 HOST = "127.0.0.1"
 PORT = 8737
@@ -21,8 +26,21 @@ class HealthResponse(BaseModel):
     version: str
 
 
-app = FastAPI(title="AI Gaming Pet")
-pet_bridge = PetBridge()
+speech_service = SpeechService()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """Load the local voice before accepting desktop-pet connections."""
+    await asyncio.to_thread(speech_service.load)
+    try:
+        yield
+    finally:
+        speech_service.shutdown()
+
+
+app = FastAPI(title="AI Gaming Pet", lifespan=lifespan)
+pet_bridge = PetBridge(speech_service)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

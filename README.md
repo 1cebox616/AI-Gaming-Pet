@@ -15,8 +15,11 @@
 cd backend
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\python -m pet.speech --install-model
 .venv\Scripts\python -m pet.main
 ```
+
+语音模型安装是一次性步骤：上面的 `--install-model` 命令会将 Kokoro 中文模型和所用音色下载到 `backend/models/`。如果下载失败，命令会明确报错，请检查网络后重试。模型文件已被 Git 忽略，不会提交。
 
 服务仅监听 `http://127.0.0.1:8737`。可在浏览器访问 `http://127.0.0.1:8737/health` 检查状态。
 
@@ -30,7 +33,7 @@ npm.cmd install
 npm.cmd run tauri dev
 ```
 
-窗口会请求本机后端并显示健康状态。后端未启动或三秒内未响应时，窗口显示“后端状态：连接失败”。
+窗口会连接本机后端的 WebSocket，显示宠物与气泡。后端未启动或连接断开时，宠物会变暗并自动重连。
 
 在 Windows PowerShell 中请使用 `npm.cmd`；直接使用 `npm` 可能因 PowerShell 脚本执行策略而失败。
 
