@@ -13,6 +13,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from pet.bridge import PetBridge
+from pet.config import load_config
 from pet.speech import SpeechService
 
 HOST = "127.0.0.1"
@@ -44,21 +45,24 @@ class HealthResponse(BaseModel):
 
 
 configure_pet_logging()
-speech_service = SpeechService()
+configuration = load_config()
+speech_service = SpeechService(configuration.speech)
+pet_bridge = PetBridge(speech_service, configuration.idle)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Load the local voice before accepting desktop-pet connections."""
     await asyncio.to_thread(speech_service.load)
+    await pet_bridge.start_idle_broadcasts()
     try:
         yield
     finally:
+        await pet_bridge.shutdown()
         speech_service.shutdown()
 
 
 app = FastAPI(title="AI Gaming Pet", lifespan=lifespan)
-pet_bridge = PetBridge(speech_service)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[

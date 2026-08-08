@@ -16,6 +16,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Lock
 
+from pet.config import SpeechConfig
+
 POWERSHELL_EXECUTABLE = "powershell.exe"
 POWERSHELL_TIMEOUT_SECONDS = 15
 PREFERRED_CHINESE_VOICE_NAMES: tuple[str, ...] = (
@@ -59,7 +61,8 @@ class SpeechMetrics:
 class SpeechService:
     """Use the installed OneCore Chinese voice without blocking FastAPI."""
 
-    def __init__(self) -> None:
+    def __init__(self, configuration: SpeechConfig | None = None) -> None:
+        self._configuration = configuration or SpeechConfig()
         self._voice: OneCoreVoice | None = None
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pet-speech")
         self._lock = Lock()
@@ -70,6 +73,10 @@ class SpeechService:
 
     def load(self) -> bool:
         """Find and select an installed OneCore Chinese voice."""
+        if not self._configuration.enabled:
+            logger.info("speech is disabled by backend configuration")
+            return True
+
         try:
             voices = _enumerate_onecore_voices()
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
@@ -84,14 +91,9 @@ class SpeechService:
             )
             return False
 
-        selected_voice = next(
-            (
-                voice
-                for preferred_name in PREFERRED_CHINESE_VOICE_NAMES
-                for voice in chinese_voices
-                if voice.name == preferred_name
-            ),
-            chinese_voices[0],
+        selected_voice = _select_voice(
+            chinese_voices,
+            self._configuration.voice_name,
         )
         with self._lock:
             if self._is_shutdown:
@@ -114,6 +116,8 @@ class SpeechService:
         """Interrupt previous playback and asynchronously synthesize and play ``text``."""
         if not text.strip():
             logger.warning("ignoring an empty speech request")
+            return None
+        if not self._configuration.enabled:
             return None
 
         self.stop()
@@ -191,6 +195,9 @@ class SpeechService:
         generation: int,
         request_started_at: float,
     ) -> None:
+        if not self._is_current_generation(generation):
+            return
+
         synthesis_started_at = time.perf_counter()
         try:
             audio = self.synthesize(text)
@@ -218,6 +225,35 @@ class SpeechService:
     def _is_current_generation(self, generation: int) -> bool:
         with self._lock:
             return generation == self._generation and not self._is_shutdown
+
+
+def _select_voice(
+    chinese_voices: list[OneCoreVoice],
+    configured_voice_name: str,
+) -> OneCoreVoice:
+    """Use the configured Chinese voice when present, otherwise choose the best default."""
+    requested_name = configured_voice_name.strip()
+    if requested_name:
+        configured_voice = next(
+            (voice for voice in chinese_voices if voice.name == requested_name),
+            None,
+        )
+        if configured_voice is not None:
+            return configured_voice
+        logger.warning(
+            "configured Chinese speech voice %r is not installed; selecting automatically",
+            requested_name,
+        )
+
+    return next(
+        (
+            voice
+            for preferred_name in PREFERRED_CHINESE_VOICE_NAMES
+            for voice in chinese_voices
+            if voice.name == preferred_name
+        ),
+        chinese_voices[0],
+    )
 
 
 def _enumerate_onecore_voices() -> tuple[OneCoreVoice, ...]:

@@ -8,7 +8,9 @@ from pet.speech import SpeechService
 def create_loaded_speech_service() -> SpeechService:
     """Load the actual installed OneCore Chinese voice for a synthesis test."""
     service = SpeechService()
-    assert service.load(), "install a Windows Chinese text-to-speech voice before running this test"
+    if not service.load():
+        service.shutdown()
+        pytest.skip("requires an installed Windows OneCore Chinese text-to-speech voice")
     return service
 
 

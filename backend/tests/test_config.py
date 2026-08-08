@@ -1,0 +1,100 @@
+"""Startup configuration tests using real TOML files."""
+
+import logging
+from pathlib import Path
+
+import pytest
+
+from pet.config import load_config
+
+
+def test_missing_configuration_file_uses_validated_defaults(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missing default file leaves the backend usable with model defaults."""
+    caplog.set_level(logging.WARNING, logger="pet.config")
+
+    configuration = load_config(
+        tmp_path / "missing-config.toml",
+        tmp_path / "missing-local.toml",
+    )
+
+    assert configuration.speech.enabled is True
+    assert configuration.idle.enabled is True
+    assert configuration.idle.min_interval_seconds < configuration.idle.max_interval_seconds
+    assert "configuration file is missing" in caplog.text
+
+
+def test_local_configuration_overrides_only_its_explicit_values(tmp_path: Path) -> None:
+    """An optional local file overlays matching settings without replacing others."""
+    default_path = tmp_path / "config.toml"
+    local_path = tmp_path / "config.local.toml"
+    default_path.write_text(
+        "[speech]\nenabled = true\nvoice_name = \"\"\n\n"
+        "[idle]\nenabled = true\nmin_interval_seconds = 45\nmax_interval_seconds = 120\n",
+        encoding="utf-8",
+    )
+    local_path.write_text("[idle]\nenabled = false\n", encoding="utf-8")
+
+    configuration = load_config(default_path, local_path)
+
+    assert configuration.speech.enabled is True
+    assert configuration.idle.enabled is False
+    assert configuration.idle.min_interval_seconds == 45
+    assert configuration.idle.max_interval_seconds == 120
+
+
+def test_missing_field_uses_its_default_and_logs_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A partial default document retains a default for its omitted setting."""
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[speech]\nenabled = false\n\n"
+        "[idle]\nenabled = false\nmin_interval_seconds = 45\nmax_interval_seconds = 120\n",
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="pet.config")
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.speech.enabled is False
+    assert configuration.speech.voice_name == ""
+    assert "speech.voice_name is missing" in caplog.text
+
+
+def test_invalid_value_falls_back_to_defaults_and_logs_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A type or range failure cannot prevent backend startup."""
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[speech]\nenabled = \"not-a-boolean\"\nvoice_name = \"\"\n\n"
+        "[idle]\nenabled = true\nmin_interval_seconds = 4\nmax_interval_seconds = 120\n",
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="pet.config")
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.speech.enabled is True
+    assert configuration.idle.min_interval_seconds == 45
+    assert "invalid backend configuration" in caplog.text
+
+
+def test_reversed_idle_interval_is_swapped(tmp_path: Path) -> None:
+    """A valid but reversed interval remains usable in the intended range."""
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[speech]\nenabled = true\nvoice_name = \"\"\n\n"
+        "[idle]\nenabled = true\nmin_interval_seconds = 120\nmax_interval_seconds = 45\n",
+        encoding="utf-8",
+    )
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.idle.min_interval_seconds == 45
+    assert configuration.idle.max_interval_seconds == 120
