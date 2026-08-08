@@ -1,5 +1,7 @@
 """Real Windows system-speech tests without downloaded models or audio playback."""
 
+import sys
+
 import pytest
 
 from pet.speech import SpeechService
@@ -7,10 +9,16 @@ from pet.speech import SpeechService
 
 def create_loaded_speech_service() -> SpeechService:
     """Load the actual installed OneCore Chinese voice for a synthesis test."""
+    if sys.platform != "win32":
+        pytest.skip("requires Windows and an installed OneCore Chinese text-to-speech voice")
+
     service = SpeechService()
     if not service.load():
         service.shutdown()
-        pytest.skip("requires an installed Windows OneCore Chinese text-to-speech voice")
+        pytest.fail(
+            "could not load a Windows OneCore Chinese text-to-speech voice; "
+            "install a Chinese voice in Windows Settings before running this test"
+        )
     return service
 
 

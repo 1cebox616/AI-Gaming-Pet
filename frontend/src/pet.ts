@@ -1,3 +1,5 @@
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+
 const PET_EXPRESSIONS = [
   "neutral",
   "happy",
@@ -108,6 +110,19 @@ pet.setAttribute("role", "img");
 pet.setAttribute("viewBox", "0 0 200 200");
 pet.innerHTML = PET_SVG;
 host.replaceChildren(pet);
+
+pet.addEventListener("mousedown", (event) => {
+  if (event.button !== 0) {
+    return;
+  }
+
+  event.preventDefault();
+  void getCurrentWebviewWindow()
+    .startDragging()
+    .catch((error: unknown) => {
+      console.error("failed to start dragging the pet window", error);
+    });
+});
 
 const face = pet.querySelector<SVGGElement>("#pet-face");
 
