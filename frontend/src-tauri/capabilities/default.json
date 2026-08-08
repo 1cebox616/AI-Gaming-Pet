@@ -1,8 +1,5 @@
 {
   "identifier": "default",
   "windows": ["main"],
-  "permissions": [
-    "core:window:allow-start-dragging",
-    "core:event:allow-listen"
-  ]
+  "permissions": ["core:window:allow-start-dragging", "core:event:allow-listen"]
 }

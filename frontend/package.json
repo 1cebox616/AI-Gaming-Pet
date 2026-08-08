@@ -6,10 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "format": "prettier --write \"src/**/*.ts\" index.html package.json package-lock.json tsconfig.json vite.config.ts src-tauri/tauri.conf.json \"src-tauri/capabilities/**/*.json\"",
+    "format:check": "prettier --check \"src/**/*.ts\" index.html package.json package-lock.json tsconfig.json vite.config.ts src-tauri/tauri.conf.json \"src-tauri/capabilities/**/*.json\"",
     "tauri": "tauri"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4",
+    "prettier": "3.9.6",
     "typescript": "7.0.2",
     "vite": "8.2.1"
   },

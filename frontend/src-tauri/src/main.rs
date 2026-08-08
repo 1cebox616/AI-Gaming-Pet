@@ -8,10 +8,12 @@ use tauri::{
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 const WINDOW_LABEL: &str = "main";
+const TRAY_SPEAK_ID: &str = "speak";
 const TRAY_NEXT_EXPRESSION_ID: &str = "next-expression";
 const TRAY_TOGGLE_ID: &str = "toggle-window";
 const TRAY_QUIT_ID: &str = "quit";
 const PET_NEXT_EXPRESSION_EVENT: &str = "pet-next-expression";
+const SPEAK_NEXT_IDLE_LINE_EVENT: &str = "speak-next-idle-line";
 const WINDOW_MARGIN_DIP: u32 = 40;
 
 fn toggle_main_window(app: &AppHandle) -> tauri::Result<()> {
@@ -38,6 +40,12 @@ fn toggle_main_window_and_log(app: &AppHandle) {
 fn request_next_pet_expression(app: &AppHandle) {
     if let Err(error) = app.emit_to(WINDOW_LABEL, PET_NEXT_EXPRESSION_EVENT, ()) {
         eprintln!("failed to request the next pet expression: {error}");
+    }
+}
+
+fn request_next_idle_line(app: &AppHandle) {
+    if let Err(error) = app.emit_to(WINDOW_LABEL, SPEAK_NEXT_IDLE_LINE_EVENT, ()) {
+        eprintln!("failed to request the next idle line: {error}");
     }
 }
 
@@ -74,11 +82,15 @@ fn position_on_primary_monitor(window: &WebviewWindow) -> tauri::Result<()> {
 }
 
 fn configure_tray(app: &App) -> tauri::Result<()> {
+    let speak_item = MenuItem::with_id(app, TRAY_SPEAK_ID, "说句话", true, None::<&str>)?;
     let next_expression_item =
         MenuItem::with_id(app, TRAY_NEXT_EXPRESSION_ID, "换个表情", true, None::<&str>)?;
     let toggle_item = MenuItem::with_id(app, TRAY_TOGGLE_ID, "显示/隐藏", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, TRAY_QUIT_ID, "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&next_expression_item, &toggle_item, &quit_item])?;
+    let menu = Menu::with_items(
+        app,
+        &[&speak_item, &next_expression_item, &toggle_item, &quit_item],
+    )?;
     let icon = app
         .default_window_icon()
         .expect("the configured Windows application icon must be present")
@@ -90,6 +102,7 @@ fn configure_tray(app: &App) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
+            TRAY_SPEAK_ID => request_next_idle_line(app),
             TRAY_NEXT_EXPRESSION_ID => request_next_pet_expression(app),
             TRAY_TOGGLE_ID => toggle_main_window_and_log(app),
             TRAY_QUIT_ID => unregister_shortcuts_and_exit(app),

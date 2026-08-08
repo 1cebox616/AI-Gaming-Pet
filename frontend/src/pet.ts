@@ -1,4 +1,10 @@
-const PET_EXPRESSIONS = ["neutral", "happy", "angry", "surprised", "speechless"] as const;
+const PET_EXPRESSIONS = [
+  "neutral",
+  "happy",
+  "angry",
+  "surprised",
+  "speechless",
+] as const;
 
 type PetExpression = (typeof PET_EXPRESSIONS)[number];
 
