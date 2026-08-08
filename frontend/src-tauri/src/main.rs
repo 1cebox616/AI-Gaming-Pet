@@ -10,10 +10,7 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 const WINDOW_LABEL: &str = "main";
 const TRAY_TOGGLE_ID: &str = "toggle-window";
 const TRAY_QUIT_ID: &str = "quit";
-const WINDOW_MARGIN_PX: u32 = 40;
-// Windows 11 offsets between Tauri's client-origin placement and the visible frame.
-const WINDOWS_BORDERLESS_HORIZONTAL_OFFSET_PX: u32 = 10;
-const WINDOWS_BORDERLESS_VERTICAL_OFFSET_PX: u32 = 9;
+const WINDOW_MARGIN_DIP: u32 = 40;
 
 fn toggle_main_window(app: &AppHandle) -> tauri::Result<()> {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
@@ -51,17 +48,16 @@ fn position_on_primary_monitor(window: &WebviewWindow) -> tauri::Result<()> {
     };
 
     let work_area = monitor.work_area();
-    let window_size = window.inner_size()?;
-    let horizontal_offset = work_area.size.width.saturating_sub(
-        window_size
-            .width
-            .saturating_add(WINDOW_MARGIN_PX + WINDOWS_BORDERLESS_HORIZONTAL_OFFSET_PX),
-    );
-    let vertical_offset = work_area.size.height.saturating_sub(
-        window_size
-            .height
-            .saturating_add(WINDOW_MARGIN_PX + WINDOWS_BORDERLESS_VERTICAL_OFFSET_PX),
-    );
+    let window_size = window.outer_size()?;
+    let margin_px = (f64::from(WINDOW_MARGIN_DIP) * monitor.scale_factor()).round() as u32;
+    let horizontal_offset = work_area
+        .size
+        .width
+        .saturating_sub(window_size.width.saturating_add(margin_px));
+    let vertical_offset = work_area
+        .size
+        .height
+        .saturating_sub(window_size.height.saturating_add(margin_px));
 
     window.set_position(PhysicalPosition::new(
         work_area.position.x + horizontal_offset as i32,
