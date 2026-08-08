@@ -26,8 +26,16 @@ python -m venv .venv
 
 ```powershell
 cd frontend
-npm install
-npm run tauri dev
+npm.cmd install
+npm.cmd run tauri dev
 ```
 
 窗口会请求本机后端并显示健康状态。后端未启动或三秒内未响应时，窗口显示“后端状态：连接失败”。
+
+在 Windows PowerShell 中请使用 `npm.cmd`；直接使用 `npm` 可能因 PowerShell 脚本执行策略而失败。
+
+验证前端构建：
+
+```powershell
+npm.cmd run build
+```
