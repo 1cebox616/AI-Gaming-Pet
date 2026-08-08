@@ -116,8 +116,8 @@ fn main() {
             configure_tray(app)?;
 
             if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
-                position_on_primary_monitor(&window)?;
                 window.show()?;
+                position_on_primary_monitor(&window)?;
             } else {
                 eprintln!("main window is unavailable during startup");
             }
