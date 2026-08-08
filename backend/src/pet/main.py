@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import logging
 
 from importlib.metadata import version
 
@@ -17,6 +18,22 @@ from pet.speech import SpeechService
 HOST = "127.0.0.1"
 PORT = 8737
 PACKAGE_NAME = "pet"
+PET_LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+
+
+def configure_pet_logging() -> None:
+    """Send every pet-module INFO log to the backend console."""
+    pet_logger = logging.getLogger("pet")
+    pet_logger.setLevel(logging.INFO)
+    pet_logger.propagate = False
+
+    if any(handler.name == "pet-console" for handler in pet_logger.handlers):
+        return
+
+    handler = logging.StreamHandler()
+    handler.name = "pet-console"
+    handler.setFormatter(logging.Formatter(PET_LOG_FORMAT))
+    pet_logger.addHandler(handler)
 
 
 class HealthResponse(BaseModel):
@@ -26,6 +43,7 @@ class HealthResponse(BaseModel):
     version: str
 
 
+configure_pet_logging()
 speech_service = SpeechService()
 
 

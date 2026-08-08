@@ -15,11 +15,10 @@
 cd backend
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
-.venv\Scripts\python -m pet.speech --install-model
 .venv\Scripts\python -m pet.main
 ```
 
-语音模型安装是一次性步骤：上面的 `--install-model` 命令会将 Kokoro 中文模型和所用音色下载到 `backend/models/`。如果下载失败，命令会明确报错，请检查网络后重试。模型文件已被 Git 忽略，不会提交。
+后端直接使用 Windows 11 已安装的 OneCore 中文语音，不下载模型或语音资源。如果日志提示没有中文语音，请打开“设置 > 时间和语言 > 语言和区域”，选择“中文（简体，中国）”右侧的“…” >“语言选项”，在“语言功能”中下载“文本到语音转换”。
 
 服务仅监听 `http://127.0.0.1:8737`。可在浏览器访问 `http://127.0.0.1:8737/health` 检查状态。
 

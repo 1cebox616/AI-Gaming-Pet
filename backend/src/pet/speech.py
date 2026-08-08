@@ -1,45 +1,48 @@
-"""Local CPU speech synthesis and Windows audio playback for the pet."""
+"""Windows OneCore speech synthesis and interruptible playback for the pet."""
 
 from __future__ import annotations
 
-import argparse
+import base64
+import binascii
 import ctypes
 import io
+import json
 import logging
+import subprocess
 import sys
 import time
 import wave
-from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from pathlib import Path
 from threading import Lock
-from typing import Any
+
+POWERSHELL_EXECUTABLE = "powershell.exe"
+POWERSHELL_TIMEOUT_SECONDS = 15
+PREFERRED_CHINESE_VOICE_NAMES: tuple[str, ...] = (
+    "Microsoft Yaoyao",
+    "Microsoft Huihui",
+    "Microsoft Kangkang",
+)
+WINDOWS_CHINESE_VOICE_INSTALL_INSTRUCTIONS = (
+    "install a Chinese text-to-speech voice in Settings > Time & language > "
+    "Language & region > Chinese (Simplified, China) > Language options > "
+    "Text-to-speech > Download"
+)
 
 logger = logging.getLogger(__name__)
 
-KOKORO_REPOSITORY = "hexgrad/Kokoro-82M-v1.1-zh"
-KOKORO_MODEL_FILE_NAME = "kokoro-v1_1-zh.pth"
-KOKORO_VOICE_FILE_NAME = "zf_001.pt"
-KOKORO_SAMPLE_RATE_HZ = 24_000
-MODEL_DIRECTORY = Path(__file__).resolve().parents[2] / "models" / "kokoro-v1.1-zh"
-MODEL_FILE_PATH = MODEL_DIRECTORY / KOKORO_MODEL_FILE_NAME
-MODEL_CONFIG_PATH = MODEL_DIRECTORY / "config.json"
-VOICE_FILE_PATH = MODEL_DIRECTORY / "voices" / KOKORO_VOICE_FILE_NAME
-MODEL_DOWNLOAD_FILES: tuple[str, ...] = (
-    "config.json",
-    KOKORO_MODEL_FILE_NAME,
-    f"voices/{KOKORO_VOICE_FILE_NAME}",
-)
 
+@dataclass(frozen=True)
+class OneCoreVoice:
+    """One Windows Runtime voice discovered from the local operating system."""
 
-class SpeechUnavailableError(RuntimeError):
-    """Raised when synthesis is requested before a usable model is loaded."""
+    name: str
+    language: str
 
 
 @dataclass(frozen=True)
 class SynthesizedAudio:
-    """A complete PCM WAV clip produced by the local speech model."""
+    """A complete WAV clip synthesized without opening an audio output device."""
 
     wav_bytes: bytes
     duration_seconds: float
@@ -47,17 +50,17 @@ class SynthesizedAudio:
 
 @dataclass(frozen=True)
 class SpeechMetrics:
-    """Timing collected for one asynchronous speech request."""
+    """Timing collected for one asynchronous system-speech request."""
 
     synthesis_seconds: float
     playback_start_latency_seconds: float
 
 
 class SpeechService:
-    """Preload, synthesize, and interrupt local speech without blocking FastAPI."""
+    """Use the installed OneCore Chinese voice without blocking FastAPI."""
 
     def __init__(self) -> None:
-        self._pipeline: Any | None = None
+        self._voice: OneCoreVoice | None = None
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pet-speech")
         self._lock = Lock()
         self._generation = 0
@@ -66,67 +69,58 @@ class SpeechService:
         self._is_shutdown = False
 
     def load(self) -> bool:
-        """Load the model and selected voice before clients can request speech."""
-        with self._lock:
-            if self._pipeline is not None:
-                return True
-
-        missing_files = [
-            path
-            for path in (MODEL_CONFIG_PATH, MODEL_FILE_PATH, VOICE_FILE_PATH)
-            if not path.is_file()
-        ]
-        if missing_files:
-            logger.error(
-                "speech model is unavailable (%s); run `python -m pet.speech --install-model` from backend",
-                ", ".join(str(path) for path in missing_files),
-            )
-            return False
-
+        """Find and select an installed OneCore Chinese voice."""
         try:
-            from kokoro import KModel, KPipeline
-
-            model = KModel(
-                repo_id=KOKORO_REPOSITORY,
-                config=str(MODEL_CONFIG_PATH),
-                model=str(MODEL_FILE_PATH),
-            ).to("cpu").eval()
-            pipeline = KPipeline(
-                lang_code="z",
-                repo_id=KOKORO_REPOSITORY,
-                model=model,
-                device="cpu",
-            )
-            pipeline.load_voice(str(VOICE_FILE_PATH))
-        except Exception as error:
-            logger.exception("speech model failed to load; continuing without audio: %s", error)
+            voices = _enumerate_onecore_voices()
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            logger.error("could not enumerate Windows OneCore voices: %s", error)
             return False
 
+        chinese_voices = [voice for voice in voices if voice.language.lower().startswith("zh-")]
+        if not chinese_voices:
+            logger.warning(
+                "no OneCore Chinese voice is installed; %s",
+                WINDOWS_CHINESE_VOICE_INSTALL_INSTRUCTIONS,
+            )
+            return False
+
+        selected_voice = next(
+            (
+                voice
+                for preferred_name in PREFERRED_CHINESE_VOICE_NAMES
+                for voice in chinese_voices
+                if voice.name == preferred_name
+            ),
+            chinese_voices[0],
+        )
         with self._lock:
             if self._is_shutdown:
-                logger.warning("speech model loaded after shutdown request; ignoring it")
+                logger.warning("speech service was shut down before its voice finished loading")
                 return False
-            self._pipeline = pipeline
+            self._voice = selected_voice
 
         if not _has_wave_output_device():
             logger.warning(
-                "no Windows wave output device was detected; speech will synthesize but not play audio"
+                "no Windows wave output device was detected; speech will remain silent"
             )
-        logger.info("local Kokoro Chinese speech model loaded on CPU")
+        logger.info(
+            "OneCore Chinese speech voice loaded: %s (%s)",
+            selected_voice.name,
+            selected_voice.language,
+        )
         return True
 
     def speak(self, text: str) -> Future[None] | None:
-        """Interrupt the previous clip and asynchronously synthesize and play ``text``."""
+        """Interrupt previous playback and asynchronously synthesize and play ``text``."""
         if not text.strip():
             logger.warning("ignoring an empty speech request")
             return None
 
         self.stop()
         request_started_at = time.perf_counter()
-
         with self._lock:
-            if self._pipeline is None:
-                logger.warning("speech request ignored because the local model is unavailable")
+            if self._voice is None:
+                logger.warning("speech request ignored because no OneCore Chinese voice is available")
                 return None
             if self._is_shutdown:
                 logger.warning("speech request ignored because the service is shutting down")
@@ -144,7 +138,7 @@ class SpeechService:
             return future
 
     def stop(self) -> None:
-        """Immediately stop active Windows playback and invalidate pending clips."""
+        """Immediately stop active Windows WAV playback and invalidate pending clips."""
         with self._lock:
             self._generation += 1
             current_future = self._current_future
@@ -155,54 +149,41 @@ class SpeechService:
         _stop_windows_playback()
 
     def synthesize(self, text: str) -> SynthesizedAudio:
-        """Synchronously synthesize a WAV clip without accessing an audio device."""
+        """Produce an in-memory WAV clip without using an audio output device."""
         if not text.strip():
             raise ValueError("speech text must not be empty")
 
         with self._lock:
-            pipeline = self._pipeline
+            voice = self._voice
 
-        if pipeline is None:
-            raise SpeechUnavailableError("local speech model is unavailable")
+        if voice is None:
+            raise RuntimeError("no OneCore Chinese voice is available")
 
-        pcm_frames = bytearray()
-        frame_count = 0
-        for result in pipeline(text, voice=str(VOICE_FILE_PATH)):
-            audio = result.audio
-            if audio is None:
-                continue
+        wav_bytes = _synthesize_onecore_wav(voice.name, text)
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+            frame_rate = wav_file.getframerate()
+            frame_count = wav_file.getnframes()
 
-            samples = audio.detach().cpu().clamp(-1, 1).mul(32767).short()
-            pcm_frames.extend(samples.numpy().tobytes())
-            frame_count += samples.numel()
-
-        if frame_count == 0:
-            raise RuntimeError("speech synthesis returned no audio frames")
-
-        wav_stream = io.BytesIO()
-        with wave.open(wav_stream, "wb") as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(KOKORO_SAMPLE_RATE_HZ)
-            wav_file.writeframes(pcm_frames)
+        if frame_rate <= 0 or frame_count <= 0:
+            raise RuntimeError("OneCore synthesis returned an empty WAV clip")
 
         return SynthesizedAudio(
-            wav_bytes=wav_stream.getvalue(),
-            duration_seconds=frame_count / KOKORO_SAMPLE_RATE_HZ,
+            wav_bytes=wav_bytes,
+            duration_seconds=frame_count / frame_rate,
         )
 
-    def last_metrics(self) -> SpeechMetrics | None:
-        """Return timing captured for the latest clip that reached playback."""
-        with self._lock:
-            return self._last_metrics
-
     def shutdown(self) -> None:
-        """Stop playback and release worker resources during backend shutdown."""
+        """Stop playback and release the background workers during backend shutdown."""
         self.stop()
         with self._lock:
             self._is_shutdown = True
-            self._pipeline = None
+            self._voice = None
         self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def last_metrics(self) -> SpeechMetrics | None:
+        """Return timing captured for the latest request that reached playback."""
+        with self._lock:
+            return self._last_metrics
 
     def _synthesize_and_play(
         self,
@@ -213,8 +194,8 @@ class SpeechService:
         synthesis_started_at = time.perf_counter()
         try:
             audio = self.synthesize(text)
-        except (OSError, RuntimeError, ValueError) as error:
-            logger.exception("speech synthesis failed; skipping this utterance: %s", error)
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+            logger.error("system speech synthesis failed; skipping this utterance: %s", error)
             return
 
         synthesis_finished_at = time.perf_counter()
@@ -229,7 +210,7 @@ class SpeechService:
             )
 
         logger.info(
-            "speech playback started %.3f seconds after utterance dispatch",
+            "system speech playback started %.3f seconds after utterance dispatch",
             playback_started_at - request_started_at,
         )
         _play_windows_wav(audio.wav_bytes)
@@ -239,31 +220,68 @@ class SpeechService:
             return generation == self._generation and not self._is_shutdown
 
 
-def install_speech_model() -> Sequence[Path]:
-    """Download the exact licensed model files used by :class:`SpeechService`."""
+def _enumerate_onecore_voices() -> tuple[OneCoreVoice, ...]:
+    """Return installed Windows Runtime voices without depending on a Python COM package."""
+    output = _run_powershell(_ONECORE_ENUMERATION_SCRIPT)
     try:
-        from huggingface_hub import hf_hub_download
-    except ImportError as error:
-        raise RuntimeError(
-            "speech dependencies are missing; install backend requirements before downloading the model"
-        ) from error
+        payload = json.loads(output.decode("utf-8"))
+    except json.JSONDecodeError as error:
+        raise RuntimeError("OneCore voice enumeration returned invalid JSON") from error
 
-    MODEL_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    downloaded_paths: list[Path] = []
-    for file_name in MODEL_DOWNLOAD_FILES:
-        try:
-            downloaded_path = hf_hub_download(
-                repo_id=KOKORO_REPOSITORY,
-                filename=file_name,
-                local_dir=MODEL_DIRECTORY,
-            )
-        except Exception as error:
-            raise RuntimeError(
-                "unable to download the Kokoro Chinese model; check your network connection and retry"
-            ) from error
-        downloaded_paths.append(Path(downloaded_path))
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        raise RuntimeError("OneCore voice enumeration did not return a list")
 
-    return downloaded_paths
+    voices: list[OneCoreVoice] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        language = item.get("language")
+        if isinstance(name, str) and isinstance(language, str):
+            voices.append(OneCoreVoice(name=name, language=language))
+    return tuple(voices)
+
+
+def _synthesize_onecore_wav(voice_name: str, text: str) -> bytes:
+    """Use OneCore to synthesize text into WAV bytes, never opening an output device."""
+    command = _ONECORE_SYNTHESIS_SCRIPT.replace(
+        "__VOICE_NAME_BASE64__",
+        _base64_utf8(voice_name),
+    ).replace("__TEXT_BASE64__", _base64_utf8(text))
+    wav_bytes = _run_powershell(command)
+    try:
+        return base64.b64decode(wav_bytes, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise RuntimeError("OneCore synthesis did not return valid WAV data") from error
+
+
+def _run_powershell(script: str) -> bytes:
+    """Run an encoded PowerShell command without exposing user text to its parser."""
+    encoded_command = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    result = subprocess.run(
+        [
+            POWERSHELL_EXECUTABLE,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            encoded_command,
+        ],
+        check=False,
+        capture_output=True,
+        timeout=POWERSHELL_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Windows speech command failed with exit code {result.returncode}")
+    return result.stdout.strip()
+
+
+def _base64_utf8(value: str) -> str:
+    """Encode one value safely for insertion into the encoded PowerShell command."""
+    return base64.b64encode(value.encode("utf-8")).decode("ascii")
 
 
 def _has_wave_output_device() -> bool:
@@ -279,9 +297,9 @@ def _has_wave_output_device() -> bool:
 
 
 def _play_windows_wav(wav_bytes: bytes) -> None:
-    """Play one in-memory WAV synchronously from a dedicated worker thread."""
+    """Play an in-memory WAV synchronously from a dedicated worker thread."""
     if sys.platform != "win32":
-        logger.warning("speech playback is only implemented for Windows")
+        logger.warning("system speech playback is only implemented for Windows")
         return
 
     try:
@@ -289,11 +307,11 @@ def _play_windows_wav(wav_bytes: bytes) -> None:
 
         winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
     except (OSError, RuntimeError) as error:
-        logger.warning("speech playback is unavailable; continuing without audio: %s", error)
+        logger.warning("system speech playback is unavailable; continuing silently: %s", error)
 
 
 def _stop_windows_playback() -> None:
-    """Request immediate cancellation of the active Windows wave playback."""
+    """Request immediate cancellation of active Windows WAV playback."""
     if sys.platform != "win32":
         return
 
@@ -302,40 +320,51 @@ def _stop_windows_playback() -> None:
 
         winsound.PlaySound(None, 0)
     except (OSError, RuntimeError) as error:
-        logger.warning("could not stop Windows speech playback: %s", error)
+        logger.warning("could not stop system speech playback: %s", error)
 
 
-def _run_model_installer() -> int:
-    """Provide the documented one-time model installation command."""
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
-    try:
-        downloaded_paths = install_speech_model()
-    except RuntimeError as error:
-        logger.error("speech model installation failed: %s", error)
-        return 1
+_ONECORE_ENUMERATION_SCRIPT = r'''
+$ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$speechType = [Windows.Media.SpeechSynthesis.SpeechSynthesizer,Windows.Media.SpeechSynthesis,ContentType=WindowsRuntime]
+$voices = @($speechType::AllVoices | ForEach-Object {
+  [PSCustomObject]@{ name = $_.DisplayName; language = $_.Language }
+})
+[Console]::Out.Write(($voices | ConvertTo-Json -Compress))
+'''
 
-    logger.info(
-        "speech model installation completed: %s",
-        ", ".join(str(path) for path in downloaded_paths),
-    )
-    return 0
-
-
-def main() -> int:
-    """Run the explicit one-time speech-model installer command."""
-    parser = argparse.ArgumentParser(description="Install the local Kokoro Chinese speech model")
-    parser.add_argument(
-        "--install-model",
-        action="store_true",
-        help="download the model and selected voice into backend/models",
-    )
-    arguments = parser.parse_args()
-    if not arguments.install_model:
-        parser.error("pass --install-model to download the local speech model")
-    return _run_model_installer()
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+_ONECORE_SYNTHESIS_SCRIPT = r'''
+$ErrorActionPreference = "Stop"
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+function Decode-Value([string]$value) {
+  return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($value))
+}
+function Await-WinRt([object]$operation, [type]$resultType) {
+  $method = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq "AsTask" -and $_.IsGenericMethodDefinition -and $_.GetParameters().Count -eq 1
+  } | Select-Object -First 1
+  $task = $method.MakeGenericMethod($resultType).Invoke($null, @($operation))
+  return $task.GetAwaiter().GetResult()
+}
+$speechType = [Windows.Media.SpeechSynthesis.SpeechSynthesizer,Windows.Media.SpeechSynthesis,ContentType=WindowsRuntime]
+$streamType = [Windows.Media.SpeechSynthesis.SpeechSynthesisStream,Windows.Media.SpeechSynthesis,ContentType=WindowsRuntime]
+$synthesizer = New-Object Windows.Media.SpeechSynthesis.SpeechSynthesizer
+$voice = $speechType::AllVoices | Where-Object {
+  $_.DisplayName -eq (Decode-Value "__VOICE_NAME_BASE64__")
+} | Select-Object -First 1
+if ($null -eq $voice) {
+  throw "Requested OneCore voice is not installed"
+}
+$synthesizer.Voice = $voice
+$stream = Await-WinRt (
+  $synthesizer.SynthesizeTextToStreamAsync((Decode-Value "__TEXT_BASE64__"))
+) $streamType
+$reader = New-Object Windows.Storage.Streams.DataReader($stream.GetInputStreamAt(0))
+[void](Await-WinRt ($reader.LoadAsync([uint32]$stream.Size)) ([uint32]))
+$bytes = New-Object byte[] ([int]$stream.Size)
+$reader.ReadBytes($bytes)
+[Console]::Out.Write([Convert]::ToBase64String($bytes))
+$reader.Dispose()
+$stream.Dispose()
+$synthesizer.Dispose()
+'''
