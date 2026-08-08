@@ -2,10 +2,12 @@
 
 from importlib.metadata import version
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
+
+from pet.bridge import PetBridge
 
 HOST = "127.0.0.1"
 PORT = 8737
@@ -20,6 +22,7 @@ class HealthResponse(BaseModel):
 
 
 app = FastAPI(title="AI Gaming Pet")
+pet_bridge = PetBridge()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -36,6 +39,12 @@ app.add_middleware(
 def health() -> HealthResponse:
     """Return the installed project's health and metadata version."""
     return HealthResponse(status="ok", version=version(PACKAGE_NAME))
+
+
+@app.websocket("/ws")
+async def pet_websocket(websocket: WebSocket) -> None:
+    """Serve the persistent dialogue bridge for one desktop pet client."""
+    await pet_bridge.serve(websocket)
 
 
 def run() -> None:
