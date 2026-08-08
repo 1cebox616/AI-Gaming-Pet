@@ -7,5 +7,6 @@ frontend/src-tauri/target/
 frontend/src-tauri/gen/
 dist/
 *.log
+AUDIT.md
 **/config.local.toml
 **/secrets*
