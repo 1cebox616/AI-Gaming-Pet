@@ -10,7 +10,7 @@ use std::{
 };
 
 use tauri::{
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     App, AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, RunEvent, State,
     WebviewWindow, Wry,
@@ -20,6 +20,8 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 const WINDOW_LABEL: &str = "main";
 const PET_NEXT_EXPRESSION_EVENT: &str = "pet-next-expression";
 const SPEAK_NEXT_IDLE_LINE_EVENT: &str = "speak-next-idle-line";
+const SET_SPEECH_ENABLED_EVENT: &str = "set-speech-enabled";
+const SET_MUTED_EVENT: &str = "set-muted";
 const WINDOW_MARGIN_DIP: u32 = 40;
 const CURSOR_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -73,22 +75,36 @@ impl PetInteractionState {
 enum PetMenuAction {
     Speak,
     NextExpression,
+    Speech,
+    AutoSpeak,
     ToggleWindow,
     Quit,
 }
 
-impl PetMenuAction {
-    const ALL: [Self; 4] = [
-        Self::Speak,
-        Self::NextExpression,
-        Self::ToggleWindow,
-        Self::Quit,
-    ];
+#[derive(Clone, Copy)]
+enum PetMenuEntry {
+    Action(PetMenuAction),
+    Separator,
+}
 
+const PET_MENU_LAYOUT: [PetMenuEntry; 8] = [
+    PetMenuEntry::Action(PetMenuAction::Speak),
+    PetMenuEntry::Action(PetMenuAction::NextExpression),
+    PetMenuEntry::Separator,
+    PetMenuEntry::Action(PetMenuAction::Speech),
+    PetMenuEntry::Action(PetMenuAction::AutoSpeak),
+    PetMenuEntry::Separator,
+    PetMenuEntry::Action(PetMenuAction::ToggleWindow),
+    PetMenuEntry::Action(PetMenuAction::Quit),
+];
+
+impl PetMenuAction {
     fn id(self) -> &'static str {
         match self {
             Self::Speak => "speak",
             Self::NextExpression => "next-expression",
+            Self::Speech => "speech",
+            Self::AutoSpeak => "auto-speak",
             Self::ToggleWindow => "toggle-window",
             Self::Quit => "quit",
         }
@@ -98,26 +114,91 @@ impl PetMenuAction {
         match self {
             Self::Speak => "说句话",
             Self::NextExpression => "换个表情",
+            Self::Speech => "语音",
+            Self::AutoSpeak => "自动说话",
             Self::ToggleWindow => "显示/隐藏",
             Self::Quit => "退出",
         }
     }
 
-    fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|action| action.id() == id)
+    fn is_checkable(self) -> bool {
+        matches!(self, Self::Speech | Self::AutoSpeak)
     }
 
-    fn handle(self, app: &AppHandle) {
+    fn from_id(id: &str) -> Option<Self> {
+        PET_MENU_LAYOUT.into_iter().find_map(|entry| match entry {
+            PetMenuEntry::Action(action) if action.id() == id => Some(action),
+            _ => None,
+        })
+    }
+
+    fn handle(self, app: &AppHandle, menu: &PetMenu) {
         match self {
             Self::Speak => request_next_idle_line(app),
             Self::NextExpression => request_next_pet_expression(app),
+            Self::Speech => request_speech_switch(app, menu),
+            Self::AutoSpeak => request_automatic_speech_switch(app, menu),
             Self::ToggleWindow => toggle_main_window_and_log(app),
             Self::Quit => unregister_shortcuts_and_exit(app),
         }
     }
 }
 
-struct PetMenu(Menu<Wry>);
+#[derive(Clone, Copy, Default)]
+struct BackendMenuState {
+    connected: bool,
+    speech_enabled: bool,
+    muted: bool,
+}
+
+struct PetMenu {
+    menu: Menu<Wry>,
+    speech_item: CheckMenuItem<Wry>,
+    auto_speak_item: CheckMenuItem<Wry>,
+    backend_state: Mutex<BackendMenuState>,
+}
+
+impl PetMenu {
+    fn update_backend_state(
+        &self,
+        connected: bool,
+        speech_enabled: bool,
+        muted: bool,
+    ) -> Result<(), String> {
+        let state = BackendMenuState {
+            connected,
+            speech_enabled,
+            muted,
+        };
+        let mut current_state = self
+            .backend_state
+            .lock()
+            .map_err(|_| "pet menu state lock is unavailable")?;
+        *current_state = state;
+        drop(current_state);
+
+        self.speech_item
+            .set_enabled(connected)
+            .map_err(|error| error.to_string())?;
+        self.auto_speak_item
+            .set_enabled(connected)
+            .map_err(|error| error.to_string())?;
+        self.speech_item
+            .set_checked(connected && speech_enabled)
+            .map_err(|error| error.to_string())?;
+        self.auto_speak_item
+            .set_checked(connected && !muted)
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn backend_state(&self) -> Result<BackendMenuState, String> {
+        self.backend_state
+            .lock()
+            .map(|state| *state)
+            .map_err(|_| "pet menu state lock is unavailable".into())
+    }
+}
 
 fn toggle_main_window(app: &AppHandle) -> tauri::Result<()> {
     let Some(window) = app.get_webview_window(WINDOW_LABEL) else {
@@ -152,6 +233,46 @@ fn request_next_idle_line(app: &AppHandle) {
     }
 }
 
+fn request_speech_switch(app: &AppHandle, menu: &PetMenu) {
+    let state = match menu.backend_state() {
+        Ok(state) if state.connected => state,
+        Ok(_) => return,
+        Err(error) => {
+            eprintln!("failed to read pet menu state: {error}");
+            return;
+        }
+    };
+
+    if let Err(error) = menu.speech_item.set_checked(state.speech_enabled) {
+        eprintln!("failed to restore authoritative speech menu state: {error}");
+    }
+    if let Err(error) = app.emit_to(
+        WINDOW_LABEL,
+        SET_SPEECH_ENABLED_EVENT,
+        !state.speech_enabled,
+    ) {
+        eprintln!("failed to request a speech switch change: {error}");
+    }
+}
+
+fn request_automatic_speech_switch(app: &AppHandle, menu: &PetMenu) {
+    let state = match menu.backend_state() {
+        Ok(state) if state.connected => state,
+        Ok(_) => return,
+        Err(error) => {
+            eprintln!("failed to read pet menu state: {error}");
+            return;
+        }
+    };
+
+    if let Err(error) = menu.auto_speak_item.set_checked(!state.muted) {
+        eprintln!("failed to restore authoritative automatic speech menu state: {error}");
+    }
+    if let Err(error) = app.emit_to(WINDOW_LABEL, SET_MUTED_EVENT, !state.muted) {
+        eprintln!("failed to request an automatic speech switch change: {error}");
+    }
+}
+
 fn unregister_shortcuts_and_exit(app: &AppHandle) {
     if let Err(error) = app.global_shortcut().unregister_all() {
         eprintln!("failed to unregister global shortcuts: {error}");
@@ -161,13 +282,57 @@ fn unregister_shortcuts_and_exit(app: &AppHandle) {
     app.exit(0);
 }
 
-fn build_pet_menu(app: &App) -> tauri::Result<Menu<Wry>> {
+fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
     let menu = Menu::new(app)?;
-    for action in PetMenuAction::ALL {
-        let item = MenuItem::with_id(app, action.id(), action.text(), true, None::<&str>)?;
-        menu.append(&item)?;
+    let mut speech_item = None;
+    let mut auto_speak_item = None;
+
+    for entry in PET_MENU_LAYOUT {
+        match entry {
+            PetMenuEntry::Separator => {
+                let separator = PredefinedMenuItem::separator(app)?;
+                menu.append(&separator)?;
+            }
+            PetMenuEntry::Action(action) if action.is_checkable() => {
+                let item = CheckMenuItem::with_id(
+                    app,
+                    action.id(),
+                    action.text(),
+                    false,
+                    false,
+                    None::<&str>,
+                )?;
+                menu.append(&item)?;
+                match action {
+                    PetMenuAction::Speech => speech_item = Some(item),
+                    PetMenuAction::AutoSpeak => auto_speak_item = Some(item),
+                    _ => unreachable!("only switch actions are checkable"),
+                }
+            }
+            PetMenuEntry::Action(action) => {
+                let item = MenuItem::with_id(app, action.id(), action.text(), true, None::<&str>)?;
+                menu.append(&item)?;
+            }
+        }
     }
-    Ok(menu)
+
+    Ok(PetMenu {
+        menu,
+        speech_item: speech_item.expect("speech switch must be present in the pet menu layout"),
+        auto_speak_item: auto_speak_item
+            .expect("automatic speech switch must be present in the pet menu layout"),
+        backend_state: Mutex::new(BackendMenuState::default()),
+    })
+}
+
+#[tauri::command]
+fn update_pet_menu_state(
+    connected: bool,
+    speech_enabled: bool,
+    muted: bool,
+    menu: State<'_, PetMenu>,
+) -> Result<(), String> {
+    menu.update_backend_state(connected, speech_enabled, muted)
 }
 
 #[tauri::command]
@@ -216,7 +381,7 @@ fn show_pet_menu(
     menu: State<'_, PetMenu>,
     position: LogicalPosition<f64>,
 ) -> tauri::Result<()> {
-    window.popup_menu_at(&menu.0, position)
+    window.popup_menu_at(&menu.menu, position)
 }
 
 #[cfg(target_os = "windows")]
@@ -387,7 +552,8 @@ fn main() {
     let application = tauri::Builder::default()
         .on_menu_event(|app, event| {
             if let Some(action) = PetMenuAction::from_id(event.id().as_ref()) {
-                action.handle(app);
+                let menu = app.state::<PetMenu>();
+                action.handle(app, &menu);
             }
         })
         .plugin(
@@ -407,8 +573,9 @@ fn main() {
             let shortcut = Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyP);
             app.global_shortcut().register(shortcut)?;
             let menu = build_pet_menu(app)?;
-            app.manage(PetMenu(menu.clone()));
-            configure_tray(app, &menu)?;
+            let tray_menu = menu.menu.clone();
+            app.manage(menu);
+            configure_tray(app, &tray_menu)?;
 
             if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
                 window.show()?;
@@ -422,7 +589,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             report_pet_interaction_region,
             mark_pet_dragging,
-            show_pet_menu
+            show_pet_menu,
+            update_pet_menu_state
         ])
         .build(tauri::generate_context!())
         .expect("error while building AI Gaming Pet");

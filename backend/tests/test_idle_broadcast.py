@@ -57,6 +57,13 @@ def _assert_utterance(message: dict[str, Any]) -> None:
     assert message["emotion"]
 
 
+def _receive_initial_messages(websocket: Any) -> None:
+    """Consume the required state-first handshake followed by its greeting."""
+    state = websocket.receive_json()
+    assert state == {"type": "state", "speech_enabled": False, "muted": False}
+    _assert_utterance(websocket.receive_json())
+
+
 def test_idle_broadcast_reaches_two_clients_with_one_shared_utterance() -> None:
     """The background loop broadcasts exactly one generated line to all live pets."""
     app, _ = _create_idle_test_app(
@@ -65,9 +72,9 @@ def test_idle_broadcast_reaches_two_clients_with_one_shared_utterance() -> None:
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as first_websocket:
-            _assert_utterance(first_websocket.receive_json())
+            _receive_initial_messages(first_websocket)
             with client.websocket_connect("/ws") as second_websocket:
-                _assert_utterance(second_websocket.receive_json())
+                _receive_initial_messages(second_websocket)
 
                 first_broadcast = first_websocket.receive_json()
                 second_broadcast = second_websocket.receive_json()
@@ -85,7 +92,7 @@ def test_failed_broadcast_connection_is_removed_without_blocking_a_live_pet() ->
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as live_websocket:
-            _assert_utterance(live_websocket.receive_json())
+            _receive_initial_messages(live_websocket)
             with client.websocket_connect("/closed"):
                 live_broadcast = live_websocket.receive_json()
 
@@ -101,7 +108,7 @@ def test_manual_idle_request_restarts_the_automatic_broadcast_interval() -> None
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as websocket:
-            _assert_utterance(websocket.receive_json())
+            _receive_initial_messages(websocket)
             time.sleep(6)
             websocket.send_json({"type": "request_idle_line"})
             manual_reply = websocket.receive_json()

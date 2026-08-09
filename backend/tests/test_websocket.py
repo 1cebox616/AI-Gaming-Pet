@@ -23,14 +23,33 @@ def assert_utterance_message(message: dict[str, Any]) -> None:
     }
 
 
+def assert_state_message(
+    message: dict[str, Any],
+    *,
+    speech_enabled: bool,
+    muted: bool,
+) -> None:
+    """Assert the complete authoritative runtime state protocol message."""
+    assert message == {
+        "type": "state",
+        "speech_enabled": speech_enabled,
+        "muted": muted,
+    }
+
+
 def test_websocket_greets_requests_idle_lines_and_survives_invalid_json() -> None:
     """The real bridge greets, replies, and remains usable after invalid input."""
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as first_websocket:
+            first_state = first_websocket.receive_json()
+            assert first_state["type"] == "state"
+            assert isinstance(first_state["speech_enabled"], bool)
+            assert isinstance(first_state["muted"], bool)
             first_greeting = first_websocket.receive_json()
             assert_utterance_message(first_greeting)
 
             with client.websocket_connect("/ws") as second_websocket:
+                assert second_websocket.receive_json() == first_state
                 second_greeting = second_websocket.receive_json()
                 assert_utterance_message(second_greeting)
                 assert second_greeting["id"] != first_greeting["id"]
@@ -46,3 +65,64 @@ def test_websocket_greets_requests_idle_lines_and_survives_invalid_json() -> Non
                 second_reply = second_websocket.receive_json()
                 assert_utterance_message(second_reply)
                 assert second_reply["id"] != second_greeting["id"]
+
+
+def test_runtime_switches_broadcast_authoritative_state_and_reject_invalid_values() -> None:
+    """Both switches broadcast real state while invalid values leave the socket usable."""
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as first_websocket:
+            initial_state = first_websocket.receive_json()
+            first_websocket.receive_json()
+
+            with client.websocket_connect("/ws") as second_websocket:
+                assert second_websocket.receive_json() == initial_state
+                second_websocket.receive_json()
+
+                requested_speech = not initial_state["speech_enabled"]
+                first_websocket.send_json(
+                    {"type": "set_speech_enabled", "value": requested_speech}
+                )
+                assert_state_message(
+                    first_websocket.receive_json(),
+                    speech_enabled=requested_speech,
+                    muted=initial_state["muted"],
+                )
+                assert_state_message(
+                    second_websocket.receive_json(),
+                    speech_enabled=requested_speech,
+                    muted=initial_state["muted"],
+                )
+
+                requested_muted = not initial_state["muted"]
+                second_websocket.send_json({"type": "set_muted", "value": requested_muted})
+                assert_state_message(
+                    first_websocket.receive_json(),
+                    speech_enabled=requested_speech,
+                    muted=requested_muted,
+                )
+                assert_state_message(
+                    second_websocket.receive_json(),
+                    speech_enabled=requested_speech,
+                    muted=requested_muted,
+                )
+
+                second_websocket.send_json(
+                    {"type": "set_speech_enabled", "value": "not-a-boolean"}
+                )
+                second_websocket.send_json({"type": "set_muted", "value": 1})
+                second_websocket.send_json({"type": "request_idle_line"})
+                assert_utterance_message(second_websocket.receive_json())
+
+                first_websocket.send_json(
+                    {
+                        "type": "set_speech_enabled",
+                        "value": initial_state["speech_enabled"],
+                    }
+                )
+                first_websocket.receive_json()
+                second_websocket.receive_json()
+                first_websocket.send_json(
+                    {"type": "set_muted", "value": initial_state["muted"]}
+                )
+                first_websocket.receive_json()
+                second_websocket.receive_json()

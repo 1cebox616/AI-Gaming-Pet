@@ -70,13 +70,10 @@ class SpeechService:
         self._current_future: Future[None] | None = None
         self._last_metrics: SpeechMetrics | None = None
         self._is_shutdown = False
+        self._enabled = self._configuration.enabled
 
     def load(self) -> bool:
         """Find and select an installed OneCore Chinese voice."""
-        if not self._configuration.enabled:
-            logger.info("speech is disabled by backend configuration")
-            return True
-
         try:
             voices = _enumerate_onecore_voices()
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
@@ -110,6 +107,8 @@ class SpeechService:
             selected_voice.name,
             selected_voice.language,
         )
+        if not self._enabled:
+            logger.info("speech is disabled by backend configuration")
         return True
 
     def speak(self, text: str) -> Future[None] | None:
@@ -117,12 +116,11 @@ class SpeechService:
         if not text.strip():
             logger.warning("ignoring an empty speech request")
             return None
-        if not self._configuration.enabled:
-            return None
-
         self.stop()
         request_started_at = time.perf_counter()
         with self._lock:
+            if not self._enabled:
+                return None
             if self._voice is None:
                 logger.warning("speech request ignored because no OneCore Chinese voice is available")
                 return None
@@ -140,6 +138,22 @@ class SpeechService:
             )
             self._current_future = future
             return future
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Apply the runtime speech switch, stopping playback when disabled."""
+        with self._lock:
+            changed = self._enabled != enabled
+            self._enabled = enabled
+
+        if changed and not enabled:
+            self.stop()
+        if changed:
+            logger.info("runtime speech is now %s", "enabled" if enabled else "disabled")
+
+    def is_enabled(self) -> bool:
+        """Return the authoritative runtime speech state."""
+        with self._lock:
+            return self._enabled
 
     def stop(self) -> None:
         """Immediately stop active Windows WAV playback and invalidate pending clips."""

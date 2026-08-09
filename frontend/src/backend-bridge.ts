@@ -1,3 +1,5 @@
+import { invoke } from "@tauri-apps/api/core";
+
 import { isPetExpression, setPetDimmed, setPetExpression } from "./pet";
 import { showSpeech } from "./bubble";
 
@@ -15,6 +17,12 @@ interface UtteranceMessage {
   emotion: string;
 }
 
+interface StateMessage {
+  type: "state";
+  speech_enabled: boolean;
+  muted: boolean;
+}
+
 let connection: WebSocket | undefined;
 let reconnectTimer: number | undefined;
 let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
@@ -24,6 +32,21 @@ let lastUtteranceId: string | undefined;
 function setPetDisconnected(): void {
   setPetExpression("speechless");
   setPetDimmed(true);
+  updatePetMenuState(false, false, false);
+}
+
+function updatePetMenuState(
+  connected: boolean,
+  speechEnabled: boolean,
+  muted: boolean,
+): void {
+  void invoke("update_pet_menu_state", {
+    connected,
+    speechEnabled,
+    muted,
+  }).catch((error: unknown) => {
+    console.error("failed to synchronize pet menu state", error);
+  });
 }
 
 function isUtteranceMessage(value: unknown): value is UtteranceMessage {
@@ -39,6 +62,19 @@ function isUtteranceMessage(value: unknown): value is UtteranceMessage {
     typeof message.text === "string" &&
     message.text.length > 0 &&
     typeof message.emotion === "string"
+  );
+}
+
+function isStateMessage(value: unknown): value is StateMessage {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const message = value as Partial<StateMessage>;
+  return (
+    message.type === "state" &&
+    typeof message.speech_enabled === "boolean" &&
+    typeof message.muted === "boolean"
   );
 }
 
@@ -70,6 +106,11 @@ function handleMessage(event: MessageEvent<unknown>): void {
     message = JSON.parse(event.data);
   } catch {
     console.warn("ignoring invalid JSON from pet WebSocket server");
+    return;
+  }
+
+  if (isStateMessage(message)) {
+    updatePetMenuState(true, message.speech_enabled, message.muted);
     return;
   }
 
@@ -147,4 +188,20 @@ export function requestIdleLine(): void {
   }
 
   connection.send(JSON.stringify({ type: "request_idle_line" }));
+}
+
+export function setSpeechEnabled(value: boolean): void {
+  sendRuntimeSwitch("set_speech_enabled", value);
+}
+
+export function setMuted(value: boolean): void {
+  sendRuntimeSwitch("set_muted", value);
+}
+
+function sendRuntimeSwitch(type: string, value: boolean): void {
+  if (connection?.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  connection.send(JSON.stringify({ type, value }));
 }

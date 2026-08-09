@@ -7,9 +7,10 @@ import json
 import logging
 import random
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 
 from pet.config import IdleConfig
 from pet.lines import Utterance, next_idle_utterance
@@ -19,6 +20,17 @@ logger = logging.getLogger(__name__)
 
 UTTERANCE_MESSAGE_TYPE = "utterance"
 REQUEST_IDLE_LINE_MESSAGE_TYPE = "request_idle_line"
+STATE_MESSAGE_TYPE = "state"
+SET_SPEECH_ENABLED_MESSAGE_TYPE = "set_speech_enabled"
+SET_MUTED_MESSAGE_TYPE = "set_muted"
+
+
+class BridgeStateMessage(BaseModel):
+    """Authoritative runtime switches sent to every desktop client."""
+
+    type: Literal["state"] = STATE_MESSAGE_TYPE
+    speech_enabled: bool
+    muted: bool
 
 
 class PetBridge:
@@ -34,12 +46,11 @@ class PetBridge:
         self._idle_configuration = idle_configuration or IdleConfig()
         self._idle_task: asyncio.Task[None] | None = None
         self._idle_reset_event: asyncio.Event | None = None
+        self._speech_enabled = speech_service.is_enabled()
+        self._muted = not self._idle_configuration.enabled
 
     async def start_idle_broadcasts(self) -> None:
-        """Start the optional randomized idle broadcast loop once per app lifetime."""
-        if not self._idle_configuration.enabled:
-            logger.info("idle broadcasts are disabled by backend configuration")
-            return
+        """Start the randomized idle loop, initially paused when configured off."""
         if self._idle_task is not None and not self._idle_task.done():
             return
 
@@ -69,6 +80,7 @@ class PetBridge:
         self._connections.add(websocket)
 
         try:
+            await self._send_state(websocket)
             await self._send_utterance(websocket, next_idle_utterance())
 
             while True:
@@ -90,12 +102,29 @@ class PetBridge:
             logger.warning("ignoring non-object pet WebSocket message")
             return
 
-        if message.get("type") != REQUEST_IDLE_LINE_MESSAGE_TYPE:
-            logger.warning("ignoring unknown pet WebSocket message type")
+        message_type = message.get("type")
+        if message_type == REQUEST_IDLE_LINE_MESSAGE_TYPE:
+            self._reset_idle_timer()
+            await self._send_utterance(websocket, next_idle_utterance())
             return
 
-        self._reset_idle_timer()
-        await self._send_utterance(websocket, next_idle_utterance())
+        if message_type == SET_SPEECH_ENABLED_MESSAGE_TYPE:
+            value = message.get("value")
+            if type(value) is not bool:
+                logger.warning("ignoring set_speech_enabled with a non-boolean value")
+                return
+            await self._set_speech_enabled(value)
+            return
+
+        if message_type == SET_MUTED_MESSAGE_TYPE:
+            value = message.get("value")
+            if type(value) is not bool:
+                logger.warning("ignoring set_muted with a non-boolean value")
+                return
+            await self._set_muted(value)
+            return
+
+        logger.warning("ignoring unknown pet WebSocket message type")
 
     async def _run_idle_broadcasts(self) -> None:
         """Wait a randomized interval and broadcast only when a pet is connected."""
@@ -112,6 +141,11 @@ class PetBridge:
                 return
 
             reset_event.clear()
+            if self._muted:
+                logger.info("automatic idle speech is paused by the runtime switch")
+                await reset_event.wait()
+                continue
+
             interval_seconds = random.randint(
                 configuration.min_interval_seconds,
                 configuration.max_interval_seconds,
@@ -124,7 +158,37 @@ class PetBridge:
                     continue
                 await self._broadcast_utterance(next_idle_utterance())
             else:
-                logger.info("idle broadcast timer reset after a manual dialogue request")
+                logger.info("idle broadcast timer reset after a runtime or manual change")
+
+    async def _set_speech_enabled(self, enabled: bool) -> None:
+        """Apply one speech switch request and publish the resulting state."""
+        if self._speech_enabled == enabled:
+            return
+
+        self._speech_enabled = enabled
+        self._speech_service.set_enabled(enabled)
+        await self._broadcast_state()
+
+    async def _set_muted(self, muted: bool) -> None:
+        """Apply one automatic-speech switch request and reset its timer."""
+        if self._muted == muted:
+            return
+
+        self._muted = muted
+        self._reset_idle_timer()
+        await self._broadcast_state()
+
+    async def _broadcast_state(self) -> None:
+        """Publish runtime state to live clients and discard failed connections."""
+        for websocket in tuple(self._connections):
+            try:
+                await self._send_state(websocket)
+            except Exception as error:
+                logger.warning(
+                    "removing pet WebSocket connection after state broadcast failure: %s",
+                    error,
+                )
+                self._connections.discard(websocket)
 
     async def _broadcast_utterance(self, utterance: Utterance) -> None:
         """Deliver one utterance to every live client, removing failed connections."""
@@ -167,3 +231,11 @@ class PetBridge:
         )
         if speak:
             self._speech_service.speak(utterance.text)
+
+    async def _send_state(self, websocket: WebSocket) -> None:
+        """Send the current authoritative switches to one connected client."""
+        message = BridgeStateMessage(
+            speech_enabled=self._speech_enabled,
+            muted=self._muted,
+        )
+        await websocket.send_json(message.model_dump())
