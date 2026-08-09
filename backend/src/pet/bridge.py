@@ -25,6 +25,7 @@ STATE_MESSAGE_TYPE = "state"
 SET_SPEECH_ENABLED_MESSAGE_TYPE = "set_speech_enabled"
 SET_MUTED_MESSAGE_TYPE = "set_muted"
 GAME_PROGRESS_BROADCAST_INTERVAL_SECONDS = 1.0
+IDLE_GAME_STATES = {"offline", "menu"}
 
 
 class BridgeStateMessage(BaseModel):
@@ -55,6 +56,7 @@ class PetBridge:
         self._game = initial_game or GameState.offline()
         self._last_game_broadcast_at = float("-inf")
         self._pending_game_broadcast: asyncio.Task[None] | None = None
+        self._utterance_broadcast_lock = asyncio.Lock()
 
     async def start_idle_broadcasts(self) -> None:
         """Start the randomized idle loop, initially paused when configured off."""
@@ -149,8 +151,13 @@ class PetBridge:
                 return
 
             reset_event.clear()
-            if self._muted:
-                logger.info("automatic idle speech is paused by the runtime switch")
+            if self._muted or self._game.state not in IDLE_GAME_STATES:
+                reason = (
+                    "the runtime switch"
+                    if self._muted
+                    else f"CS2 state {self._game.state}"
+                )
+                logger.info("automatic idle speech is paused by %s", reason)
                 await reset_event.wait()
                 continue
 
@@ -164,7 +171,11 @@ class PetBridge:
                 if not self._connections:
                     logger.info("idle broadcast interval elapsed with no connected pets")
                     continue
-                await self._broadcast_utterance(next_idle_utterance())
+                await self._broadcast_utterance(
+                    next_idle_utterance(),
+                    source="automatic idle",
+                    skip_when_muted=True,
+                )
             else:
                 logger.info("idle broadcast timer reset after a runtime or manual change")
 
@@ -197,6 +208,8 @@ class PetBridge:
             return
 
         self._game = game
+        if (previous.state in IDLE_GAME_STATES) != (game.state in IDLE_GAME_STATES):
+            self._reset_idle_timer()
         if not self._connections:
             return
 
@@ -252,24 +265,50 @@ class PetBridge:
                 )
                 self._connections.discard(websocket)
 
-    async def _broadcast_utterance(self, utterance: Utterance) -> None:
-        """Deliver one utterance to every live client, removing failed connections."""
-        delivered_connections = 0
-        for websocket in tuple(self._connections):
-            try:
-                await self._send_utterance(websocket, utterance, speak=False)
-            except Exception as error:
-                logger.warning("removing pet WebSocket connection after broadcast failure: %s", error)
-                self._connections.discard(websocket)
-            else:
-                delivered_connections += 1
+    async def broadcast_commentary(self, utterance: Utterance) -> None:
+        """Send selected game commentary through the existing pet output chain."""
+        await self._broadcast_utterance(
+            utterance,
+            source="game commentary",
+            skip_when_muted=True,
+        )
 
-        if delivered_connections:
-            self._speech_service.speak(utterance.text)
-            logger.info(
-                "automatic idle utterance broadcast to %s connected pet(s)",
-                delivered_connections,
-            )
+    def is_muted(self) -> bool:
+        """Return the authoritative automatic-speech switch state."""
+        return self._muted
+
+    async def _broadcast_utterance(
+        self,
+        utterance: Utterance,
+        *,
+        source: str,
+        skip_when_muted: bool,
+    ) -> None:
+        """Deliver one utterance to every live client, removing failed connections."""
+        async with self._utterance_broadcast_lock:
+            if skip_when_muted and self._muted:
+                logger.info("%s utterance was skipped because automatic speech is muted", source)
+                return
+            delivered_connections = 0
+            for websocket in tuple(self._connections):
+                try:
+                    await self._send_utterance(websocket, utterance, speak=False)
+                except Exception as error:
+                    logger.warning(
+                        "removing pet WebSocket connection after broadcast failure: %s",
+                        error,
+                    )
+                    self._connections.discard(websocket)
+                else:
+                    delivered_connections += 1
+
+            if delivered_connections:
+                self._speech_service.speak(utterance.text)
+                logger.info(
+                    "%s utterance broadcast to %s connected pet(s)",
+                    source,
+                    delivered_connections,
+                )
 
     def _reset_idle_timer(self) -> None:
         """Restart the automatic interval after an on-demand idle line."""

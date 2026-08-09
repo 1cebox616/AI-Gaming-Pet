@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from pet.bridge import PetBridge
 from pet.config import IdleConfig, SpeechConfig
+from pet.session import GameState
 from pet.speech import SpeechService
 
 
@@ -42,6 +43,10 @@ def _create_idle_test_app(idle_configuration: IdleConfig) -> tuple[FastAPI, PetB
         bridge._connections.add(websocket)
         await websocket.close()
         await asyncio.sleep(12)
+
+    @app.post("/game")
+    async def update_game(game: GameState) -> None:
+        await bridge.update_game(game)
 
     return app, bridge
 
@@ -135,3 +140,42 @@ def test_manual_idle_request_restarts_the_automatic_broadcast_interval() -> None
     _assert_utterance(automatic_reply)
     assert automatic_reply["id"] != manual_reply["id"]
     assert 9 <= automatic_elapsed <= 12
+
+
+def test_gameplay_pauses_idle_broadcast_and_menu_restarts_full_interval() -> None:
+    """No idle line is queued in-game; returning to menu starts a fresh wait."""
+    app, _ = _create_idle_test_app(
+        IdleConfig(enabled=True, min_interval_seconds=10, max_interval_seconds=10)
+    )
+    playing = GameState(
+        state="playing",
+        mode="casual",
+        map="de_anubis",
+        round=3,
+        score_ct=1,
+        score_t=1,
+        subject_steamid="76561198000000001",
+        subject_is_self=True,
+    )
+    menu = GameState(
+        state="menu",
+        subject_steamid="76561198000000001",
+        subject_is_self=True,
+    )
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as websocket:
+            _receive_initial_messages(websocket)
+            assert client.post("/game", json=playing.model_dump()).status_code == 200
+            assert websocket.receive_json()["game"]["state"] == "playing"
+
+            time.sleep(10.5)
+            assert client.post("/game", json=menu.model_dump()).status_code == 200
+            menu_message = websocket.receive_json()
+            resumed_at = time.perf_counter()
+            automatic_reply = websocket.receive_json()
+            resumed_elapsed = time.perf_counter() - resumed_at
+
+    assert menu_message["game"]["state"] == "menu"
+    _assert_utterance(automatic_reply)
+    assert 9 <= resumed_elapsed <= 12

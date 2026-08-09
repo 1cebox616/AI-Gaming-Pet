@@ -448,7 +448,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--with-policy",
         action="store_true",
-        help="展示每个事件的发言策略决定与丢弃原因",
+        help="展示发言策略决定、丢弃原因与实际模板话术",
     )
     return parser
 
@@ -458,15 +458,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     configuration = load_config()
     if args.with_policy:
-        from pet.policy import format_policy_replay, replay_policy
+        from pet.commentary import format_commentary_replay, replay_commentary
 
         snapshots = _load_recording(args.replay)
-        policy_result = replay_policy(
+        commentary_result = replay_commentary(
             snapshots,
             configuration.events,
             configuration.policy,
         )
-        print(format_policy_replay(policy_result))
+        print(format_commentary_replay(commentary_result))
         return 0
 
     result = replay_recording(args.replay, configuration.events)

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from pet.bridge import PetBridge
+from pet.commentary import GameCommentaryEngine
 from pet.config import load_config
 from pet.gsi import (
     GSI_SILENCE_SECONDS,
@@ -64,11 +65,23 @@ configuration = load_config()
 speech_service = SpeechService(configuration.speech)
 pet_bridge = PetBridge(speech_service, configuration.idle)
 game_session_tracker = GameSessionTracker(offline_timeout_seconds=GSI_SILENCE_SECONDS)
+game_commentary_engine = GameCommentaryEngine(
+    configuration.events,
+    configuration.policy,
+)
 
 
 async def observe_gsi_snapshot(snapshot: GameSnapshot) -> None:
     """Interpret one GSI snapshot and synchronize connected desktop clients."""
-    await pet_bridge.update_game(game_session_tracker.observe(snapshot))
+    game = game_session_tracker.observe(snapshot)
+    commentary = game_commentary_engine.observe(
+        snapshot,
+        game,
+        muted=pet_bridge.is_muted(),
+    )
+    await pet_bridge.update_game(game)
+    if commentary.utterance is not None:
+        await pet_bridge.broadcast_commentary(commentary.utterance)
 
 
 async def mark_gsi_offline() -> None:
