@@ -19,7 +19,7 @@ LOCAL_CONFIG_PATH = DEFAULT_CONFIG_PATH.with_name("config.local.toml")
 class SpeechConfig(BaseModel):
     """Speech behavior selected once when the backend starts."""
 
-    model_config = ConfigDict(strict=True)
+    model_config = ConfigDict(strict=True, extra="forbid")
 
     enabled: bool = True
     voice_name: str = ""
@@ -28,7 +28,7 @@ class SpeechConfig(BaseModel):
 class IdleConfig(BaseModel):
     """Randomized idle-dialogue interval settings."""
 
-    model_config = ConfigDict(strict=True)
+    model_config = ConfigDict(strict=True, extra="forbid")
 
     enabled: bool = True
     min_interval_seconds: int = Field(default=45, ge=10, le=3600)
@@ -38,7 +38,7 @@ class IdleConfig(BaseModel):
 class PetConfig(BaseModel):
     """The complete runtime configuration for the local pet backend."""
 
-    model_config = ConfigDict(strict=True)
+    model_config = ConfigDict(strict=True, extra="forbid")
 
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
     idle: IdleConfig = Field(default_factory=IdleConfig)

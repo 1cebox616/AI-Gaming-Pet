@@ -1,5 +1,6 @@
 """Real Windows system-speech synthesis and interruptible playback tests."""
 
+import ctypes
 import sys
 import time
 from concurrent.futures import Future
@@ -7,7 +8,7 @@ from concurrent.futures import Future
 import pytest
 
 from pet.lines import IDLE_UTTERANCES
-from pet.speech import SpeechMetrics, SpeechService, _has_wave_output_device
+from pet.speech import SpeechMetrics, SpeechService
 
 INTERRUPTION_LIMIT_SECONDS = 1.3
 STOP_AFTER_PLAYBACK_SECONDS = 1.0
@@ -33,7 +34,7 @@ def create_playable_speech_service() -> SpeechService:
     """Load real speech and skip only when Windows has no audio output device."""
     if sys.platform != "win32":
         pytest.skip("requires Windows waveform audio playback")
-    if not _has_wave_output_device():
+    if ctypes.windll.winmm.waveOutGetNumDevs() == 0:
         pytest.skip("Windows has no audio output device for the real interruption test")
     return create_loaded_speech_service()
 

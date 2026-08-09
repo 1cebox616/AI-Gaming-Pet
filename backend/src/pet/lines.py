@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 Emotion = Literal["neutral", "happy", "angry", "surprised", "speechless"]
 
@@ -10,8 +10,8 @@ Emotion = Literal["neutral", "happy", "angry", "surprised", "speechless"]
 class Utterance(BaseModel):
     """A line of pet dialogue sent to connected desktop clients."""
 
-    id: str
-    text: str
+    id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
     emotion: Emotion
 
 

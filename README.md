@@ -5,7 +5,8 @@
 ## 开发环境
 
 - Windows 11
-- Python 3.12
+- Python 3.12；`python` 必须能在 PowerShell 中直接调用。若未加入 PATH，可用
+  `py -3.12` 替代下文命令中的 `python`，或使用 Python 3.12 `python.exe` 的完整路径
 - Node.js 24.19.0 或更高版本
 - Rust toolchain 1.97.1 或更高版本（MSVC 工具链）
 

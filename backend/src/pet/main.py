@@ -7,7 +7,7 @@ import logging
 
 from importlib.metadata import version
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -20,6 +20,13 @@ HOST = "127.0.0.1"
 PORT = 8737
 PACKAGE_NAME = "pet"
 PET_LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+ALLOWED_ORIGINS: tuple[str, ...] = (
+    "http://127.0.0.1:1420",
+    "http://localhost:1420",
+    "tauri://localhost",
+)
+
+logger = logging.getLogger(__name__)
 
 
 def configure_pet_logging() -> None:
@@ -65,11 +72,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="AI Gaming Pet", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:1420",
-        "http://localhost:1420",
-        "tauri://localhost",
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["GET"],
     allow_headers=[],
 )
@@ -84,6 +87,12 @@ def health() -> HealthResponse:
 @app.websocket("/ws")
 async def pet_websocket(websocket: WebSocket) -> None:
     """Serve the persistent dialogue bridge for one desktop pet client."""
+    origin = websocket.headers.get("origin")
+    if origin is not None and origin not in ALLOWED_ORIGINS:
+        logger.warning("rejecting pet WebSocket connection from origin %r", origin)
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await pet_bridge.serve(websocket)
 
 

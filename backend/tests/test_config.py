@@ -136,6 +136,30 @@ def test_invalid_speech_section_preserves_valid_idle_customization(
     assert "configuration section idle" not in caplog.text
 
 
+def test_unknown_field_falls_back_only_its_section_and_logs_field_name(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A misspelled setting is visible and cannot discard another valid section."""
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[speech]\nenabeld = false\nvoice_name = \"Microsoft Yaoyao\"\n\n"
+        "[idle]\nenabled = false\nmin_interval_seconds = 30\nmax_interval_seconds = 60\n",
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="pet.config")
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.speech.enabled is True
+    assert configuration.speech.voice_name == ""
+    assert configuration.idle.enabled is False
+    assert configuration.idle.min_interval_seconds == 30
+    assert configuration.idle.max_interval_seconds == 60
+    assert "configuration section speech at speech.enabeld" in caplog.text
+    assert "configuration section idle" not in caplog.text
+
+
 def test_reversed_idle_interval_is_swapped(tmp_path: Path) -> None:
     """A valid but reversed interval remains usable in the intended range."""
     default_path = tmp_path / "config.toml"

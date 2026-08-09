@@ -2,9 +2,11 @@
 
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
-from pet.main import app
+from pet.main import ALLOWED_ORIGINS, app
 
 
 def assert_utterance_message(message: dict[str, Any]) -> None:
@@ -35,6 +37,51 @@ def assert_state_message(
         "speech_enabled": speech_enabled,
         "muted": muted,
     }
+
+
+def assert_initial_messages(websocket: Any) -> None:
+    """Assert the state-first handshake and nonempty greeting."""
+    state = websocket.receive_json()
+    assert state["type"] == "state"
+    assert isinstance(state["speech_enabled"], bool)
+    assert isinstance(state["muted"], bool)
+    assert_utterance_message(websocket.receive_json())
+
+
+def test_websocket_allows_whitelisted_origin() -> None:
+    """A browser connection from an existing development origin is accepted."""
+    with TestClient(app) as client:
+        with client.websocket_connect(
+            "/ws",
+            headers={"Origin": ALLOWED_ORIGINS[0]},
+        ) as websocket:
+            assert_initial_messages(websocket)
+
+
+def test_websocket_allows_missing_origin() -> None:
+    """Native clients and test tools without Origin remain supported."""
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as websocket:
+            assert_initial_messages(websocket)
+
+
+def test_websocket_rejects_unknown_origin_and_logs_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An untrusted browser origin is rejected before the bridge accepts it."""
+    rejected_origin = "https://untrusted.example"
+    caplog.set_level("WARNING", logger="pet.main")
+
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect) as error:
+            with client.websocket_connect(
+                "/ws",
+                headers={"Origin": rejected_origin},
+            ):
+                pytest.fail("untrusted WebSocket origin was unexpectedly accepted")
+
+    assert error.value.code == 1008
+    assert rejected_origin in caplog.text
 
 
 def test_websocket_greets_requests_idle_lines_and_survives_invalid_json() -> None:

@@ -267,10 +267,6 @@ export function setPetExpression(expression?: PetExpression): void {
   renderExpression();
 }
 
-export function getPetExpression(): string {
-  return currentExpression;
-}
-
 export function isPetExpression(value: string): value is PetExpression {
   return PET_EXPRESSIONS.some((expression) => expression === value);
 }

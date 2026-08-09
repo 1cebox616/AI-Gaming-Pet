@@ -160,9 +160,3 @@ export function showSpeech(message: string): void {
 
   typeNextCharacter();
 }
-
-export function hideSpeech(): void {
-  messageRevision += 1;
-  clearTimers();
-  bubble.classList.remove("is-visible");
-}

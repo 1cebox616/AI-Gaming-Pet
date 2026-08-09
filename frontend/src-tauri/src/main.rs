@@ -48,6 +48,17 @@ impl LogicalInteractionRect {
     }
 }
 
+fn physical_cursor_to_window_logical(
+    cursor_position: PhysicalPosition<f64>,
+    window_position: PhysicalPosition<i32>,
+    scale_factor: f64,
+) -> LogicalPosition<f64> {
+    LogicalPosition::new(
+        (cursor_position.x - f64::from(window_position.x)) / scale_factor,
+        (cursor_position.y - f64::from(window_position.y)) / scale_factor,
+    )
+}
+
 struct PetInteractionStateInner {
     interaction_rect: Mutex<Option<LogicalInteractionRect>>,
     is_dragging: AtomicBool,
@@ -479,9 +490,9 @@ fn start_cursor_interaction_monitor(app: AppHandle, state: Arc<PetInteractionSta
                 }
             };
 
-            let cursor_x = (cursor_position.x - f64::from(window_position.x)) / scale_factor;
-            let cursor_y = (cursor_position.y - f64::from(window_position.y)) / scale_factor;
-            let should_ignore = !interaction_rect.contains(cursor_x, cursor_y);
+            let logical_cursor =
+                physical_cursor_to_window_logical(cursor_position, window_position, scale_factor);
+            let should_ignore = !interaction_rect.contains(logical_cursor.x, logical_cursor.y);
             update_cursor_event_ignoring(&window, should_ignore, &mut cursor_events_ignored);
 
             thread::sleep(CURSOR_POLL_INTERVAL);
@@ -603,4 +614,90 @@ fn main() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_RECT: LogicalInteractionRect = LogicalInteractionRect {
+        x: 10.0,
+        y: 20.0,
+        width: 30.0,
+        height: 40.0,
+    };
+
+    fn physical_cursor_for_logical(
+        logical_x: f64,
+        logical_y: f64,
+        window_position: PhysicalPosition<i32>,
+        scale_factor: f64,
+    ) -> PhysicalPosition<f64> {
+        PhysicalPosition::new(
+            f64::from(window_position.x) + logical_x * scale_factor,
+            f64::from(window_position.y) + logical_y * scale_factor,
+        )
+    }
+
+    #[test]
+    fn interaction_rect_contains_interior_and_all_inclusive_boundaries() {
+        assert!(TEST_RECT.contains(25.0, 40.0));
+        assert!(TEST_RECT.contains(10.0, 20.0));
+        assert!(TEST_RECT.contains(40.0, 20.0));
+        assert!(TEST_RECT.contains(10.0, 60.0));
+        assert!(TEST_RECT.contains(40.0, 60.0));
+
+        assert!(!TEST_RECT.contains(9.99, 40.0));
+        assert!(!TEST_RECT.contains(40.01, 40.0));
+        assert!(!TEST_RECT.contains(25.0, 19.99));
+        assert!(!TEST_RECT.contains(25.0, 60.01));
+    }
+
+    #[test]
+    fn physical_cursor_conversion_covers_common_scale_factors() {
+        let window_position = PhysicalPosition::new(-200, 300);
+
+        for scale_factor in [1.0, 1.25, 1.5] {
+            let physical_cursor =
+                physical_cursor_for_logical(32.0, 48.0, window_position, scale_factor);
+            let logical_cursor =
+                physical_cursor_to_window_logical(physical_cursor, window_position, scale_factor);
+
+            assert!((logical_cursor.x - 32.0).abs() < f64::EPSILON);
+            assert!((logical_cursor.y - 48.0).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn converted_cursor_preserves_rect_edges_across_scale_factors() {
+        let window_position = PhysicalPosition::new(120, -80);
+
+        for scale_factor in [1.0, 1.25, 1.5] {
+            for (logical_x, logical_y, expected_inside) in [
+                (25.0, 40.0, true),
+                (10.0, 20.0, true),
+                (40.0, 60.0, true),
+                (9.9, 40.0, false),
+                (40.1, 40.0, false),
+            ] {
+                let physical_cursor = physical_cursor_for_logical(
+                    logical_x,
+                    logical_y,
+                    window_position,
+                    scale_factor,
+                );
+                let converted = physical_cursor_to_window_logical(
+                    physical_cursor,
+                    window_position,
+                    scale_factor,
+                );
+
+                assert_eq!(
+                    TEST_RECT.contains(converted.x, converted.y),
+                    expected_inside,
+                    "scale factor {scale_factor}, logical point ({logical_x}, {logical_y})",
+                );
+            }
+        }
+    }
 }
