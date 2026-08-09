@@ -13,3 +13,8 @@ enabled = true
 min_interval_seconds = 45
 # 自动播报的最长等待秒数。
 max_interval_seconds = 120
+
+# CS2 Game State Integration 原始数据录制。默认关闭，避免日常运行持续写盘。
+[gsi]
+# 为 true 时，每次启动新建一个 JSONL 文件并异步追加收到的原始 payload。
+record = false

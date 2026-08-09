@@ -23,6 +23,7 @@ def test_missing_configuration_file_uses_validated_defaults(
     assert configuration.speech.enabled is True
     assert configuration.idle.enabled is True
     assert configuration.idle.min_interval_seconds < configuration.idle.max_interval_seconds
+    assert configuration.gsi.record is False
     assert "configuration file is missing" in caplog.text
 
 
@@ -32,7 +33,8 @@ def test_local_configuration_overrides_only_its_explicit_values(tmp_path: Path) 
     local_path = tmp_path / "config.local.toml"
     default_path.write_text(
         "[speech]\nenabled = true\nvoice_name = \"\"\n\n"
-        "[idle]\nenabled = true\nmin_interval_seconds = 45\nmax_interval_seconds = 120\n",
+        "[idle]\nenabled = true\nmin_interval_seconds = 45\nmax_interval_seconds = 120\n\n"
+        "[gsi]\nrecord = false\n",
         encoding="utf-8",
     )
     local_path.write_text("[idle]\nenabled = false\n", encoding="utf-8")
@@ -43,6 +45,24 @@ def test_local_configuration_overrides_only_its_explicit_values(tmp_path: Path) 
     assert configuration.idle.enabled is False
     assert configuration.idle.min_interval_seconds == 45
     assert configuration.idle.max_interval_seconds == 120
+    assert configuration.gsi.record is False
+
+
+def test_local_configuration_can_enable_gsi_recording(tmp_path: Path) -> None:
+    """The ignored local override can enable raw GSI recording alone."""
+    default_path = tmp_path / "config.toml"
+    local_path = tmp_path / "config.local.toml"
+    default_path.write_text(
+        "[speech]\nenabled = true\nvoice_name = \"\"\n\n"
+        "[idle]\nenabled = true\nmin_interval_seconds = 45\nmax_interval_seconds = 120\n\n"
+        "[gsi]\nrecord = false\n",
+        encoding="utf-8",
+    )
+    local_path.write_text("[gsi]\nrecord = true\n", encoding="utf-8")
+
+    configuration = load_config(default_path, local_path)
+
+    assert configuration.gsi.record is True
 
 
 def test_missing_field_uses_its_default_and_logs_warning(

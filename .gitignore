@@ -10,3 +10,4 @@ dist/
 AUDIT.md
 **/config.local.toml
 **/secrets*
+backend/recordings/

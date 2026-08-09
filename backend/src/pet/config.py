@@ -35,6 +35,14 @@ class IdleConfig(BaseModel):
     max_interval_seconds: int = Field(default=120, ge=10, le=3600)
 
 
+class GsiConfig(BaseModel):
+    """CS2 Game State Integration recording settings."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    record: bool = False
+
+
 class PetConfig(BaseModel):
     """The complete runtime configuration for the local pet backend."""
 
@@ -42,9 +50,10 @@ class PetConfig(BaseModel):
 
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
     idle: IdleConfig = Field(default_factory=IdleConfig)
+    gsi: GsiConfig = Field(default_factory=GsiConfig)
 
 
-ConfigSection = TypeVar("ConfigSection", SpeechConfig, IdleConfig)
+ConfigSection = TypeVar("ConfigSection", SpeechConfig, IdleConfig, GsiConfig)
 
 
 def load_config(
@@ -59,7 +68,8 @@ def load_config(
 
     speech = _validate_section("speech", SpeechConfig, merged_data.get("speech", {}))
     idle = _validate_section("idle", IdleConfig, merged_data.get("idle", {}))
-    configuration = PetConfig(speech=speech, idle=idle)
+    gsi = _validate_section("gsi", GsiConfig, merged_data.get("gsi", {}))
+    configuration = PetConfig(speech=speech, idle=idle, gsi=gsi)
 
     if configuration.idle.max_interval_seconds < configuration.idle.min_interval_seconds:
         logger.warning(
@@ -104,6 +114,7 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
     default_values = {
         "speech": SpeechConfig().model_dump(),
         "idle": IdleConfig().model_dump(),
+        "gsi": GsiConfig().model_dump(),
     }
     expected_fields = {
         "speech": ("enabled", "voice_name"),
@@ -112,6 +123,7 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
             "min_interval_seconds",
             "max_interval_seconds",
         ),
+        "gsi": ("record",),
     }
     for section_name, field_names in expected_fields.items():
         section = configuration_data.get(section_name)
