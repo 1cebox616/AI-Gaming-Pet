@@ -1,0 +1,231 @@
+{
+  "_provenance": {
+    "recordings": [
+      "gsi-20260809-112213.jsonl",
+      "gsi-20260809-121524-745957.jsonl"
+    ],
+    "note": "Payload fragments are trimmed to detector fields; Steam IDs and names are scrubbed. Source line numbers are listed per sequence."
+  },
+  "cold_start_existing_stats": {
+    "source_lines": ["gsi-20260809-112213.jsonl:62"],
+    "samples": [
+      {
+        "ts": 1786289331.349874,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_anubis", "phase": "live", "round": 5, "team_ct": {"score": 2}, "team_t": {"score": 3}},
+          "round": {"phase": "live", "bomb": "planted"},
+          "player": {
+            "steamid": "76561198000000001", "team": "CT", "activity": "playing",
+            "state": {"health": 73, "round_kills": 3, "round_killhs": 0, "equip_value": 4500},
+            "match_stats": {"deaths": 0},
+            "weapons": {"weapon_0": {"name": "weapon_m4a1_silencer", "state": "active"}}
+          }
+        }
+      }
+    ]
+  },
+  "round_reset": {
+    "source_lines": ["gsi-20260809-112213.jsonl:62", "gsi-20260809-112213.jsonl:81"],
+    "samples": [
+      {
+        "ts": 1786289331.349874,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_anubis", "phase": "live", "round": 5, "team_ct": {"score": 2}, "team_t": {"score": 3}},
+          "round": {"phase": "live"},
+          "player": {"steamid": "76561198000000001", "team": "CT", "activity": "playing", "state": {"health": 73, "round_kills": 3, "round_killhs": 0, "equip_value": 4500}, "match_stats": {"deaths": 0}}
+        }
+      },
+      {
+        "ts": 1786289361.7142103,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_anubis", "phase": "live", "round": 6, "team_ct": {"score": 3}, "team_t": {"score": 3}},
+          "round": {"phase": "freezetime"},
+          "player": {"steamid": "76561198000000001", "team": "CT", "activity": "playing", "state": {"health": 100, "round_kills": 0, "round_killhs": 0, "equip_value": 1600}, "match_stats": {"deaths": 1}}
+        }
+      }
+    ]
+  },
+  "multi_kill_after_dropped_push": {
+    "source_lines": ["gsi-20260809-112213.jsonl:35", "gsi-20260809-112213.jsonl:47"],
+    "samples": [
+      {
+        "ts": 1786289276.0794091,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_anubis", "phase": "live", "round": 5, "team_ct": {"score": 2}, "team_t": {"score": 3}},
+          "round": {"phase": "live"},
+          "player": {"steamid": "76561198000000001", "team": "CT", "activity": "playing", "state": {"health": 100, "round_kills": 0, "round_killhs": 0, "equip_value": 4500}, "match_stats": {"deaths": 0}, "weapons": {"weapon_0": {"name": "weapon_m4a1_silencer", "state": "active"}}}
+        }
+      },
+      {
+        "ts": 1786289318.559269,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_anubis", "phase": "live", "round": 5, "team_ct": {"score": 2}, "team_t": {"score": 3}},
+          "round": {"phase": "live", "bomb": "planted"},
+          "player": {"steamid": "76561198000000001", "team": "CT", "activity": "playing", "state": {"health": 100, "round_kills": 2, "round_killhs": 0, "equip_value": 4500}, "match_stats": {"deaths": 0}, "weapons": {"weapon_0": {"name": "weapon_m4a1_silencer", "state": "active"}}}
+        }
+      }
+    ]
+  },
+  "spectating_teammate_headshot": {
+    "source_lines": ["gsi-20260809-112213.jsonl:22", "gsi-20260809-112213.jsonl:23"],
+    "samples": [
+      {
+        "ts": 1786289236.9852285,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_anubis", "phase": "live", "round": 4, "team_ct": {"score": 2}, "team_t": {"score": 2}},
+          "round": {"phase": "live", "bomb": "planted"},
+          "player": {"steamid": "76561198000000901", "team": "CT", "activity": "playing", "state": {"health": 76, "round_kills": 2, "round_killhs": 0, "equip_value": 5000}, "match_stats": {"deaths": 1}, "weapons": {"weapon_0": {"name": "weapon_ak47", "state": "active"}}}
+        }
+      },
+      {
+        "ts": 1786289246.8928401,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_anubis", "phase": "live", "round": 4, "team_ct": {"score": 2}, "team_t": {"score": 2}},
+          "round": {"phase": "live", "bomb": "planted"},
+          "player": {"steamid": "76561198000000901", "team": "CT", "activity": "playing", "state": {"health": 22, "round_kills": 3, "round_killhs": 1, "equip_value": 5000}, "match_stats": {"deaths": 1}, "weapons": {"weapon_0": {"name": "weapon_ak47", "state": "active"}}}
+        }
+      }
+    ]
+  },
+  "spectating_subject_switch": {
+    "source_lines": ["gsi-20260809-112213.jsonl:5", "gsi-20260809-112213.jsonl:8"],
+    "samples": [
+      {
+        "ts": 1786289198.218,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_anubis", "phase": "live", "round": 4, "team_ct": {"score": 2}, "team_t": {"score": 2}},
+          "round": {"phase": "live"},
+          "player": {"steamid": "76561198000000911", "team": "CT", "activity": "playing", "state": {"health": 35, "round_kills": 1, "round_killhs": 0, "equip_value": 4800}, "match_stats": {"deaths": 1}, "weapons": {"weapon_0": {"name": "weapon_ak47", "state": "active"}}}
+        }
+      },
+      {
+        "ts": 1786289205.683,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_anubis", "phase": "live", "round": 4, "team_ct": {"score": 2}, "team_t": {"score": 2}},
+          "round": {"phase": "live"},
+          "player": {"steamid": "76561198000000912", "team": "T", "activity": "playing", "state": {"health": 96, "round_kills": 2, "round_killhs": 1, "equip_value": 3900}, "match_stats": {"deaths": 3}, "weapons": {}}
+        }
+      }
+    ]
+  },
+  "ordinary_death_with_trade_kill": {
+    "source_lines": ["gsi-20260809-121524-745957.jsonl:103", "gsi-20260809-121524-745957.jsonl:104", "gsi-20260809-121524-745957.jsonl:110", "gsi-20260809-121524-745957.jsonl:111"],
+    "samples": [
+      {
+        "ts": 1786294551.4920447,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_ancient_night", "phase": "live", "round": 1, "team_ct": {"score": 0}, "team_t": {"score": 1}, "round_wins": {"1": "t_win_elimination"}},
+          "round": {"phase": "freezetime"},
+          "player": {"steamid": "76561198000000001", "team": "T", "activity": "playing", "state": {"health": 100, "round_kills": 0, "round_killhs": 0, "equip_value": 1500}, "match_stats": {"deaths": 0}}
+        }
+      },
+      {
+        "ts": 1786294556.383421,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_ancient_night", "phase": "live", "round": 1, "team_ct": {"score": 0}, "team_t": {"score": 1}, "round_wins": {"1": "t_win_elimination"}},
+          "round": {"phase": "live"},
+          "player": {"steamid": "76561198000000001", "team": "T", "activity": "playing", "state": {"health": 100, "round_kills": 0, "round_killhs": 0, "equip_value": 1500}, "match_stats": {"deaths": 0}}
+        }
+      },
+      {
+        "ts": 1786294567.8712072,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_ancient_night", "phase": "live", "round": 1, "team_ct": {"score": 0}, "team_t": {"score": 1}, "round_wins": {"1": "t_win_elimination"}},
+          "round": {"phase": "live"},
+          "player": {"steamid": "76561198000000001", "team": "T", "activity": "playing", "state": {"health": 46, "round_kills": 0, "round_killhs": 0, "equip_value": 4200}, "match_stats": {"deaths": 0}, "weapons": {"weapon_0": {"name": "weapon_ak47", "state": "active"}}}
+        }
+      },
+      {
+        "ts": 1786294568.1370056,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {"mode": "casual", "name": "de_ancient_night", "phase": "live", "round": 1, "team_ct": {"score": 0}, "team_t": {"score": 1}, "round_wins": {"1": "t_win_elimination"}},
+          "round": {"phase": "live"},
+          "player": {"steamid": "76561198000000001", "team": "T", "activity": "playing", "state": {"health": 0, "round_kills": 1, "round_killhs": 1, "equip_value": 4200}, "match_stats": {"deaths": 1}, "weapons": {}}
+        }
+      }
+    ]
+  },
+  "teammate_thrown_away": {
+    "source_lines": ["gsi-20260809-121524-745957.jsonl:103", "gsi-20260809-121524-745957.jsonl:104", "gsi-20260809-121524-745957.jsonl:116", "gsi-20260809-121524-745957.jsonl:119"],
+    "samples": [
+      {
+        "ts": 1786294551.4920447,
+        "payload": {"provider": {"steamid": "76561198000000001"}, "map": {"mode": "casual", "name": "de_ancient_night", "phase": "live", "round": 1, "team_ct": {"score": 0}, "team_t": {"score": 1}}, "round": {"phase": "freezetime"}, "player": {"steamid": "76561198000000001", "team": "T", "activity": "playing", "state": {"health": 100, "round_kills": 0, "round_killhs": 0, "equip_value": 1500}, "match_stats": {"deaths": 0}}}
+      },
+      {
+        "ts": 1786294556.383421,
+        "payload": {"provider": {"steamid": "76561198000000001"}, "map": {"mode": "casual", "name": "de_ancient_night", "phase": "live", "round": 1, "team_ct": {"score": 0}, "team_t": {"score": 1}}, "round": {"phase": "live"}, "player": {"steamid": "76561198000000001", "team": "T", "activity": "playing", "state": {"health": 100, "round_kills": 0, "round_killhs": 0, "equip_value": 1500}, "match_stats": {"deaths": 0}}}
+      },
+      {
+        "ts": 1786294573.699302,
+        "payload": {"provider": {"steamid": "76561198000000001"}, "map": {"mode": "casual", "name": "de_ancient_night", "phase": "live", "round": 1, "team_ct": {"score": 0}, "team_t": {"score": 1}}, "round": {"phase": "live"}, "player": {"steamid": "76561198000000902", "team": "T", "activity": "playing", "state": {"health": 100, "round_kills": 0, "round_killhs": 0, "equip_value": 4350}, "match_stats": {"deaths": 0}, "weapons": {"weapon_0": {"name": "weapon_p90", "state": "active"}}}}
+      },
+      {
+        "ts": 1786294580.0691893,
+        "payload": {"provider": {"steamid": "76561198000000001"}, "map": {"mode": "casual", "name": "de_ancient_night", "phase": "live", "round": 1, "team_ct": {"score": 0}, "team_t": {"score": 1}}, "round": {"phase": "live"}, "player": {"steamid": "76561198000000902", "team": "T", "activity": "playing", "state": {"health": 0, "round_kills": 0, "round_killhs": 0, "equip_value": 4350}, "match_stats": {"deaths": 1}, "weapons": {}}}
+      }
+    ]
+  },
+  "round_win_dedup": {
+    "source_lines": ["gsi-20260809-121524-745957.jsonl:97", "gsi-20260809-121524-745957.jsonl:99", "gsi-20260809-121524-745957.jsonl:100"],
+    "samples": [
+      {
+        "ts": 1786294541.038207,
+        "payload": {"provider": {"steamid": "76561198000000001"}, "map": {"mode": "casual", "name": "de_ancient_night", "phase": "live", "round": 0, "team_ct": {"score": 0}, "team_t": {"score": 0}}, "round": {"phase": "live", "bomb": "planted"}, "player": {"steamid": "76561198000000001", "team": "T", "activity": "playing", "state": {"health": 100, "round_kills": 0, "round_killhs": 0, "equip_value": 1800}, "match_stats": {"deaths": 0}, "weapons": {"weapon_0": {"name": "weapon_tec9", "state": "active"}}}}
+      },
+      {
+        "ts": 1786294541.4823463,
+        "payload": {"provider": {"steamid": "76561198000000001"}, "map": {"mode": "casual", "name": "de_ancient_night", "phase": "live", "round": 1, "team_ct": {"score": 0}, "team_t": {"score": 1}, "round_wins": {"1": "t_win_elimination"}}, "round": {"phase": "over", "win_team": "T"}, "player": {"steamid": "76561198000000001", "team": "T", "activity": "playing", "state": {"health": 100, "round_kills": 1, "round_killhs": 1, "equip_value": 1800}, "match_stats": {"deaths": 0}, "weapons": {"weapon_0": {"name": "weapon_tec9", "state": "active"}}}}
+      },
+      {
+        "ts": 1786294542.1823006,
+        "payload": {"provider": {"steamid": "76561198000000001"}, "map": {"mode": "casual", "name": "de_ancient_night", "phase": "live", "round": 1, "team_ct": {"score": 0}, "team_t": {"score": 1}, "round_wins": {"1": "t_win_elimination"}}, "round": {"phase": "over", "win_team": "T"}, "player": {"steamid": "76561198000000001", "team": "T", "activity": "playing", "state": {"health": 100, "round_kills": 1, "round_killhs": 1, "equip_value": 1800}, "match_stats": {"deaths": 0}, "weapons": {"weapon_0": {"name": "weapon_knife_t", "state": "active"}}}}
+      }
+    ]
+  },
+  "round_loss_uses_self_team": {
+    "source_lines": ["gsi-20260809-112213.jsonl:31", "gsi-20260809-121524-745957.jsonl:125"],
+    "samples": [
+      {
+        "ts": 1786289262.8562489,
+        "payload": {"provider": {"steamid": "76561198000000001"}, "map": {"mode": "casual", "name": "de_anubis", "phase": "live", "round": 5, "team_ct": {"score": 2}, "team_t": {"score": 3}}, "round": {"phase": "freezetime"}, "player": {"steamid": "76561198000000001", "team": "CT", "activity": "playing", "state": {"health": 100, "round_kills": 0, "round_killhs": 0, "equip_value": 1600}, "match_stats": {"deaths": 0}}}
+      },
+      {
+        "ts": 1786294643.303915,
+        "payload": {"provider": {"steamid": "76561198000000001"}, "map": {"mode": "casual", "name": "de_ancient_night", "phase": "live", "round": 2, "team_ct": {"score": 0}, "team_t": {"score": 2}, "round_wins": {"1": "t_win_elimination", "2": "t_win_bomb"}}, "round": {"phase": "over", "win_team": "T"}, "player": {"steamid": "76561198000000903", "team": "T", "activity": "playing", "state": {"health": 100, "round_kills": 2, "round_killhs": 1, "equip_value": 4000}, "match_stats": {"deaths": 0}, "weapons": {"weapon_0": {"name": "weapon_ak47", "state": "active"}}}}
+      }
+    ]
+  },
+  "suppressed_states": {
+    "source_lines": ["gsi-20260809-121524-745957.jsonl:47", "gsi-20260809-121524-745957.jsonl:61", "gsi-20260809-121524-745957.jsonl:44"],
+    "samples": [
+      {
+        "ts": 1786294428.6114886,
+        "payload": {"provider": {"steamid": "76561198000000001"}, "map": {"mode": "casual", "name": "de_ancient_night", "phase": "warmup", "round": 0, "team_ct": {"score": 0}, "team_t": {"score": 0}}, "player": {"steamid": "76561198000000001", "team": "T", "activity": "playing", "state": {"health": 100, "round_kills": 0, "round_killhs": 0, "equip_value": 3900}, "match_stats": {"deaths": 0}}}
+      },
+      {
+        "ts": 1786294445.210537,
+        "payload": {"provider": {"steamid": "76561198000000001"}, "map": {"mode": "casual", "name": "de_ancient_night", "phase": "warmup", "round": 0, "team_ct": {"score": 0}, "team_t": {"score": 0}}, "player": {"steamid": "76561198000000001", "team": "T", "activity": "playing", "state": {"health": 36, "round_kills": 3, "round_killhs": 2, "equip_value": 3900}, "match_stats": {"deaths": 0}}}
+      },
+      {
+        "ts": 1786294387.728185,
+        "payload": {"provider": {"steamid": "76561198000000001"}, "map": {"mode": "casual", "name": "de_nuke", "phase": "gameover", "round": 10, "team_ct": {"score": 2}, "team_t": {"score": 8}, "round_wins": {"10": "t_win_bomb"}}, "round": {"phase": "freezetime", "win_team": "T"}}
+      },
+      {"ts": 1786294700.0, "payload": {"provider": {"steamid": "76561198000000001"}, "player": {"steamid": "76561198000000001", "activity": "menu"}}},
+      {"ts": 1786294701.0, "payload": {}}
+    ]
+  }
+}

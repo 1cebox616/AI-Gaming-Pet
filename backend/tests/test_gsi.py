@@ -82,7 +82,6 @@ def test_complete_recorded_payload_maps_every_snapshot_group() -> None:
         "equip_value": 1600,
         "round_kills": 0,
         "round_killhs": 0,
-        "round_totaldmg": None,
         "match_kills": 0,
         "match_assists": 0,
         "match_deaths": 0,

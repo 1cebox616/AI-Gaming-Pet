@@ -91,7 +91,6 @@ class GameSnapshot(BaseModel):
     equip_value: int | None = None
     round_kills: int | None = None
     round_killhs: int | None = None
-    round_totaldmg: int | None = None
     match_kills: int | None = None
     match_assists: int | None = None
     match_deaths: int | None = None
@@ -139,7 +138,6 @@ def parse_snapshot(payload: object, *, received_at: float | None = None) -> Game
         equip_value=_read(payload, ("player", "state", "equip_value"), int),
         round_kills=_read(payload, ("player", "state", "round_kills"), int),
         round_killhs=_read(payload, ("player", "state", "round_killhs"), int),
-        round_totaldmg=_read(payload, ("player", "state", "round_totaldmg"), int),
         match_kills=_read(payload, ("player", "match_stats", "kills"), int),
         match_assists=_read(payload, ("player", "match_stats", "assists"), int),
         match_deaths=_read(payload, ("player", "match_stats", "deaths"), int),
