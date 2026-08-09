@@ -22,6 +22,7 @@ const PET_NEXT_EXPRESSION_EVENT: &str = "pet-next-expression";
 const SPEAK_NEXT_IDLE_LINE_EVENT: &str = "speak-next-idle-line";
 const SET_SPEECH_ENABLED_EVENT: &str = "set-speech-enabled";
 const SET_MUTED_EVENT: &str = "set-muted";
+const PET_WINDOW_VISIBILITY_EVENT: &str = "pet-window-visibility";
 const WINDOW_MARGIN_DIP: u32 = 40;
 const CURSOR_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -219,8 +220,10 @@ fn toggle_main_window(app: &AppHandle) -> tauri::Result<()> {
 
     if window.is_visible()? {
         window.hide()?;
+        app.emit_to(WINDOW_LABEL, PET_WINDOW_VISIBILITY_EVENT, false)?;
     } else {
         window.show()?;
+        app.emit_to(WINDOW_LABEL, PET_WINDOW_VISIBILITY_EVENT, true)?;
     }
 
     Ok(())

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 const PET_EXPRESSIONS = [
@@ -13,9 +14,19 @@ type PetExpression = (typeof PET_EXPRESSIONS)[number];
 
 const PET_SVG = `
   <style>
-    .pet {
+    .pet-animation-layer {
       width: 172px;
       height: 172px;
+      backface-visibility: hidden;
+      pointer-events: none;
+      transform: translateY(2px) scale(0.985);
+      transform-origin: 50% 54%;
+      will-change: transform;
+    }
+
+    .pet {
+      width: 100%;
+      height: 100%;
       overflow: visible;
       cursor: move;
       opacity: 1;
@@ -24,14 +35,11 @@ const PET_SVG = `
       user-select: none;
     }
 
-    .pet.is-dimmed {
+    .pet-animation-layer.is-dimmed .pet {
       opacity: 0.55;
     }
 
     #pet-breath {
-      transform-box: view-box;
-      transform-origin: 100px 108px;
-      animation: pet-breathe 3.5s ease-in-out infinite;
       pointer-events: visiblePainted;
     }
 
@@ -39,20 +47,6 @@ const PET_SVG = `
       pointer-events: visiblePainted;
     }
 
-    .pet.is-dimmed #pet-breath {
-      animation-duration: 7s;
-    }
-
-    @keyframes pet-breathe {
-      0%,
-      100% {
-        transform: translateY(2px) scale(0.985);
-      }
-
-      50% {
-        transform: translateY(-3px) scale(1.015);
-      }
-    }
   </style>
   <g id="pet-breath" data-pet-interactive>
     <path
@@ -107,9 +101,13 @@ const FACE_MARKUP: Record<PetExpression, string> = {
 const PET_BOUNDS_SAMPLE_INTERVAL_MS = 40;
 const PET_BOUNDS_SAMPLE_DURATION_MS = 7_000;
 const PET_INTERACTION_MARGIN_DIP = 2;
+const PET_BREATH_UPDATE_INTERVAL_MS = 125;
+const PET_BREATH_ONLINE_DURATION_MS = 3_500;
+const PET_BREATH_OFFLINE_DURATION_MS = 7_000;
 const PET_CONTEXT_MENU_COMMAND = "show_pet_menu";
 const REPORT_PET_INTERACTION_REGION_COMMAND = "report_pet_interaction_region";
 const MARK_PET_DRAGGING_COMMAND = "mark_pet_dragging";
+const PET_WINDOW_VISIBILITY_EVENT = "pet-window-visibility";
 
 const host = document.getElementById("app");
 
@@ -123,7 +121,11 @@ pet.setAttribute("aria-label", "AI Gaming Pet");
 pet.setAttribute("role", "img");
 pet.setAttribute("viewBox", "0 0 200 200");
 pet.innerHTML = PET_SVG;
-host.replaceChildren(pet);
+
+const petAnimationLayer = document.createElement("div");
+petAnimationLayer.classList.add("pet-animation-layer");
+petAnimationLayer.append(pet);
+host.replaceChildren(petAnimationLayer);
 
 const petBreath = pet.querySelector<SVGGElement>("#pet-breath");
 const face = pet.querySelector<SVGGElement>("#pet-face");
@@ -251,6 +253,74 @@ window.addEventListener(
 );
 
 let currentExpression: PetExpression = "neutral";
+let isPetDimmed = false;
+let breathPhase = 0;
+let breathUpdatedAt = performance.now();
+let breathTimer: number | undefined;
+
+function easeInOut(progress: number): number {
+  let lowerBound = 0;
+  let upperBound = 1;
+
+  for (let iteration = 0; iteration < 12; iteration += 1) {
+    const parameter = (lowerBound + upperBound) / 2;
+    const inverse = 1 - parameter;
+    const x =
+      3 * inverse * inverse * parameter * 0.42 +
+      3 * inverse * parameter * parameter * 0.58 +
+      parameter * parameter * parameter;
+
+    if (x < progress) {
+      lowerBound = parameter;
+    } else {
+      upperBound = parameter;
+    }
+  }
+
+  const parameter = (lowerBound + upperBound) / 2;
+  return (
+    3 * (1 - parameter) * parameter * parameter +
+    parameter * parameter * parameter
+  );
+}
+
+function updatePetBreath(): void {
+  const now = performance.now();
+  const duration = isPetDimmed
+    ? PET_BREATH_OFFLINE_DURATION_MS
+    : PET_BREATH_ONLINE_DURATION_MS;
+  breathPhase = (breathPhase + (now - breathUpdatedAt) / duration) % 1;
+  breathUpdatedAt = now;
+
+  const halfCycleProgress =
+    breathPhase <= 0.5 ? breathPhase * 2 : (1 - breathPhase) * 2;
+  const easedProgress = easeInOut(halfCycleProgress);
+  const translateY = 2 - 5 * easedProgress;
+  const scale = 0.985 + 0.03 * easedProgress;
+  petAnimationLayer.style.transform = `translateY(${translateY}px) scale(${scale})`;
+}
+
+function startPetBreathing(): void {
+  if (breathTimer !== undefined) {
+    return;
+  }
+
+  breathUpdatedAt = performance.now();
+  updatePetBreath();
+  breathTimer = window.setInterval(
+    updatePetBreath,
+    PET_BREATH_UPDATE_INTERVAL_MS,
+  );
+}
+
+function stopPetBreathing(): void {
+  if (breathTimer === undefined) {
+    return;
+  }
+
+  window.clearInterval(breathTimer);
+  breathTimer = undefined;
+}
 
 function renderExpression(): void {
   pet.dataset.expression = currentExpression;
@@ -272,8 +342,29 @@ export function isPetExpression(value: string): value is PetExpression {
 }
 
 export function setPetDimmed(isDimmed: boolean): void {
-  pet.classList.toggle("is-dimmed", isDimmed);
+  isPetDimmed = isDimmed;
+  petAnimationLayer.classList.toggle("is-dimmed", isDimmed);
 }
 
+function setPetAnimationVisible(isVisible: boolean): void {
+  if (!isVisible) {
+    stopPetBreathing();
+  } else {
+    startPetBreathing();
+  }
+}
+
+function updatePetAnimationVisibility(): void {
+  setPetAnimationVisible(!document.hidden);
+}
+
+document.addEventListener("visibilitychange", updatePetAnimationVisibility);
+void listen<boolean>(PET_WINDOW_VISIBILITY_EVENT, (event) => {
+  setPetAnimationVisible(event.payload);
+}).catch((error: unknown) => {
+  console.error("failed to listen for pet window visibility changes", error);
+});
+
 renderExpression();
+updatePetAnimationVisibility();
 void sampleAndReportPetInteractionRegion();
