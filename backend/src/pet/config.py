@@ -52,6 +52,16 @@ class EventsConfig(BaseModel):
     thrown_away_min_equip_value: int = Field(default=3000, ge=0, le=20000)
 
 
+class PolicyConfig(BaseModel):
+    """Limits that decide when a detected game event may interrupt the player."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    cooldown_seconds: float = Field(default=8.0, ge=0, le=60)
+    max_lines_per_round: int = Field(default=3, ge=1, le=20)
+    alive_priority_threshold: int = Field(default=75, ge=0, le=100)
+
+
 class PetConfig(BaseModel):
     """The complete runtime configuration for the local pet backend."""
 
@@ -61,9 +71,17 @@ class PetConfig(BaseModel):
     idle: IdleConfig = Field(default_factory=IdleConfig)
     gsi: GsiConfig = Field(default_factory=GsiConfig)
     events: EventsConfig = Field(default_factory=EventsConfig)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
 
 
-ConfigSection = TypeVar("ConfigSection", SpeechConfig, IdleConfig, GsiConfig, EventsConfig)
+ConfigSection = TypeVar(
+    "ConfigSection",
+    SpeechConfig,
+    IdleConfig,
+    GsiConfig,
+    EventsConfig,
+    PolicyConfig,
+)
 
 
 def load_config(
@@ -80,7 +98,14 @@ def load_config(
     idle = _validate_section("idle", IdleConfig, merged_data.get("idle", {}))
     gsi = _validate_section("gsi", GsiConfig, merged_data.get("gsi", {}))
     events = _validate_section("events", EventsConfig, merged_data.get("events", {}))
-    configuration = PetConfig(speech=speech, idle=idle, gsi=gsi, events=events)
+    policy = _validate_section("policy", PolicyConfig, merged_data.get("policy", {}))
+    configuration = PetConfig(
+        speech=speech,
+        idle=idle,
+        gsi=gsi,
+        events=events,
+        policy=policy,
+    )
 
     if configuration.idle.max_interval_seconds < configuration.idle.min_interval_seconds:
         logger.warning(
@@ -127,6 +152,7 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
         "idle": IdleConfig().model_dump(),
         "gsi": GsiConfig().model_dump(),
         "events": EventsConfig().model_dump(),
+        "policy": PolicyConfig().model_dump(),
     }
     expected_fields = {
         "speech": ("enabled", "voice_name"),
@@ -139,6 +165,11 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
         "events": (
             "thrown_away_max_survival_seconds",
             "thrown_away_min_equip_value",
+        ),
+        "policy": (
+            "cooldown_seconds",
+            "max_lines_per_round",
+            "alive_priority_threshold",
         ),
     }
     for section_name, field_names in expected_fields.items():

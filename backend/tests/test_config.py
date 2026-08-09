@@ -26,6 +26,9 @@ def test_missing_configuration_file_uses_validated_defaults(
     assert configuration.gsi.record is False
     assert configuration.events.thrown_away_max_survival_seconds == 15.0
     assert configuration.events.thrown_away_min_equip_value == 3000
+    assert configuration.policy.cooldown_seconds == 8.0
+    assert configuration.policy.max_lines_per_round == 3
+    assert configuration.policy.alive_priority_threshold == 75
     assert "configuration file is missing" in caplog.text
 
 
@@ -256,3 +259,71 @@ def test_invalid_events_section_falls_back_alone_and_logs_warning(
     assert "configuration section speech" not in caplog.text
     assert "configuration section idle" not in caplog.text
     assert "configuration section gsi" not in caplog.text
+
+
+def test_policy_section_loads_custom_limits(tmp_path: Path) -> None:
+    """Valid policy values are exposed exactly once at backend startup."""
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[policy]\ncooldown_seconds = 12.5\nmax_lines_per_round = 7\n"
+        "alive_priority_threshold = 90\n",
+        encoding="utf-8",
+    )
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.policy.cooldown_seconds == 12.5
+    assert configuration.policy.max_lines_per_round == 7
+    assert configuration.policy.alive_priority_threshold == 90
+
+
+@pytest.mark.parametrize(
+    "policy_section",
+    (
+        'cooldown_seconds = "8"\nmax_lines_per_round = 3\n'
+        "alive_priority_threshold = 75\n",
+        "cooldown_seconds = 61\nmax_lines_per_round = 3\n"
+        "alive_priority_threshold = 75\n",
+        "cooldown_seconds = 8\nmax_lines_per_round = 0\n"
+        "alive_priority_threshold = 75\n",
+        "cooldown_seconds = 8\nmax_lines_per_round = 3\n"
+        "alive_priority_threshold = 101\n",
+        "cooldown_seconds = 8\nmax_lines_per_round = 3\n"
+        "alive_priority_threshold = 75\nunknown_limit = 1\n",
+    ),
+)
+def test_invalid_policy_section_falls_back_alone_and_logs_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    policy_section: str,
+) -> None:
+    """Policy type, range, and unknown-field errors preserve every other section."""
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[speech]\nenabled = false\nvoice_name = \"\"\n\n"
+        "[idle]\nenabled = false\nmin_interval_seconds = 30\n"
+        "max_interval_seconds = 60\n\n"
+        "[gsi]\nrecord = true\n\n"
+        "[events]\nthrown_away_max_survival_seconds = 22\n"
+        "thrown_away_min_equip_value = 4567\n\n"
+        "[policy]\n"
+        + policy_section,
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="pet.config")
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.policy.cooldown_seconds == 8.0
+    assert configuration.policy.max_lines_per_round == 3
+    assert configuration.policy.alive_priority_threshold == 75
+    assert configuration.speech.enabled is False
+    assert configuration.idle.enabled is False
+    assert configuration.gsi.record is True
+    assert configuration.events.thrown_away_max_survival_seconds == 22.0
+    assert configuration.events.thrown_away_min_equip_value == 4567
+    assert "configuration section policy at policy." in caplog.text
+    assert "configuration section speech" not in caplog.text
+    assert "configuration section idle" not in caplog.text
+    assert "configuration section gsi" not in caplog.text
+    assert "configuration section events" not in caplog.text

@@ -1,5 +1,5 @@
 # AGENTS.md
-最后更新：M2-T2 验收通过
+最后更新：M2-T3 验收通过（含 M2-T3-FIX）
 
 ## 项目概况
 目标：一个常驻 Windows 桌面的 AI 电子宠物，在用户玩 CS2 时实时观战、解说、吐槽。
@@ -24,7 +24,7 @@
     main.py 组装应用与端点 / bridge.py WebSocket 通道与定时广播 /
     lines.py 待机话术与 Utterance / speech.py 系统语音 / config.py 配置读取 /
     gsi.py CS2 数据接收与 GameSnapshot / network.py 共享端口常量 /
-    session.py 会话状态与主体识别
+    session.py 会话状态与主体识别 / events.py 事件检测与录制回放
 - /docs —— 项目文档（gsi-capabilities.md 为 CS2 数据能力清单，由架构师维护，
   coding agent 不得修改内容）
 - /backend/config.toml —— 默认配置（随代码提交）
@@ -113,9 +113,29 @@ WebSocket state 消息扩展为：
              "subject_steamid":...,"subject_is_self":...}}
 game 字段任何时候都必须存在，无法获知的子字段为 null。
 
+GameEvent（backend/src/pet/events.py），事件检测的输出：
+    id: str
+    type: kill / kill_headshot / multi_kill /
+          death / death_thrown_away / round_win / round_loss
+    ts: float
+    subject_steamid: str | None    这个事件属于谁
+    subject_is_self: bool          是否属于本机玩家
+    round_number: int | None       人类可读回合号
+    facts: dict                    结构化事实，供生成话术
+
+原则：events.py 只做事实判断，不含任何优先级、权重或"值不值得说"的信息。
+"该不该说"完全由发言策略（M2-T4）决定。调整宠物的话痨程度时不得改动事件检测。
+
+配置文件段落（backend/config.toml）：
+    [speech] enabled, voice_name
+    [idle]   enabled, min_interval_seconds, max_interval_seconds
+    [gsi]    record
+    [events] thrown_away_max_survival_seconds, thrown_away_min_equip_value
+
 M2 任务序列：
 - M2-T1 GSI 接入、快照解析、配置文件自动安装、原始数据录制、README 重写（已完成）
 - M2-T2 会话状态识别、主体识别、菜单顶部状态显示（已完成）
+- M2-T3 事件检测器与录制回放工具（已完成，含 M2-T3-FIX）
 - M2-T2 会话状态识别（未开游戏 / 大厅 / 局内 / 观战 + 模式名）
 - M2-T3 六类事件检测器（基于 T1 录制的真实对局数据做测试）
 - M2-T4 发言策略（冷却、每回合上限、交火中少说、死亡后多说）
@@ -145,7 +165,10 @@ M2-T2 补充查证（均以原始 JSONL 中字符串出现次数为准，绕过�
 - bomb 数据组：出现 0 次，已移除；炸弹状态来自 round.bomb
 - allplayers_*：死亡观战期间同样出现 0 次，已移除。
   因此只能评论"当前正在观看的那一名队友"，无法评论全队
-- 【易错点】map.round 是**已完成**的回合数，当前回合号需要加一
+- 【易错点】map.round 的含义随回合阶段变化，规则如下（events.py 中已收敛为单一实现）：
+    round_phase 为 "over"，或 round_win_team 有值 → map.round 就是刚结束的回合号
+    其余阶段 → 当前回合号 = map.round + 1
+  两者混用会让回合胜负事件的回合号整体大一，M2-T3 曾踩过这个坑
 
 M2 新增风险：
 - R7 找不到 CS2 配置目录（Steam 库可能在其他盘、可能有多个库）

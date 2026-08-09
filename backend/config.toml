@@ -24,3 +24,12 @@ record = false
 # 判定为「白给」。数值越小越严格。
 thrown_away_max_survival_seconds = 15
 thrown_away_min_equip_value = 3000
+
+[policy]
+# 两次发言之间的最短间隔秒数。数值越大，宠物越安静。
+cooldown_seconds = 8
+# 每个回合最多发言几次。
+max_lines_per_round = 3
+# 你还活着、回合进行中时，事件优先级至少要达到多少才允许打断你。
+# 数值越高越安静；设为 0 表示活着时也什么都说。
+alive_priority_threshold = 75

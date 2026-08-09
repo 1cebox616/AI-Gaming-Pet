@@ -445,13 +445,31 @@ def _format_facts(event: GameEvent) -> str:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="回放 CS2 GSI 录制并打印事件时间线")
     parser.add_argument("--replay", type=Path, required=True, help="GSI JSONL 录制文件")
+    parser.add_argument(
+        "--with-policy",
+        action="store_true",
+        help="展示每个事件的发言策略决定与丢弃原因",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the recording replay CLI."""
     args = _build_parser().parse_args(argv)
-    result = replay_recording(args.replay, load_config().events)
+    configuration = load_config()
+    if args.with_policy:
+        from pet.policy import format_policy_replay, replay_policy
+
+        snapshots = _load_recording(args.replay)
+        policy_result = replay_policy(
+            snapshots,
+            configuration.events,
+            configuration.policy,
+        )
+        print(format_policy_replay(policy_result))
+        return 0
+
+    result = replay_recording(args.replay, configuration.events)
     print(format_replay(result, started_at=result.started_at))
     return 0
 
