@@ -60,7 +60,21 @@ def _assert_utterance(message: dict[str, Any]) -> None:
 def _receive_initial_messages(websocket: Any) -> None:
     """Consume the required state-first handshake followed by its greeting."""
     state = websocket.receive_json()
-    assert state == {"type": "state", "speech_enabled": False, "muted": False}
+    assert state == {
+        "type": "state",
+        "speech_enabled": False,
+        "muted": False,
+        "game": {
+            "state": "offline",
+            "mode": None,
+            "map": None,
+            "round": None,
+            "score_ct": None,
+            "score_t": None,
+            "subject_steamid": None,
+            "subject_is_self": None,
+        },
+    }
     _assert_utterance(websocket.receive_json())
 
 

@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 import pytest
 
-from pet.gsi import GSI_CONFIG_CONTENT, RawGsiRecorder, parse_snapshot
+from pet.gsi import GSI_CONFIG_CONTENT, RawGsiRecorder, RoundWin, parse_snapshot
 from pet.main import app
 
 
@@ -90,6 +90,7 @@ def test_complete_recorded_payload_maps_every_snapshot_group() -> None:
         "match_score": 0,
         "score_ct": 2,
         "score_t": 3,
+        "round_wins": None,
         "active_weapon": "weapon_usp_silencer",
     }
 
@@ -172,6 +173,27 @@ def test_recorded_spectator_payload_preserves_both_identities() -> None:
     assert snapshot.active_weapon == "weapon_ak47"
 
 
+def test_real_round_wins_history_preserves_round_team_and_method() -> None:
+    # Captured after a real 2:8 casual match; unrelated payload fields are omitted.
+    payload = {
+        "map": {
+            "round_wins": {
+                "1": "t_win_elimination",
+                "4": "ct_win_defuse",
+                "10": "t_win_bomb",
+            }
+        }
+    }
+
+    snapshot = parse_snapshot(payload, received_at=20.0)
+
+    assert snapshot.round_wins == (
+        RoundWin(round=1, team="T", method="elimination"),
+        RoundWin(round=4, team="CT", method="defuse"),
+        RoundWin(round=10, team="T", method="bomb"),
+    )
+
+
 def test_invalid_json_and_non_object_payloads_are_acknowledged() -> None:
     client = TestClient(app)
 
@@ -212,7 +234,9 @@ def test_generated_config_requests_every_required_data_group() -> None:
         "player_state",
         "player_match_stats",
         "player_weapons",
-        "bomb",
+        "map_round_wins",
     ):
         assert f'"{group}" "1"' in GSI_CONFIG_CONTENT
+    for unused_group in ("phase_countdowns", "bomb", "allplayers_state"):
+        assert f'"{unused_group}" "1"' not in GSI_CONFIG_CONTENT
     assert '"uri" "http://127.0.0.1:8737/gsi"' in GSI_CONFIG_CONTENT

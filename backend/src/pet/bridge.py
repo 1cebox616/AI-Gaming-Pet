@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from pet.config import IdleConfig
 from pet.lines import Utterance, next_idle_utterance
+from pet.session import GameState
 from pet.speech import SpeechService
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ REQUEST_IDLE_LINE_MESSAGE_TYPE = "request_idle_line"
 STATE_MESSAGE_TYPE = "state"
 SET_SPEECH_ENABLED_MESSAGE_TYPE = "set_speech_enabled"
 SET_MUTED_MESSAGE_TYPE = "set_muted"
+GAME_PROGRESS_BROADCAST_INTERVAL_SECONDS = 1.0
 
 
 class BridgeStateMessage(BaseModel):
@@ -31,6 +33,7 @@ class BridgeStateMessage(BaseModel):
     type: Literal["state"] = STATE_MESSAGE_TYPE
     speech_enabled: bool
     muted: bool
+    game: GameState
 
 
 class PetBridge:
@@ -40,6 +43,7 @@ class PetBridge:
         self,
         speech_service: SpeechService,
         idle_configuration: IdleConfig | None = None,
+        initial_game: GameState | None = None,
     ) -> None:
         self._connections: set[WebSocket] = set()
         self._speech_service = speech_service
@@ -48,6 +52,9 @@ class PetBridge:
         self._idle_reset_event: asyncio.Event | None = None
         self._speech_enabled = speech_service.is_enabled()
         self._muted = not self._idle_configuration.enabled
+        self._game = initial_game or GameState.offline()
+        self._last_game_broadcast_at = float("-inf")
+        self._pending_game_broadcast: asyncio.Task[None] | None = None
 
     async def start_idle_broadcasts(self) -> None:
         """Start the randomized idle loop, initially paused when configured off."""
@@ -62,6 +69,7 @@ class PetBridge:
 
     async def shutdown(self) -> None:
         """Cancel the idle loop before FastAPI closes its event loop."""
+        await self._cancel_pending_game_broadcast()
         idle_task = self._idle_task
         self._idle_task = None
         self._idle_reset_event = None
@@ -167,6 +175,8 @@ class PetBridge:
 
         self._speech_enabled = enabled
         self._speech_service.set_enabled(enabled)
+        await self._cancel_pending_game_broadcast()
+        self._last_game_broadcast_at = asyncio.get_running_loop().time()
         await self._broadcast_state()
 
     async def _set_muted(self, muted: bool) -> None:
@@ -176,7 +186,59 @@ class PetBridge:
 
         self._muted = muted
         self._reset_idle_timer()
+        await self._cancel_pending_game_broadcast()
+        self._last_game_broadcast_at = asyncio.get_running_loop().time()
         await self._broadcast_state()
+
+    async def update_game(self, game: GameState) -> None:
+        """Publish meaningful game changes and coalesce round/score progress."""
+        previous = self._game
+        if game == previous:
+            return
+
+        self._game = game
+        if not self._connections:
+            return
+
+        if _only_round_or_score_changed(previous, game):
+            now = asyncio.get_running_loop().time()
+            remaining = GAME_PROGRESS_BROADCAST_INTERVAL_SECONDS - (
+                now - self._last_game_broadcast_at
+            )
+            if remaining > 0:
+                if self._pending_game_broadcast is None:
+                    self._pending_game_broadcast = asyncio.create_task(
+                        self._broadcast_game_after(remaining),
+                        name="pet-game-state-broadcast",
+                    )
+                return
+
+        await self._cancel_pending_game_broadcast()
+        self._last_game_broadcast_at = asyncio.get_running_loop().time()
+        await self._broadcast_state()
+
+    async def _broadcast_game_after(self, delay_seconds: float) -> None:
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(delay_seconds)
+            self._last_game_broadcast_at = asyncio.get_running_loop().time()
+            await self._broadcast_state()
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._pending_game_broadcast is current_task:
+                self._pending_game_broadcast = None
+
+    async def _cancel_pending_game_broadcast(self) -> None:
+        task = self._pending_game_broadcast
+        self._pending_game_broadcast = None
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def _broadcast_state(self) -> None:
         """Publish runtime state to live clients and discard failed connections."""
@@ -237,5 +299,13 @@ class PetBridge:
         message = BridgeStateMessage(
             speech_enabled=self._speech_enabled,
             muted=self._muted,
+            game=self._game,
         )
         await websocket.send_json(message.model_dump())
+
+
+def _only_round_or_score_changed(previous: GameState, current: GameState) -> bool:
+    progress_fields = {"round", "score_ct", "score_t"}
+    previous_without_progress = previous.model_dump(exclude=progress_fields)
+    current_without_progress = current.model_dump(exclude=progress_fields)
+    return previous_without_progress == current_without_progress

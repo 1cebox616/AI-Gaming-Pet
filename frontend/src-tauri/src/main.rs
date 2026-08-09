@@ -23,6 +23,8 @@ const SPEAK_NEXT_IDLE_LINE_EVENT: &str = "speak-next-idle-line";
 const SET_SPEECH_ENABLED_EVENT: &str = "set-speech-enabled";
 const SET_MUTED_EVENT: &str = "set-muted";
 const PET_WINDOW_VISIBILITY_EVENT: &str = "pet-window-visibility";
+const GAME_STATUS_ITEM_ID: &str = "game-status";
+const DISCONNECTED_GAME_STATUS: &str = "CS2：未知（后端未连接）";
 const WINDOW_MARGIN_DIP: u32 = 40;
 const CURSOR_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -95,11 +97,13 @@ enum PetMenuAction {
 
 #[derive(Clone, Copy)]
 enum PetMenuEntry {
+    GameStatus,
     Action(PetMenuAction),
     Separator,
 }
 
-const PET_MENU_LAYOUT: [PetMenuEntry; 8] = [
+const PET_MENU_LAYOUT: [PetMenuEntry; 9] = [
+    PetMenuEntry::GameStatus,
     PetMenuEntry::Action(PetMenuAction::Speak),
     PetMenuEntry::Action(PetMenuAction::NextExpression),
     PetMenuEntry::Separator,
@@ -165,6 +169,7 @@ struct BackendMenuState {
 
 struct PetMenu {
     menu: Menu<Wry>,
+    game_status_item: MenuItem<Wry>,
     speech_item: CheckMenuItem<Wry>,
     auto_speak_item: CheckMenuItem<Wry>,
     backend_state: Mutex<BackendMenuState>,
@@ -176,6 +181,7 @@ impl PetMenu {
         connected: bool,
         speech_enabled: bool,
         muted: bool,
+        game_status: &str,
     ) -> Result<(), String> {
         let state = BackendMenuState {
             connected,
@@ -189,6 +195,12 @@ impl PetMenu {
         *current_state = state;
         drop(current_state);
 
+        self.game_status_item
+            .set_text(game_status)
+            .map_err(|error| error.to_string())?;
+        self.game_status_item
+            .set_enabled(false)
+            .map_err(|error| error.to_string())?;
         self.speech_item
             .set_enabled(connected)
             .map_err(|error| error.to_string())?;
@@ -298,11 +310,23 @@ fn unregister_shortcuts_and_exit(app: &AppHandle) {
 
 fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
     let menu = Menu::new(app)?;
+    let mut game_status_item = None;
     let mut speech_item = None;
     let mut auto_speak_item = None;
 
     for entry in PET_MENU_LAYOUT {
         match entry {
+            PetMenuEntry::GameStatus => {
+                let item = MenuItem::with_id(
+                    app,
+                    GAME_STATUS_ITEM_ID,
+                    DISCONNECTED_GAME_STATUS,
+                    false,
+                    None::<&str>,
+                )?;
+                menu.append(&item)?;
+                game_status_item = Some(item);
+            }
             PetMenuEntry::Separator => {
                 let separator = PredefinedMenuItem::separator(app)?;
                 menu.append(&separator)?;
@@ -332,6 +356,8 @@ fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
 
     Ok(PetMenu {
         menu,
+        game_status_item: game_status_item
+            .expect("game status must be present in the pet menu layout"),
         speech_item: speech_item.expect("speech switch must be present in the pet menu layout"),
         auto_speak_item: auto_speak_item
             .expect("automatic speech switch must be present in the pet menu layout"),
@@ -344,9 +370,10 @@ fn update_pet_menu_state(
     connected: bool,
     speech_enabled: bool,
     muted: bool,
+    game_status: String,
     menu: State<'_, PetMenu>,
 ) -> Result<(), String> {
-    menu.update_backend_state(connected, speech_enabled, muted)
+    menu.update_backend_state(connected, speech_enabled, muted, &game_status)
 }
 
 #[tauri::command]

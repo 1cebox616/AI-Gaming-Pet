@@ -30,12 +30,24 @@ def assert_state_message(
     *,
     speech_enabled: bool,
     muted: bool,
+    game: dict[str, Any] | None = None,
 ) -> None:
     """Assert the complete authoritative runtime state protocol message."""
     assert message == {
         "type": "state",
         "speech_enabled": speech_enabled,
         "muted": muted,
+        "game": game
+        or {
+            "state": "offline",
+            "mode": None,
+            "map": None,
+            "round": None,
+            "score_ct": None,
+            "score_t": None,
+            "subject_steamid": None,
+            "subject_is_self": None,
+        },
     }
 
 
@@ -45,6 +57,16 @@ def assert_initial_messages(websocket: Any) -> None:
     assert state["type"] == "state"
     assert isinstance(state["speech_enabled"], bool)
     assert isinstance(state["muted"], bool)
+    assert isinstance(state["game"], dict)
+    assert state["game"]["state"] in {
+        "offline",
+        "menu",
+        "warmup",
+        "playing",
+        "spectating",
+        "round_over",
+        "match_over",
+    }
     assert_utterance_message(websocket.receive_json())
 
 
@@ -92,6 +114,7 @@ def test_websocket_greets_requests_idle_lines_and_survives_invalid_json() -> Non
             assert first_state["type"] == "state"
             assert isinstance(first_state["speech_enabled"], bool)
             assert isinstance(first_state["muted"], bool)
+            assert isinstance(first_state["game"], dict)
             first_greeting = first_websocket.receive_json()
             assert_utterance_message(first_greeting)
 
@@ -133,11 +156,13 @@ def test_runtime_switches_broadcast_authoritative_state_and_reject_invalid_value
                     first_websocket.receive_json(),
                     speech_enabled=requested_speech,
                     muted=initial_state["muted"],
+                    game=initial_state["game"],
                 )
                 assert_state_message(
                     second_websocket.receive_json(),
                     speech_enabled=requested_speech,
                     muted=initial_state["muted"],
+                    game=initial_state["game"],
                 )
 
                 requested_muted = not initial_state["muted"]
@@ -146,11 +171,13 @@ def test_runtime_switches_broadcast_authoritative_state_and_reject_invalid_value
                     first_websocket.receive_json(),
                     speech_enabled=requested_speech,
                     muted=requested_muted,
+                    game=initial_state["game"],
                 )
                 assert_state_message(
                     second_websocket.receive_json(),
                     speech_enabled=requested_speech,
                     muted=requested_muted,
+                    game=initial_state["game"],
                 )
 
                 second_websocket.send_json(

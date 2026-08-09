@@ -1,0 +1,110 @@
+{
+  "menu": {
+    "ts": 1786289097.1442254,
+    "payload": {
+      "provider": {"steamid": "76561198000000001"},
+      "player": {
+        "steamid": "76561198000000001",
+        "activity": "menu"
+      }
+    }
+  },
+  "warmup": {
+    "ts": 1786289521.9425285,
+    "payload": {
+      "provider": {"steamid": "76561198000000001"},
+      "map": {
+        "mode": "casual",
+        "name": "de_nuke",
+        "phase": "warmup",
+        "round": 0,
+        "team_ct": {"score": 0},
+        "team_t": {"score": 0}
+      },
+      "player": {
+        "steamid": "76561198000000001",
+        "activity": "playing",
+        "state": {"health": 100}
+      }
+    }
+  },
+  "playing": {
+    "ts": 1786289267.812423,
+    "payload": {
+      "provider": {"steamid": "76561198000000001"},
+      "map": {
+        "mode": "casual",
+        "name": "de_anubis",
+        "phase": "live",
+        "round": 5,
+        "team_ct": {"score": 2},
+        "team_t": {"score": 3}
+      },
+      "round": {"phase": "live"},
+      "player": {
+        "steamid": "76561198000000001",
+        "activity": "playing",
+        "state": {"health": 100}
+      }
+    }
+  },
+  "spectating": {
+    "ts": 1786289334.2961953,
+    "payload": {
+      "provider": {"steamid": "76561198000000001"},
+      "map": {
+        "mode": "casual",
+        "name": "de_anubis",
+        "phase": "live",
+        "round": 5,
+        "team_ct": {"score": 2},
+        "team_t": {"score": 3}
+      },
+      "round": {"phase": "live", "bomb": "planted"},
+      "player": {
+        "steamid": "76561198000000999",
+        "activity": "playing",
+        "state": {"health": 55}
+      }
+    }
+  },
+  "round_over": {
+    "ts": 1786289351.7098591,
+    "payload": {
+      "provider": {"steamid": "76561198000000001"},
+      "map": {
+        "mode": "casual",
+        "name": "de_anubis",
+        "phase": "live",
+        "round": 6,
+        "team_ct": {"score": 3},
+        "team_t": {"score": 3}
+      },
+      "round": {
+        "phase": "over",
+        "win_team": "CT",
+        "bomb": "defused"
+      },
+      "player": {
+        "steamid": "76561198000000999",
+        "activity": "playing",
+        "state": {"health": 55}
+      }
+    }
+  },
+  "match_over": {
+    "ts": 1786289486.7911916,
+    "payload": {
+      "provider": {"steamid": "76561198000000001"},
+      "map": {
+        "mode": "casual",
+        "name": "de_anubis",
+        "phase": "gameover",
+        "round": 9,
+        "team_ct": {"score": 1},
+        "team_t": {"score": 8}
+      },
+      "round": {"phase": "freezetime", "win_team": "T"}
+    }
+  }
+}

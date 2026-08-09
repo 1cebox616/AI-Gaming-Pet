@@ -10,12 +10,12 @@ import logging
 import re
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from pet.config import GsiConfig
 from pet.network import HOST, PORT
@@ -48,12 +48,22 @@ GSI_CONFIG_CONTENT = f'''"AI Gaming Pet"
         "player_state" "1"
         "player_match_stats" "1"
         "player_weapons" "1"
-        "bomb" "1"
+        "map_round_wins" "1"
     }}
 }}
 '''
 
 RawPayload = Any
+
+
+class RoundWin(BaseModel):
+    """One completed round from CS2's map.round_wins history."""
+
+    model_config = ConfigDict(frozen=True)
+
+    round: int
+    team: Literal["CT", "T"]
+    method: str
 
 
 class GameSnapshot(BaseModel):
@@ -89,6 +99,7 @@ class GameSnapshot(BaseModel):
     match_score: int | None = None
     score_ct: int | None = None
     score_t: int | None = None
+    round_wins: tuple[RoundWin, ...] | None = None
     active_weapon: str | None = None
 
 
@@ -136,6 +147,7 @@ def parse_snapshot(payload: object, *, received_at: float | None = None) -> Game
         match_score=_read(payload, ("player", "match_stats", "score"), int),
         score_ct=_read(payload, ("map", "team_ct", "score"), int),
         score_t=_read(payload, ("map", "team_t", "score"), int),
+        round_wins=_read_round_wins(payload),
         active_weapon=_read_active_weapon(payload),
     )
 
@@ -178,6 +190,35 @@ def _read_active_weapon(payload: Mapping[str, Any]) -> str | None:
         _warn_type_once("player.weapons.<active>.name", name, "str")
         return None
     return None
+
+
+def _read_round_wins(payload: Mapping[str, Any]) -> tuple[RoundWin, ...] | None:
+    round_wins = _mapping_at(payload, ("map", "round_wins"))
+    if round_wins is None:
+        return None
+
+    parsed: list[RoundWin] = []
+    for round_key, win_code in round_wins.items():
+        if not isinstance(round_key, str) or not round_key.isdecimal():
+            _warn_type_once("map.round_wins.<round>", round_key, "decimal str")
+            continue
+        if not isinstance(win_code, str):
+            _warn_type_once(f"map.round_wins.{round_key}", win_code, "str")
+            continue
+
+        team_code, separator, method = win_code.partition("_win_")
+        if separator == "" or method == "" or team_code not in {"ct", "t"}:
+            logger.warning("ignoring unrecognized CS2 round win code %r", win_code)
+            continue
+        parsed.append(
+            RoundWin(
+                round=int(round_key),
+                team="CT" if team_code == "ct" else "T",
+                method=method,
+            )
+        )
+
+    return tuple(sorted(parsed, key=lambda win: win.round))
 
 
 def _mapping_at(payload: Mapping[str, Any], path: tuple[str, ...]) -> Mapping[str, Any] | None:
@@ -273,8 +314,18 @@ def _append_line(path: Path, line: str) -> None:
 class GsiService:
     """Own the low-latency receive path and its background resources."""
 
-    def __init__(self, configuration: GsiConfig, recordings_directory: Path = RECORDINGS_DIRECTORY):
+    def __init__(
+        self,
+        configuration: GsiConfig,
+        recordings_directory: Path = RECORDINGS_DIRECTORY,
+        snapshot_listener: Callable[[GameSnapshot], Awaitable[None]] | None = None,
+        offline_listener: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self._recorder = RawGsiRecorder(configuration.record, recordings_directory)
+        self._snapshot_listener = snapshot_listener
+        self._offline_listener = offline_listener
+        self._snapshot_queue: asyncio.Queue[GameSnapshot | None] | None = None
+        self._listener_task: asyncio.Task[None] | None = None
         self._last_summary_at = 0.0
         self._last_received_at: float | None = None
         self._silence_reported = False
@@ -282,6 +333,12 @@ class GsiService:
 
     async def start(self) -> None:
         await self._recorder.start()
+        if self._snapshot_listener is not None:
+            self._snapshot_queue = asyncio.Queue()
+            self._listener_task = asyncio.create_task(
+                self._run_snapshot_listener(),
+                name="gsi-snapshot-listener",
+            )
         self._monitor_task = asyncio.create_task(self._monitor_silence(), name="gsi-monitor")
 
     async def shutdown(self) -> None:
@@ -292,6 +349,11 @@ class GsiService:
             except asyncio.CancelledError:
                 pass
             self._monitor_task = None
+        if self._snapshot_queue is not None and self._listener_task is not None:
+            self._snapshot_queue.put_nowait(None)
+            await self._listener_task
+            self._snapshot_queue = None
+            self._listener_task = None
         await self._recorder.shutdown()
 
     async def receive(self, request: Request) -> GsiAck:
@@ -305,7 +367,21 @@ class GsiService:
         snapshot = parse_snapshot(payload, received_at=received_at)
         self._recorder.record(received_at, payload)
         self._observe(snapshot)
+        if self._snapshot_queue is not None:
+            self._snapshot_queue.put_nowait(snapshot)
         return GsiAck()
+
+    async def _run_snapshot_listener(self) -> None:
+        assert self._snapshot_queue is not None
+        assert self._snapshot_listener is not None
+        while True:
+            snapshot = await self._snapshot_queue.get()
+            if snapshot is None:
+                return
+            try:
+                await self._snapshot_listener(snapshot)
+            except Exception as error:
+                logger.error("failed to publish a CS2 game snapshot: %s", error)
 
     def _observe(self, snapshot: GameSnapshot) -> None:
         now = time.monotonic()
@@ -344,6 +420,8 @@ class GsiService:
             ):
                 logger.info("no CS2 GSI update received for more than 60 seconds")
                 self._silence_reported = True
+                if self._offline_listener is not None:
+                    await self._offline_listener()
 
 
 def ensure_gsi_config() -> Path | None:

@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import logging
+import time
 
 from importlib.metadata import version
 
@@ -14,8 +15,15 @@ import uvicorn
 
 from pet.bridge import PetBridge
 from pet.config import load_config
-from pet.gsi import GsiAck, GsiService, ensure_gsi_config
+from pet.gsi import (
+    GSI_SILENCE_SECONDS,
+    GameSnapshot,
+    GsiAck,
+    GsiService,
+    ensure_gsi_config,
+)
 from pet.network import HOST, PORT
+from pet.session import GameSessionTracker
 from pet.speech import SpeechService
 
 PACKAGE_NAME = "pet"
@@ -55,7 +63,24 @@ configure_pet_logging()
 configuration = load_config()
 speech_service = SpeechService(configuration.speech)
 pet_bridge = PetBridge(speech_service, configuration.idle)
-gsi_service = GsiService(configuration.gsi)
+game_session_tracker = GameSessionTracker(offline_timeout_seconds=GSI_SILENCE_SECONDS)
+
+
+async def observe_gsi_snapshot(snapshot: GameSnapshot) -> None:
+    """Interpret one GSI snapshot and synchronize connected desktop clients."""
+    await pet_bridge.update_game(game_session_tracker.observe(snapshot))
+
+
+async def mark_gsi_offline() -> None:
+    """Publish offline after the GSI heartbeat silence window expires."""
+    await pet_bridge.update_game(game_session_tracker.current(now=time.time()))
+
+
+gsi_service = GsiService(
+    configuration.gsi,
+    snapshot_listener=observe_gsi_snapshot,
+    offline_listener=mark_gsi_offline,
+)
 
 
 @asynccontextmanager

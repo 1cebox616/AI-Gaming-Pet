@@ -21,6 +21,27 @@ interface StateMessage {
   type: "state";
   speech_enabled: boolean;
   muted: boolean;
+  game: GameState;
+}
+
+type GameSessionState =
+  | "offline"
+  | "menu"
+  | "warmup"
+  | "playing"
+  | "spectating"
+  | "round_over"
+  | "match_over";
+
+interface GameState {
+  state: GameSessionState;
+  mode: string | null;
+  map: string | null;
+  round: number | null;
+  score_ct: number | null;
+  score_t: number | null;
+  subject_steamid: string | null;
+  subject_is_self: boolean | null;
 }
 
 let connection: WebSocket | undefined;
@@ -32,18 +53,20 @@ let lastUtteranceId: string | undefined;
 function setPetDisconnected(): void {
   setPetExpression("speechless");
   setPetDimmed(true);
-  updatePetMenuState(false, false, false);
+  updatePetMenuState(false, false, false, "CS2：未知（后端未连接）");
 }
 
 function updatePetMenuState(
   connected: boolean,
   speechEnabled: boolean,
   muted: boolean,
+  gameStatus: string,
 ): void {
   void invoke("update_pet_menu_state", {
     connected,
     speechEnabled,
     muted,
+    gameStatus,
   }).catch((error: unknown) => {
     console.error("failed to synchronize pet menu state", error);
   });
@@ -74,8 +97,93 @@ function isStateMessage(value: unknown): value is StateMessage {
   return (
     message.type === "state" &&
     typeof message.speech_enabled === "boolean" &&
-    typeof message.muted === "boolean"
+    typeof message.muted === "boolean" &&
+    isGameState(message.game)
   );
+}
+
+function isGameState(value: unknown): value is GameState {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const game = value as Partial<GameState>;
+  return (
+    isGameSessionState(game.state) &&
+    isNullableString(game.mode) &&
+    isNullableString(game.map) &&
+    isNullableNumber(game.round) &&
+    isNullableNumber(game.score_ct) &&
+    isNullableNumber(game.score_t) &&
+    isNullableString(game.subject_steamid) &&
+    (typeof game.subject_is_self === "boolean" || game.subject_is_self === null)
+  );
+}
+
+function isGameSessionState(value: unknown): value is GameSessionState {
+  return (
+    value === "offline" ||
+    value === "menu" ||
+    value === "warmup" ||
+    value === "playing" ||
+    value === "spectating" ||
+    value === "round_over" ||
+    value === "match_over"
+  );
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return typeof value === "string" || value === null;
+}
+
+function isNullableNumber(value: unknown): value is number | null {
+  return typeof value === "number" || value === null;
+}
+
+function formatGameStatus(game: GameState): string {
+  if (game.state === "offline") {
+    return "CS2：未运行";
+  }
+  if (game.state === "menu") {
+    return "CS2：主菜单";
+  }
+
+  const mode = formatGameMode(game.mode);
+  if (game.state === "warmup") {
+    return formatGameParts(mode, "热身");
+  }
+  if (game.state === "spectating") {
+    return formatGameParts(mode, "观战中");
+  }
+  if (game.state === "round_over") {
+    return formatGameParts(mode, "回合结束");
+  }
+  if (game.state === "match_over") {
+    return formatGameParts(mode, "比赛结束");
+  }
+
+  const parts = mode.length > 0 ? [mode] : [];
+  if (game.round !== null) {
+    parts.push(`第 ${game.round} 回合`);
+  }
+  if (game.score_ct !== null && game.score_t !== null) {
+    parts.push(`${game.score_ct}:${game.score_t}`);
+  }
+  if (parts.length === 0) {
+    parts.push("游戏中");
+  }
+  return `CS2：${parts.join(" · ")}`;
+}
+
+function formatGameMode(mode: string | null): string {
+  if (mode === "casual") {
+    return "休闲";
+  }
+  return mode ?? "";
+}
+
+function formatGameParts(mode: string, state: string): string {
+  return `CS2：${mode.length > 0 ? `${mode} · ` : ""}${state}`;
 }
 
 function scheduleReconnect(): void {
@@ -110,7 +218,12 @@ function handleMessage(event: MessageEvent<unknown>): void {
   }
 
   if (isStateMessage(message)) {
-    updatePetMenuState(true, message.speech_enabled, message.muted);
+    updatePetMenuState(
+      true,
+      message.speech_enabled,
+      message.muted,
+      formatGameStatus(message.game),
+    );
     return;
   }
 
