@@ -104,7 +104,9 @@ const FACE_MARKUP: Record<PetExpression, string> = {
   `,
 };
 
-const PET_INTERACTION_MARGIN_DIP = 6;
+const PET_BOUNDS_SAMPLE_INTERVAL_MS = 40;
+const PET_BOUNDS_SAMPLE_DURATION_MS = 7_000;
+const PET_INTERACTION_MARGIN_DIP = 2;
 const PET_CONTEXT_MENU_COMMAND = "show_pet_menu";
 const REPORT_PET_INTERACTION_REGION_COMMAND = "report_pet_interaction_region";
 const MARK_PET_DRAGGING_COMMAND = "mark_pet_dragging";
@@ -123,6 +125,20 @@ pet.setAttribute("viewBox", "0 0 200 200");
 pet.innerHTML = PET_SVG;
 host.replaceChildren(pet);
 
+const petBreath = pet.querySelector<SVGGElement>("#pet-breath");
+const face = pet.querySelector<SVGGElement>("#pet-face");
+
+if (petBreath === null) {
+  throw new Error("pet breathing group is unavailable");
+}
+
+if (face === null) {
+  throw new Error("pet face is unavailable");
+}
+
+const petDrawing: SVGGElement = petBreath;
+const petFace: SVGGElement = face;
+
 function isPaintedPetTarget(target: EventTarget | null): boolean {
   if (!(target instanceof SVGElement)) {
     return false;
@@ -135,15 +151,64 @@ function isPaintedPetTarget(target: EventTarget | null): boolean {
   );
 }
 
-function reportPetInteractionRegion(): void {
-  const petBounds = pet.getBoundingClientRect();
+interface InteractionBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+function readPetDrawingBounds(): InteractionBounds {
+  const drawingBounds = petDrawing.getBoundingClientRect();
   const windowBounds = document.documentElement.getBoundingClientRect();
 
+  return {
+    left: drawingBounds.left - windowBounds.left,
+    top: drawingBounds.top - windowBounds.top,
+    right: drawingBounds.right - windowBounds.left,
+    bottom: drawingBounds.bottom - windowBounds.top,
+  };
+}
+
+function unionBounds(
+  current: InteractionBounds,
+  sample: InteractionBounds,
+): InteractionBounds {
+  return {
+    left: Math.min(current.left, sample.left),
+    top: Math.min(current.top, sample.top),
+    right: Math.max(current.right, sample.right),
+    bottom: Math.max(current.bottom, sample.bottom),
+  };
+}
+
+function waitForBoundsSample(): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, PET_BOUNDS_SAMPLE_INTERVAL_MS);
+  });
+}
+
+async function sampleAndReportPetInteractionRegion(): Promise<void> {
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+  const samplingStartedAt = performance.now();
+  let sampledBounds = readPetDrawingBounds();
+
+  while (
+    performance.now() - samplingStartedAt <
+    PET_BOUNDS_SAMPLE_DURATION_MS
+  ) {
+    await waitForBoundsSample();
+    sampledBounds = unionBounds(sampledBounds, readPetDrawingBounds());
+  }
+
   void invoke(REPORT_PET_INTERACTION_REGION_COMMAND, {
-    x: petBounds.left - windowBounds.left - PET_INTERACTION_MARGIN_DIP,
-    y: petBounds.top - windowBounds.top - PET_INTERACTION_MARGIN_DIP,
-    width: petBounds.width + PET_INTERACTION_MARGIN_DIP * 2,
-    height: petBounds.height + PET_INTERACTION_MARGIN_DIP * 2,
+    x: sampledBounds.left - PET_INTERACTION_MARGIN_DIP,
+    y: sampledBounds.top - PET_INTERACTION_MARGIN_DIP,
+    width:
+      sampledBounds.right - sampledBounds.left + PET_INTERACTION_MARGIN_DIP * 2,
+    height:
+      sampledBounds.bottom - sampledBounds.top + PET_INTERACTION_MARGIN_DIP * 2,
   }).catch((error: unknown) => {
     console.error("failed to report the pet interaction region", error);
   });
@@ -185,13 +250,6 @@ window.addEventListener(
   { capture: true },
 );
 
-const face = pet.querySelector<SVGGElement>("#pet-face");
-
-if (face === null) {
-  throw new Error("pet face is unavailable");
-}
-
-const petFace: SVGGElement = face;
 let currentExpression: PetExpression = "neutral";
 
 function renderExpression(): void {
@@ -222,4 +280,4 @@ export function setPetDimmed(isDimmed: boolean): void {
 }
 
 renderExpression();
-requestAnimationFrame(reportPetInteractionRegion);
+void sampleAndReportPetInteractionRegion();
