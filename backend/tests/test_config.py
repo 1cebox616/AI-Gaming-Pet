@@ -65,7 +65,7 @@ def test_missing_field_uses_its_default_and_logs_warning(
     assert "speech.voice_name is missing" in caplog.text
 
 
-def test_invalid_value_falls_back_to_defaults_and_logs_warning(
+def test_invalid_sections_fall_back_independently_and_log_warning(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -82,7 +82,58 @@ def test_invalid_value_falls_back_to_defaults_and_logs_warning(
 
     assert configuration.speech.enabled is True
     assert configuration.idle.min_interval_seconds == 45
-    assert "invalid backend configuration" in caplog.text
+    assert "configuration section speech at speech.enabled" in caplog.text
+    assert "configuration section idle at idle.min_interval_seconds" in caplog.text
+    assert "'min_interval_seconds': 45" in caplog.text
+
+
+def test_invalid_idle_section_preserves_valid_speech_customization(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An idle validation failure cannot discard a valid speech override."""
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[speech]\nenabled = false\nvoice_name = \"\"\n\n"
+        "[idle]\nenabled = true\nmin_interval_seconds = 5\nmax_interval_seconds = 120\n",
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="pet.config")
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.speech.enabled is False
+    assert configuration.idle.enabled is True
+    assert configuration.idle.min_interval_seconds == 45
+    assert configuration.idle.max_interval_seconds == 120
+    assert "configuration section idle at idle.min_interval_seconds" in caplog.text
+    assert "'min_interval_seconds': 45" in caplog.text
+    assert "configuration section speech" not in caplog.text
+
+
+def test_invalid_speech_section_preserves_valid_idle_customization(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A speech validation failure cannot discard valid idle overrides."""
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[speech]\nenabled = \"invalid\"\nvoice_name = \"\"\n\n"
+        "[idle]\nenabled = false\nmin_interval_seconds = 30\nmax_interval_seconds = 60\n",
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="pet.config")
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.speech.enabled is True
+    assert configuration.speech.voice_name == ""
+    assert configuration.idle.enabled is False
+    assert configuration.idle.min_interval_seconds == 30
+    assert configuration.idle.max_interval_seconds == 60
+    assert "configuration section speech at speech.enabled" in caplog.text
+    assert "'enabled': True" in caplog.text
+    assert "configuration section idle" not in caplog.text
 
 
 def test_reversed_idle_interval_is_swapped(tmp_path: Path) -> None:

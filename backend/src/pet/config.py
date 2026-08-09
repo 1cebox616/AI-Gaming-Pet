@@ -6,7 +6,7 @@ import logging
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -44,6 +44,9 @@ class PetConfig(BaseModel):
     idle: IdleConfig = Field(default_factory=IdleConfig)
 
 
+ConfigSection = TypeVar("ConfigSection", SpeechConfig, IdleConfig)
+
+
 def load_config(
     default_path: Path = DEFAULT_CONFIG_PATH,
     local_path: Path = LOCAL_CONFIG_PATH,
@@ -54,11 +57,9 @@ def load_config(
     merged_data = _merge_sections(default_data, local_data)
     _warn_for_missing_fields(merged_data)
 
-    try:
-        configuration = PetConfig.model_validate(merged_data)
-    except ValidationError as error:
-        logger.warning("invalid backend configuration; using built-in defaults: %s", error)
-        configuration = PetConfig()
+    speech = _validate_section("speech", SpeechConfig, merged_data.get("speech", {}))
+    idle = _validate_section("idle", IdleConfig, merged_data.get("idle", {}))
+    configuration = PetConfig(speech=speech, idle=idle)
 
     if configuration.idle.max_interval_seconds < configuration.idle.min_interval_seconds:
         logger.warning(
@@ -72,8 +73,38 @@ def load_config(
     return configuration
 
 
+def _validate_section(
+    section_name: str,
+    model_type: type[ConfigSection],
+    section_data: Any,
+) -> ConfigSection:
+    """Validate one section without discarding valid settings in the other section."""
+    try:
+        return model_type.model_validate(section_data)
+    except ValidationError as error:
+        defaults = model_type()
+        invalid_fields = ", ".join(
+            f"{section_name}.{'.'.join(str(part) for part in item['loc'])}"
+            if item["loc"]
+            else section_name
+            for item in error.errors()
+        )
+        logger.warning(
+            "invalid backend configuration section %s at %s; "
+            "using section defaults: %s",
+            section_name,
+            invalid_fields,
+            defaults.model_dump(),
+        )
+        return defaults
+
+
 def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
     """Record each missing known setting before Pydantic fills in its default."""
+    default_values = {
+        "speech": SpeechConfig().model_dump(),
+        "idle": IdleConfig().model_dump(),
+    }
     expected_fields = {
         "speech": ("enabled", "voice_name"),
         "idle": (
@@ -86,16 +117,18 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
         section = configuration_data.get(section_name)
         if not isinstance(section, Mapping):
             logger.warning(
-                "backend configuration section %s is missing; using default values",
+                "backend configuration section %s is missing; using default values: %s",
                 section_name,
+                default_values[section_name],
             )
             continue
         for field_name in field_names:
             if field_name not in section:
                 logger.warning(
-                    "backend configuration field %s.%s is missing; using its default",
+                    "backend configuration field %s.%s is missing; using default value %r",
                     section_name,
                     field_name,
+                    default_values[section_name][field_name],
                 )
 
 
