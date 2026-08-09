@@ -21,6 +21,7 @@ DecisionReason = Literal[
     "alive_threshold",
     "round_limit",
     "cooldown",
+    "minimum_gap",
     "higher_priority",
 ]
 
@@ -50,6 +51,7 @@ _REASON_LABELS: dict[DecisionReason, str] = {
     "alive_threshold": "交火中未达门槛",
     "round_limit": "每回合上限",
     "cooldown": "冷却未过",
+    "minimum_gap": "最小间隔未过",
     "higher_priority": "已有更高优先级事件",
 }
 
@@ -214,6 +216,16 @@ class SpeechPolicy:
         if self._last_selected_at is not None:
             elapsed = max(0.0, now - self._last_selected_at)
             if elapsed < self._config.cooldown_seconds:
+                if priority >= self._config.cooldown_override_priority:
+                    if elapsed < self._config.minimum_gap_seconds:
+                        return _rejected(
+                            event,
+                            priority,
+                            "minimum_gap",
+                            f"距上次发言 {elapsed:.3f} 秒，最小间隔 "
+                            f"{self._config.minimum_gap_seconds:g} 秒未过",
+                        )
+                    return None
                 return _rejected(
                     event,
                     priority,

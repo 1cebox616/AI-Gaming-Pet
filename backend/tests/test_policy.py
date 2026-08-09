@@ -7,8 +7,9 @@ from typing import Any
 import pytest
 
 from pet.config import EventsConfig, PolicyConfig
+from pet.events import EventDetector
 from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, parse_snapshot
-from pet.policy import PolicyDecision, replay_policy
+from pet.policy import PolicyDecision, SpeechPolicy, replay_policy
 from pet.session import GameSessionTracker
 
 EVENT_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
@@ -80,10 +81,34 @@ def _decisions(
     ).decisions
 
 
+def _cooldown_override_decisions(
+    fixtures: tuple[dict[str, Any], dict[str, Any]],
+    config: PolicyConfig,
+    *,
+    last_now: float | None = None,
+) -> tuple[PolicyDecision, ...]:
+    """Run three ordered real snapshots, optionally compressing the final interval."""
+    snapshots = _same_round_timeline(fixtures)[:3]
+    detector = EventDetector(EventsConfig())
+    tracker = GameSessionTracker(GSI_SILENCE_SECONDS)
+    policy = SpeechPolicy(config)
+    decisions: list[PolicyDecision] = []
+    for index, snapshot in enumerate(snapshots):
+        game = tracker.observe(snapshot)
+        policy.observe_snapshot(snapshot)
+        events = detector.observe(snapshot)
+        now = last_now if index == len(snapshots) - 1 and last_now is not None else snapshot.ts
+        decisions.extend(policy.decide(events, game, now=now, muted=False).decisions)
+    return tuple(decisions)
+
+
 def test_alive_combat_drops_normal_kills_but_allows_three_kill(
     recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
-    decisions = _decisions(_three_kill_sequence(recorded_fixtures))
+    decisions = _decisions(
+        _three_kill_sequence(recorded_fixtures),
+        PolicyConfig(alive_priority_threshold=75),
+    )
     normal_kills = [decision for decision in decisions if decision.event.type == "kill"]
     three_kill = next(
         decision
@@ -159,6 +184,7 @@ def test_cooldown_drops_early_batch_then_allows_later_event(
             cooldown_seconds=20,
             max_lines_per_round=20,
             alive_priority_threshold=0,
+            cooldown_override_priority=101,
         ),
     )
     selected = [decision for decision in decisions if decision.selected]
@@ -242,6 +268,7 @@ def test_cooldown_config_changes_same_real_timeline(
             cooldown_seconds=20,
             max_lines_per_round=20,
             alive_priority_threshold=0,
+            cooldown_override_priority=101,
         ),
     )
     immediate = _decisions(
@@ -255,6 +282,100 @@ def test_cooldown_config_changes_same_real_timeline(
 
     assert sum(decision.selected for decision in cooled) == 2
     assert sum(decision.selected for decision in immediate) == 3
+
+
+def test_low_priority_event_is_still_dropped_during_cooldown(
+    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
+) -> None:
+    decisions = _cooldown_override_decisions(
+        recorded_fixtures,
+        PolicyConfig(
+            cooldown_seconds=20,
+            max_lines_per_round=20,
+            cooldown_override_priority=70,
+            minimum_gap_seconds=2,
+        ),
+    )
+    third_ts = _same_round_timeline(recorded_fixtures)[2].ts
+    normal_kill = next(
+        decision
+        for decision in decisions
+        if decision.event.ts == third_ts and decision.event.type == "kill"
+    )
+
+    assert normal_kill.priority == 20
+    assert normal_kill.selected is False
+    assert normal_kill.reason_code == "cooldown"
+
+
+def test_high_priority_event_overrides_regular_cooldown(
+    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
+) -> None:
+    decisions = _cooldown_override_decisions(
+        recorded_fixtures,
+        PolicyConfig(
+            cooldown_seconds=20,
+            max_lines_per_round=20,
+            cooldown_override_priority=70,
+            minimum_gap_seconds=2,
+        ),
+    )
+    three_kill = next(
+        decision
+        for decision in decisions
+        if decision.event.type == "multi_kill" and decision.event.facts["count"] == 3
+    )
+
+    assert three_kill.priority == 80
+    assert three_kill.selected is True
+    assert three_kill.reason_code == "selected"
+
+
+def test_high_priority_event_is_dropped_inside_minimum_gap(
+    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
+) -> None:
+    snapshots = _same_round_timeline(recorded_fixtures)
+    decisions = _cooldown_override_decisions(
+        recorded_fixtures,
+        PolicyConfig(
+            cooldown_seconds=20,
+            max_lines_per_round=20,
+            cooldown_override_priority=70,
+            minimum_gap_seconds=2,
+        ),
+        last_now=snapshots[1].ts + 1,
+    )
+    three_kill = next(
+        decision
+        for decision in decisions
+        if decision.event.type == "multi_kill" and decision.event.facts["count"] == 3
+    )
+
+    assert three_kill.selected is False
+    assert three_kill.reason_code == "minimum_gap"
+    assert three_kill.reason == "距上次发言 1.000 秒，最小间隔 2 秒未过"
+
+
+def test_round_limit_still_blocks_high_priority_cooldown_override(
+    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
+) -> None:
+    decisions = _cooldown_override_decisions(
+        recorded_fixtures,
+        PolicyConfig(
+            cooldown_seconds=20,
+            max_lines_per_round=1,
+            cooldown_override_priority=70,
+            minimum_gap_seconds=2,
+        ),
+    )
+    three_kill = next(
+        decision
+        for decision in decisions
+        if decision.event.type == "multi_kill" and decision.event.facts["count"] == 3
+    )
+
+    assert three_kill.selected is False
+    assert three_kill.reason_code == "round_limit"
 
 
 def test_round_limit_config_changes_same_real_timeline(

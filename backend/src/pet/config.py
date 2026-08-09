@@ -31,8 +31,8 @@ class IdleConfig(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
     enabled: bool = True
-    min_interval_seconds: int = Field(default=45, ge=10, le=3600)
-    max_interval_seconds: int = Field(default=120, ge=10, le=3600)
+    min_interval_seconds: int = Field(default=180, ge=10, le=3600)
+    max_interval_seconds: int = Field(default=300, ge=10, le=3600)
 
 
 class GsiConfig(BaseModel):
@@ -57,9 +57,11 @@ class PolicyConfig(BaseModel):
 
     model_config = ConfigDict(strict=True, extra="forbid")
 
-    cooldown_seconds: float = Field(default=8.0, ge=0, le=60)
-    max_lines_per_round: int = Field(default=3, ge=1, le=20)
-    alive_priority_threshold: int = Field(default=75, ge=0, le=100)
+    cooldown_seconds: float = Field(default=6.0, ge=0, le=60)
+    max_lines_per_round: int = Field(default=4, ge=1, le=20)
+    alive_priority_threshold: int = Field(default=0, ge=0, le=100)
+    cooldown_override_priority: int = Field(default=70, ge=0, le=101)
+    minimum_gap_seconds: float = Field(default=2.0, ge=0, le=10)
 
 
 class PetConfig(BaseModel):
@@ -170,6 +172,8 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
             "cooldown_seconds",
             "max_lines_per_round",
             "alive_priority_threshold",
+            "cooldown_override_priority",
+            "minimum_gap_seconds",
         ),
     }
     for section_name, field_names in expected_fields.items():

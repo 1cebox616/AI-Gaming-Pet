@@ -22,13 +22,16 @@ def test_missing_configuration_file_uses_validated_defaults(
 
     assert configuration.speech.enabled is True
     assert configuration.idle.enabled is True
-    assert configuration.idle.min_interval_seconds < configuration.idle.max_interval_seconds
+    assert configuration.idle.min_interval_seconds == 180
+    assert configuration.idle.max_interval_seconds == 300
     assert configuration.gsi.record is False
     assert configuration.events.thrown_away_max_survival_seconds == 15.0
     assert configuration.events.thrown_away_min_equip_value == 3000
-    assert configuration.policy.cooldown_seconds == 8.0
-    assert configuration.policy.max_lines_per_round == 3
-    assert configuration.policy.alive_priority_threshold == 75
+    assert configuration.policy.cooldown_seconds == 6.0
+    assert configuration.policy.max_lines_per_round == 4
+    assert configuration.policy.alive_priority_threshold == 0
+    assert configuration.policy.cooldown_override_priority == 70
+    assert configuration.policy.minimum_gap_seconds == 2.0
     assert "configuration file is missing" in caplog.text
 
 
@@ -106,10 +109,10 @@ def test_invalid_sections_fall_back_independently_and_log_warning(
     configuration = load_config(default_path, tmp_path / "missing-local.toml")
 
     assert configuration.speech.enabled is True
-    assert configuration.idle.min_interval_seconds == 45
+    assert configuration.idle.min_interval_seconds == 180
     assert "configuration section speech at speech.enabled" in caplog.text
     assert "configuration section idle at idle.min_interval_seconds" in caplog.text
-    assert "'min_interval_seconds': 45" in caplog.text
+    assert "'min_interval_seconds': 180" in caplog.text
 
 
 def test_invalid_idle_section_preserves_valid_speech_customization(
@@ -129,10 +132,10 @@ def test_invalid_idle_section_preserves_valid_speech_customization(
 
     assert configuration.speech.enabled is False
     assert configuration.idle.enabled is True
-    assert configuration.idle.min_interval_seconds == 45
-    assert configuration.idle.max_interval_seconds == 120
+    assert configuration.idle.min_interval_seconds == 180
+    assert configuration.idle.max_interval_seconds == 300
     assert "configuration section idle at idle.min_interval_seconds" in caplog.text
-    assert "'min_interval_seconds': 45" in caplog.text
+    assert "'min_interval_seconds': 180" in caplog.text
     assert "configuration section speech" not in caplog.text
 
 
@@ -266,7 +269,8 @@ def test_policy_section_loads_custom_limits(tmp_path: Path) -> None:
     default_path = tmp_path / "config.toml"
     default_path.write_text(
         "[policy]\ncooldown_seconds = 12.5\nmax_lines_per_round = 7\n"
-        "alive_priority_threshold = 90\n",
+        "alive_priority_threshold = 90\ncooldown_override_priority = 85\n"
+        "minimum_gap_seconds = 3.5\n",
         encoding="utf-8",
     )
 
@@ -275,6 +279,8 @@ def test_policy_section_loads_custom_limits(tmp_path: Path) -> None:
     assert configuration.policy.cooldown_seconds == 12.5
     assert configuration.policy.max_lines_per_round == 7
     assert configuration.policy.alive_priority_threshold == 90
+    assert configuration.policy.cooldown_override_priority == 85
+    assert configuration.policy.minimum_gap_seconds == 3.5
 
 
 @pytest.mark.parametrize(
@@ -288,6 +294,12 @@ def test_policy_section_loads_custom_limits(tmp_path: Path) -> None:
         "alive_priority_threshold = 75\n",
         "cooldown_seconds = 8\nmax_lines_per_round = 3\n"
         "alive_priority_threshold = 101\n",
+        "cooldown_seconds = 8\nmax_lines_per_round = 3\n"
+        "alive_priority_threshold = 75\ncooldown_override_priority = 102\n",
+        "cooldown_seconds = 8\nmax_lines_per_round = 3\n"
+        "alive_priority_threshold = 75\nminimum_gap_seconds = 11\n",
+        "cooldown_seconds = 8\nmax_lines_per_round = 3\n"
+        "alive_priority_threshold = 75\nminimum_gap_seconds = \"2\"\n",
         "cooldown_seconds = 8\nmax_lines_per_round = 3\n"
         "alive_priority_threshold = 75\nunknown_limit = 1\n",
     ),
@@ -314,9 +326,11 @@ def test_invalid_policy_section_falls_back_alone_and_logs_warning(
 
     configuration = load_config(default_path, tmp_path / "missing-local.toml")
 
-    assert configuration.policy.cooldown_seconds == 8.0
-    assert configuration.policy.max_lines_per_round == 3
-    assert configuration.policy.alive_priority_threshold == 75
+    assert configuration.policy.cooldown_seconds == 6.0
+    assert configuration.policy.max_lines_per_round == 4
+    assert configuration.policy.alive_priority_threshold == 0
+    assert configuration.policy.cooldown_override_priority == 70
+    assert configuration.policy.minimum_gap_seconds == 2.0
     assert configuration.speech.enabled is False
     assert configuration.idle.enabled is False
     assert configuration.gsi.record is True

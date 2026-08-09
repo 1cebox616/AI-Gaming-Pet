@@ -10,9 +10,9 @@ voice_name = ""
 # 是否启用自动播报；关闭后托盘手动“说句话”仍可用。
 enabled = true
 # 自动播报的最短等待秒数。
-min_interval_seconds = 45
+min_interval_seconds = 180
 # 自动播报的最长等待秒数。
-max_interval_seconds = 120
+max_interval_seconds = 300
 
 # CS2 Game State Integration 原始数据录制。默认关闭，避免日常运行持续写盘。
 [gsi]
@@ -27,9 +27,14 @@ thrown_away_min_equip_value = 3000
 
 [policy]
 # 两次发言之间的最短间隔秒数。数值越大，宠物越安静。
-cooldown_seconds = 8
+cooldown_seconds = 6
 # 每个回合最多发言几次。
-max_lines_per_round = 3
+max_lines_per_round = 4
 # 你还活着、回合进行中时，事件优先级至少要达到多少才允许打断你。
 # 数值越高越安静；设为 0 表示活着时也什么都说。
-alive_priority_threshold = 75
+alive_priority_threshold = 0
+# 优先级不低于这个值的事件可以打断冷却直接开口。
+# 设为 101 表示关闭该机制。
+cooldown_override_priority = 70
+# 即使打断冷却，两句话之间也至少间隔这么多秒，避免叠音。
+minimum_gap_seconds = 2
