@@ -1,0 +1,75 @@
+{
+  "_provenance": {
+    "recording": "gsi-20260809-121524-745957.jsonl",
+    "source_lines": [123, 124],
+    "note": "Consecutive real payloads trimmed to detector fields; Steam IDs are scrubbed."
+  },
+  "samples": [
+    {
+      "ts": 1786294614.791925,
+      "payload": {
+        "provider": {"steamid": "76561198000000001"},
+        "map": {
+          "mode": "casual",
+          "name": "de_ancient_night",
+          "phase": "live",
+          "round": 1,
+          "team_ct": {"score": 0},
+          "team_t": {"score": 1},
+          "round_wins": {"1": "t_win_elimination"}
+        },
+        "round": {"phase": "live"},
+        "player": {
+          "steamid": "76561198000000904",
+          "team": "CT",
+          "activity": "playing",
+          "state": {
+            "health": 100,
+            "round_kills": 1,
+            "round_killhs": 0,
+            "equip_value": 5000
+          },
+          "match_stats": {"deaths": 0},
+          "weapons": {
+            "weapon_0": {
+              "name": "weapon_m4a1_silencer",
+              "state": "active"
+            }
+          }
+        }
+      }
+    },
+    {
+      "ts": 1786294639.1760352,
+      "payload": {
+        "provider": {"steamid": "76561198000000001"},
+        "map": {
+          "mode": "casual",
+          "name": "de_ancient_night",
+          "phase": "live",
+          "round": 2,
+          "team_ct": {"score": 0},
+          "team_t": {"score": 2},
+          "round_wins": {
+            "1": "t_win_elimination",
+            "2": "t_win_bomb"
+          }
+        },
+        "round": {"phase": "over", "win_team": "T"},
+        "player": {
+          "steamid": "76561198000000904",
+          "team": "CT",
+          "activity": "playing",
+          "state": {
+            "health": 0,
+            "round_kills": 1,
+            "round_killhs": 0,
+            "equip_value": 5000
+          },
+          "match_stats": {"deaths": 1},
+          "weapons": {}
+        }
+      }
+    }
+  ]
+}

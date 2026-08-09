@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
+from pet.config import EventsConfig, load_config
 from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, RoundWin, parse_snapshot
 from pet.session import GameSessionTracker
 
@@ -36,9 +37,6 @@ EVENT_TYPES: tuple[EventType, ...] = (
     "round_loss",
 )
 MULTI_KILL_THRESHOLDS = (2, 3, 4, 5)
-THROWN_AWAY_MAX_SURVIVAL_SECONDS = 30.0
-THROWN_AWAY_MIN_EQUIP_VALUE = 3000
-
 _EVENT_LABELS: dict[EventType, str] = {
     "kill": "击杀",
     "kill_headshot": "爆头击杀",
@@ -83,8 +81,9 @@ class ReplayResult:
 class EventDetector:
     """Compare snapshots while keeping independent baselines for each subject."""
 
-    def __init__(self) -> None:
+    def __init__(self, config: EventsConfig) -> None:
         self._session = GameSessionTracker(GSI_SILENCE_SECONDS)
+        self._config = config
         self._subjects: dict[str | None, _SubjectBaseline] = {}
         self._has_observed_snapshot = False
         self._event_index = 0
@@ -193,9 +192,9 @@ class EventDetector:
             thrown_away = (
                 round_kills == 0
                 and survival_seconds is not None
-                and survival_seconds < THROWN_AWAY_MAX_SURVIVAL_SECONDS
+                and survival_seconds < self._config.thrown_away_max_survival_seconds
                 and current.equip_value is not None
-                and current.equip_value >= THROWN_AWAY_MIN_EQUIP_VALUE
+                and current.equip_value >= self._config.thrown_away_min_equip_value
             )
             events.append(
                 self._make_event(
@@ -316,7 +315,11 @@ class EventDetector:
 
 
 def _human_round_number(snapshot: GameSnapshot) -> int | None:
-    return snapshot.round_number + 1 if snapshot.round_number is not None else None
+    if snapshot.round_number is None:
+        return None
+    if snapshot.round_phase == "over" or snapshot.round_win_team is not None:
+        return snapshot.round_number
+    return snapshot.round_number + 1
 
 
 def _is_death(previous: GameSnapshot, current: GameSnapshot) -> bool:
@@ -349,21 +352,18 @@ def _round_win_method(snapshot: GameSnapshot) -> str | None:
     return latest.method
 
 
-def replay_recording(path: Path) -> ReplayResult:
+def replay_recording(path: Path, config: EventsConfig) -> ReplayResult:
     """Replay one raw JSONL recording in timestamp order."""
     snapshots = _load_recording(path)
-    detector = EventDetector()
+    detector = EventDetector(config)
     events: list[GameEvent] = []
     covered_rounds: set[tuple[str | None, int]] = set()
     for snapshot in snapshots:
         events.extend(detector.observe(snapshot))
         if snapshot.map_phase == "live" and snapshot.round_number is not None:
-            visible_round = (
-                snapshot.round_number
-                if snapshot.round_phase == "over"
-                else snapshot.round_number + 1
-            )
-            covered_rounds.add((snapshot.map_name, visible_round))
+            round_number = _human_round_number(snapshot)
+            if round_number is not None:
+                covered_rounds.add((snapshot.map_name, round_number))
     return ReplayResult(
         events=tuple(events),
         started_at=snapshots[0].ts if snapshots else 0.0,
@@ -451,7 +451,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the recording replay CLI."""
     args = _build_parser().parse_args(argv)
-    result = replay_recording(args.replay)
+    result = replay_recording(args.replay, load_config().events)
     print(format_replay(result, started_at=result.started_at))
     return 0
 

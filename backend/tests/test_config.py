@@ -24,6 +24,8 @@ def test_missing_configuration_file_uses_validated_defaults(
     assert configuration.idle.enabled is True
     assert configuration.idle.min_interval_seconds < configuration.idle.max_interval_seconds
     assert configuration.gsi.record is False
+    assert configuration.events.thrown_away_max_survival_seconds == 15.0
+    assert configuration.events.thrown_away_min_equip_value == 3000
     assert "configuration file is missing" in caplog.text
 
 
@@ -193,3 +195,64 @@ def test_reversed_idle_interval_is_swapped(tmp_path: Path) -> None:
 
     assert configuration.idle.min_interval_seconds == 45
     assert configuration.idle.max_interval_seconds == 120
+
+
+def test_events_section_loads_custom_thresholds(tmp_path: Path) -> None:
+    """Valid event thresholds are exposed to the detector without coercion surprises."""
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[events]\nthrown_away_max_survival_seconds = 22.5\n"
+        "thrown_away_min_equip_value = 4567\n",
+        encoding="utf-8",
+    )
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.events.thrown_away_max_survival_seconds == 22.5
+    assert configuration.events.thrown_away_min_equip_value == 4567
+
+
+@pytest.mark.parametrize(
+    "events_section",
+    (
+        'thrown_away_max_survival_seconds = "15"\n'
+        "thrown_away_min_equip_value = 3000\n",
+        "thrown_away_max_survival_seconds = 0\n"
+        "thrown_away_min_equip_value = 3000\n",
+        "thrown_away_max_survival_seconds = 15\n"
+        "thrown_away_min_equip_value = 20001\n",
+        "thrown_away_max_survival_seconds = 15\n"
+        "thrown_away_min_equip_value = 3000\nunknown_threshold = 1\n",
+    ),
+)
+def test_invalid_events_section_falls_back_alone_and_logs_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    events_section: str,
+) -> None:
+    """Type, range, and unknown-field errors cannot discard other valid sections."""
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[speech]\nenabled = false\nvoice_name = \"\"\n\n"
+        "[idle]\nenabled = false\nmin_interval_seconds = 30\n"
+        "max_interval_seconds = 60\n\n"
+        "[gsi]\nrecord = true\n\n"
+        "[events]\n"
+        + events_section,
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="pet.config")
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.events.thrown_away_max_survival_seconds == 15.0
+    assert configuration.events.thrown_away_min_equip_value == 3000
+    assert configuration.speech.enabled is False
+    assert configuration.idle.enabled is False
+    assert configuration.idle.min_interval_seconds == 30
+    assert configuration.idle.max_interval_seconds == 60
+    assert configuration.gsi.record is True
+    assert "configuration section events at events." in caplog.text
+    assert "configuration section speech" not in caplog.text
+    assert "configuration section idle" not in caplog.text
+    assert "configuration section gsi" not in caplog.text

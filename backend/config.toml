@@ -18,3 +18,9 @@ max_interval_seconds = 120
 [gsi]
 # 为 true 时，每次启动新建一个 JSONL 文件并异步追加收到的原始 payload。
 record = false
+
+[events]
+# 死亡时若本回合零击杀、存活不足这个秒数、且装备价值不低于下面的门槛，
+# 判定为「白给」。数值越小越严格。
+thrown_away_max_survival_seconds = 15
+thrown_away_min_equip_value = 3000

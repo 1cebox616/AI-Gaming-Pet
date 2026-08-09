@@ -6,17 +6,14 @@ from typing import Any
 
 import pytest
 
-from pet.events import (
-    THROWN_AWAY_MAX_SURVIVAL_SECONDS,
-    THROWN_AWAY_MIN_EQUIP_VALUE,
-    EventDetector,
-    GameEvent,
-    format_replay,
-    replay_recording,
-)
+from pet.config import EventsConfig, load_config
+from pet.events import EventDetector, GameEvent, format_replay, replay_recording
 from pet.gsi import GameSnapshot, parse_snapshot
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
+OVER_DEATH_FIXTURE_PATH = (
+    Path(__file__).parent / "fixtures" / "gsi_over_death_samples.json"
+)
 SELF_STEAMID = "76561198000000001"
 
 
@@ -36,8 +33,10 @@ def _snapshots(event_samples: dict[str, Any], name: str) -> tuple[GameSnapshot, 
     )
 
 
-def _detect(snapshots: tuple[GameSnapshot, ...]) -> tuple[GameEvent, ...]:
-    detector = EventDetector()
+def _detect(
+    snapshots: tuple[GameSnapshot, ...], config: EventsConfig | None = None
+) -> tuple[GameEvent, ...]:
+    detector = EventDetector(config or EventsConfig())
     return tuple(event for snapshot in snapshots for event in detector.observe(snapshot))
 
 
@@ -45,7 +44,7 @@ def test_pitfall_cold_start_existing_stats_only_establishes_baseline(
     event_samples: dict[str, Any],
 ) -> None:
     snapshots = _snapshots(event_samples, "cold_start_existing_stats")
-    detector = EventDetector()
+    detector = EventDetector(EventsConfig())
 
     assert snapshots[0].round_kills == 3
     assert detector.observe(snapshots[0]) == ()
@@ -56,7 +55,7 @@ def test_pitfall_cold_start_round_result_only_establishes_baseline(
 ) -> None:
     result_snapshot = _snapshots(event_samples, "round_win_dedup")[1]
 
-    assert EventDetector().observe(result_snapshot) == ()
+    assert EventDetector(EventsConfig()).observe(result_snapshot) == ()
 
 
 def test_pitfall_round_reset_does_not_create_negative_or_death_events(
@@ -134,7 +133,7 @@ def test_pitfall_spectating_subject_switch_does_not_compare_two_teammates(
     assert _detect(snapshots) == ()
 
 
-def test_pitfall_round_result_is_deduplicated_and_includes_real_method(
+def test_first_round_result_has_finished_round_number_and_is_deduplicated(
     event_samples: dict[str, Any],
 ) -> None:
     events = _detect(_snapshots(event_samples, "round_win_dedup"))
@@ -142,7 +141,7 @@ def test_pitfall_round_result_is_deduplicated_and_includes_real_method(
     assert [event.type for event in events] == ["round_win"]
     assert events[0].subject_steamid == SELF_STEAMID
     assert events[0].subject_is_self is True
-    assert events[0].round_number == 2
+    assert events[0].round_number == 1
     assert events[0].facts == {
         "method": "elimination",
         "score_ct": 0,
@@ -150,7 +149,7 @@ def test_pitfall_round_result_is_deduplicated_and_includes_real_method(
     }
 
 
-def test_round_loss_uses_latest_self_team_not_current_watched_teammate(
+def test_second_round_loss_has_finished_round_number_and_uses_self_team(
     event_samples: dict[str, Any],
 ) -> None:
     events = _detect(_snapshots(event_samples, "round_loss_uses_self_team"))
@@ -158,7 +157,7 @@ def test_round_loss_uses_latest_self_team_not_current_watched_teammate(
     assert [event.type for event in events] == ["round_loss"]
     assert events[0].subject_steamid == SELF_STEAMID
     assert events[0].subject_is_self is True
-    assert events[0].round_number == 3
+    assert events[0].round_number == 2
     assert events[0].facts == {"method": "bomb", "score_ct": 0, "score_t": 2}
 
 
@@ -179,19 +178,51 @@ def test_death_after_trade_kill_is_not_thrown_away_and_keeps_event_order(
     assert events[1].subject_is_self is True
 
 
-def test_real_early_zero_kill_death_meets_thrown_away_thresholds(
-    event_samples: dict[str, Any],
+def test_configured_thrown_away_threshold_changes_same_real_death_classification(
+    event_samples: dict[str, Any], tmp_path: Path
 ) -> None:
-    events = _detect(_snapshots(event_samples, "teammate_thrown_away"))
+    snapshots = _snapshots(event_samples, "teammate_thrown_away")
+    strict_path = tmp_path / "strict.toml"
+    lenient_path = tmp_path / "lenient.toml"
+    strict_path.write_text(
+        "[events]\nthrown_away_max_survival_seconds = 15\n"
+        "thrown_away_min_equip_value = 3000\n",
+        encoding="utf-8",
+    )
+    lenient_path.write_text(
+        "[events]\nthrown_away_max_survival_seconds = 30\n"
+        "thrown_away_min_equip_value = 3000\n",
+        encoding="utf-8",
+    )
+    strict_config = load_config(strict_path, tmp_path / "missing-local.toml").events
+    lenient_config = load_config(lenient_path, tmp_path / "missing-local.toml").events
 
-    assert THROWN_AWAY_MAX_SURVIVAL_SECONDS == 30.0
-    assert THROWN_AWAY_MIN_EQUIP_VALUE == 3000
-    assert [event.type for event in events] == ["death_thrown_away"]
-    assert events[0].facts["survival_seconds"] == pytest.approx(23.6857683)
-    assert events[0].facts["round_kills"] == 0
-    assert events[0].facts["equip_value"] == 4350
-    assert events[0].subject_steamid == "76561198000000902"
-    assert events[0].subject_is_self is False
+    default_events = _detect(snapshots, strict_config)
+    lenient_events = _detect(snapshots, lenient_config)
+
+    assert [event.type for event in default_events] == ["death"]
+    assert [event.type for event in lenient_events] == ["death_thrown_away"]
+    assert default_events[0].facts["survival_seconds"] == pytest.approx(23.6857683)
+    assert default_events[0].facts["round_kills"] == 0
+    assert default_events[0].facts["equip_value"] == 4350
+    assert default_events[0].subject_steamid == "76561198000000902"
+    assert default_events[0].subject_is_self is False
+
+
+def test_death_detected_during_over_phase_belongs_to_finished_round() -> None:
+    loaded: object = json.loads(OVER_DEATH_FIXTURE_PATH.read_text(encoding="utf-8"))
+    assert isinstance(loaded, dict)
+    samples = loaded["samples"]
+    snapshots = tuple(
+        parse_snapshot(sample["payload"], received_at=sample["ts"])
+        for sample in samples
+    )
+
+    events = _detect(snapshots)
+
+    assert [event.type for event in events] == ["death"]
+    assert events[0].round_number == 2
+    assert events[0].subject_steamid == "76561198000000904"
 
 
 def test_same_recorded_sequence_is_deterministic(event_samples: dict[str, Any]) -> None:
@@ -216,8 +247,8 @@ def test_replay_tool_sorts_recorded_rows_and_formats_chinese_summary(
         encoding="utf-8",
     )
 
-    first = replay_recording(recording)
-    second = replay_recording(recording)
+    first = replay_recording(recording, EventsConfig())
+    second = replay_recording(recording, EventsConfig())
     rendered = format_replay(first, started_at=min(sample["ts"] for sample in samples))
 
     assert first == second

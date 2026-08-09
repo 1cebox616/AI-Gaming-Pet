@@ -1,11 +1,11 @@
 # AGENTS.md
-最后更新：M2-T1 验收通过
+最后更新：M2-T2 验收通过
 
 ## 项目概况
 目标：一个常驻 Windows 桌面的 AI 电子宠物，在用户玩 CS2 时实时观战、解说、吐槽。
 
 技术栈（M1-T1 已锁定的实际版本）：
-- 后端：Python 3.12.10 + FastAPI 0.141.1 + uvicorn 0.52.1 + pydantic 2.13.4
+- 后端：Python 3.12.x（>=3.12,<3.13）+ FastAPI 0.141.1 + uvicorn 0.52.1 + pydantic 2.13.4
   + websockets 17.0.1（本地服务，仅绑定 127.0.0.1:8737）
 - 前端：Tauri 2.11.5（Rust crate）/ 2.11.1（JS API）/ 2.11.4（CLI）
   + TypeScript 7.0.2 + Vite 8.2.1 + Prettier 3.9.6，不使用任何 UI 框架
@@ -22,7 +22,11 @@
 - /backend —— Python 后端工程
 - /backend/src/pet —— 后端源码包
     main.py 组装应用与端点 / bridge.py WebSocket 通道与定时广播 /
-    lines.py 待机话术与 Utterance / speech.py 系统语音 / config.py 配置读取
+    lines.py 待机话术与 Utterance / speech.py 系统语音 / config.py 配置读取 /
+    gsi.py CS2 数据接收与 GameSnapshot / network.py 共享端口常量 /
+    session.py 会话状态与主体识别
+- /docs —— 项目文档（gsi-capabilities.md 为 CS2 数据能力清单，由架构师维护，
+  coding agent 不得修改内容）
 - /backend/config.toml —— 默认配置（随代码提交）
 - /backend/config.local.toml —— 可选的本地覆盖（已被 git 忽略，不存在也能运行）
 - /backend/tests —— 后端测试
@@ -94,8 +98,24 @@ M1-T12 优化后实测：
 - 正式构建可执行文件 8.42 MiB，release 编译约 85 秒
 - 未测：游戏全屏运行时的表现，需产品负责人补测
 
+核心契约补充（M2-T2 起）：
+
+GameState（backend/src/pet/session.py），随 state 消息下发：
+    state: offline / menu / warmup / playing / spectating / round_over / match_over
+    mode, map, round, score_ct, score_t
+    subject_steamid   当前这份数据描述的是谁
+    subject_is_self   该主体是否为本机玩家
+
+WebSocket state 消息扩展为：
+    {"type":"state","speech_enabled":bool,"muted":bool,
+     "game":{"state":...,"mode":...,"map":...,"round":...,
+             "score_ct":...,"score_t":...,
+             "subject_steamid":...,"subject_is_self":...}}
+game 字段任何时候都必须存在，无法获知的子字段为 null。
+
 M2 任务序列：
 - M2-T1 GSI 接入、快照解析、配置文件自动安装、原始数据录制、README 重写（已完成）
+- M2-T2 会话状态识别、主体识别、菜单顶部状态显示（已完成）
 - M2-T2 会话状态识别（未开游戏 / 大厅 / 局内 / 观战 + 模式名）
 - M2-T3 六类事件检测器（基于 T1 录制的真实对局数据做测试）
 - M2-T4 发言策略（冷却、每回合上限、交火中少说、死亡后多说）
@@ -115,6 +135,17 @@ M2-T1 的 GSI 实测事实（休闲模式，119 条真实样本，后续任务�
 - 主菜单：map 段整体缺失
 - GSI 还提供 previously / added 增量段（游戏自己给出变化前值），
   可作为自行比对快照的交叉验证手段；主判据仍用自行比对，以便应对后端重启与丢包
+
+M2-T2 补充查证（均以原始 JSONL 中字符串出现次数为准，绕过解析器）：
+- round_totaldmg：出现 0 次，CS2 休闲模式确定不提供。
+  「白给」判据改为：死亡 + 本回合零击杀 + 存活时间短 + 装备价值高，存活时间自行计时
+- map_round_wins：有效且有用，可得每回合获胜方式
+  （已实测 t_win_elimination / ct_win_defuse / t_win_bomb）
+- phase_countdowns：85 条样本出现 0 次，已从配置移除，回合内计时必须自行实现
+- bomb 数据组：出现 0 次，已移除；炸弹状态来自 round.bomb
+- allplayers_*：死亡观战期间同样出现 0 次，已移除。
+  因此只能评论"当前正在观看的那一名队友"，无法评论全队
+- 【易错点】map.round 是**已完成**的回合数，当前回合号需要加一
 
 M2 新增风险：
 - R7 找不到 CS2 配置目录（Steam 库可能在其他盘、可能有多个库）

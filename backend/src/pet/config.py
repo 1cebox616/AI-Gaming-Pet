@@ -43,6 +43,15 @@ class GsiConfig(BaseModel):
     record: bool = False
 
 
+class EventsConfig(BaseModel):
+    """Thresholds used to classify facts inferred from CS2 snapshots."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    thrown_away_max_survival_seconds: float = Field(default=15.0, ge=1, le=120)
+    thrown_away_min_equip_value: int = Field(default=3000, ge=0, le=20000)
+
+
 class PetConfig(BaseModel):
     """The complete runtime configuration for the local pet backend."""
 
@@ -51,9 +60,10 @@ class PetConfig(BaseModel):
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
     idle: IdleConfig = Field(default_factory=IdleConfig)
     gsi: GsiConfig = Field(default_factory=GsiConfig)
+    events: EventsConfig = Field(default_factory=EventsConfig)
 
 
-ConfigSection = TypeVar("ConfigSection", SpeechConfig, IdleConfig, GsiConfig)
+ConfigSection = TypeVar("ConfigSection", SpeechConfig, IdleConfig, GsiConfig, EventsConfig)
 
 
 def load_config(
@@ -69,7 +79,8 @@ def load_config(
     speech = _validate_section("speech", SpeechConfig, merged_data.get("speech", {}))
     idle = _validate_section("idle", IdleConfig, merged_data.get("idle", {}))
     gsi = _validate_section("gsi", GsiConfig, merged_data.get("gsi", {}))
-    configuration = PetConfig(speech=speech, idle=idle, gsi=gsi)
+    events = _validate_section("events", EventsConfig, merged_data.get("events", {}))
+    configuration = PetConfig(speech=speech, idle=idle, gsi=gsi, events=events)
 
     if configuration.idle.max_interval_seconds < configuration.idle.min_interval_seconds:
         logger.warning(
@@ -115,6 +126,7 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
         "speech": SpeechConfig().model_dump(),
         "idle": IdleConfig().model_dump(),
         "gsi": GsiConfig().model_dump(),
+        "events": EventsConfig().model_dump(),
     }
     expected_fields = {
         "speech": ("enabled", "voice_name"),
@@ -124,6 +136,10 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
             "max_interval_seconds",
         ),
         "gsi": ("record",),
+        "events": (
+            "thrown_away_max_survival_seconds",
+            "thrown_away_min_equip_value",
+        ),
     }
     for section_name, field_names in expected_fields.items():
         section = configuration_data.get(section_name)
