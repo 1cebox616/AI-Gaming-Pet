@@ -15,11 +15,18 @@ import wave
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Lock
+from typing import Any, Callable
 
 from pet.config import SpeechConfig
 
 POWERSHELL_EXECUTABLE = "powershell.exe"
 POWERSHELL_TIMEOUT_SECONDS = 15
+WAVE_FORMAT_PCM = 1
+WAVE_MAPPER = 0xFFFFFFFF
+MMSYSERR_NOERROR = 0
+WAVERR_STILLPLAYING = 33
+WHDR_DONE = 0x00000001
+WAVE_OUT_POLL_INTERVAL_SECONDS = 0.005
 PREFERRED_CHINESE_VOICE_NAMES: tuple[str, ...] = (
     "Microsoft Yaoyao",
     "Microsoft Huihui",
@@ -56,6 +63,204 @@ class SpeechMetrics:
 
     synthesis_seconds: float
     playback_start_latency_seconds: float
+    playback_started_at: float
+
+
+@dataclass(frozen=True)
+class _PcmWave:
+    """Decoded PCM parameters and frames kept alive for one WinMM buffer."""
+
+    channels: int
+    sample_width_bytes: int
+    frame_rate: int
+    frames: bytes
+
+
+class _WaveFormatEx(ctypes.Structure):
+    _fields_ = [
+        ("wFormatTag", ctypes.c_ushort),
+        ("nChannels", ctypes.c_ushort),
+        ("nSamplesPerSec", ctypes.c_uint32),
+        ("nAvgBytesPerSec", ctypes.c_uint32),
+        ("nBlockAlign", ctypes.c_ushort),
+        ("wBitsPerSample", ctypes.c_ushort),
+        ("cbSize", ctypes.c_ushort),
+    ]
+
+
+class _WaveHeader(ctypes.Structure):
+    _fields_ = [
+        ("lpData", ctypes.c_void_p),
+        ("dwBufferLength", ctypes.c_uint32),
+        ("dwBytesRecorded", ctypes.c_uint32),
+        ("dwUser", ctypes.c_size_t),
+        ("dwFlags", ctypes.c_uint32),
+        ("dwLoops", ctypes.c_uint32),
+        ("lpNext", ctypes.c_void_p),
+        ("reserved", ctypes.c_size_t),
+    ]
+
+
+class _WindowsWavePlayer:
+    """Play one in-memory PCM buffer with cross-thread WinMM cancellation."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._active_playback: tuple[int, object] | None = None
+
+    def play(
+        self,
+        wav_bytes: bytes,
+        can_start: Callable[[], bool],
+        on_started: Callable[[float], None],
+    ) -> None:
+        """Queue one WAV buffer and block only until it finishes or is reset."""
+        if sys.platform != "win32":
+            logger.warning("system speech playback is only implemented for Windows")
+            return
+
+        pcm_wave = _decode_pcm_wav(wav_bytes)
+        winmm = _configured_winmm()
+        wave_format = _WaveFormatEx(
+            wFormatTag=WAVE_FORMAT_PCM,
+            nChannels=pcm_wave.channels,
+            nSamplesPerSec=pcm_wave.frame_rate,
+            nAvgBytesPerSec=(
+                pcm_wave.frame_rate * pcm_wave.channels * pcm_wave.sample_width_bytes
+            ),
+            nBlockAlign=pcm_wave.channels * pcm_wave.sample_width_bytes,
+            wBitsPerSample=pcm_wave.sample_width_bytes * 8,
+            cbSize=0,
+        )
+        audio_buffer = ctypes.create_string_buffer(pcm_wave.frames, len(pcm_wave.frames))
+        header = _WaveHeader(
+            lpData=ctypes.cast(audio_buffer, ctypes.c_void_p),
+            dwBufferLength=len(pcm_wave.frames),
+            dwBytesRecorded=0,
+            dwUser=0,
+            dwFlags=0,
+            dwLoops=0,
+            lpNext=None,
+            reserved=0,
+        )
+        device_handle = ctypes.c_void_p()
+        playback_token = object()
+        prepared = False
+
+        try:
+            with self._lock:
+                if not can_start():
+                    return
+
+                _check_wave_out_result(
+                    winmm.waveOutOpen(
+                        ctypes.byref(device_handle),
+                        WAVE_MAPPER,
+                        ctypes.byref(wave_format),
+                        0,
+                        0,
+                        0,
+                    ),
+                    "waveOutOpen",
+                )
+                if device_handle.value is None:
+                    raise RuntimeError("waveOutOpen returned an empty device handle")
+                self._active_playback = (device_handle.value, playback_token)
+
+                _check_wave_out_result(
+                    winmm.waveOutPrepareHeader(
+                        device_handle,
+                        ctypes.byref(header),
+                        ctypes.sizeof(header),
+                    ),
+                    "waveOutPrepareHeader",
+                )
+                prepared = True
+                _check_wave_out_result(
+                    winmm.waveOutWrite(
+                        device_handle,
+                        ctypes.byref(header),
+                        ctypes.sizeof(header),
+                    ),
+                    "waveOutWrite",
+                )
+                on_started(time.perf_counter())
+
+            while not header.dwFlags & WHDR_DONE:
+                time.sleep(WAVE_OUT_POLL_INTERVAL_SECONDS)
+        finally:
+            if device_handle.value is not None:
+                self._release_playback(
+                    winmm,
+                    device_handle,
+                    header,
+                    prepared,
+                    playback_token,
+                    audio_buffer,
+                )
+
+    def stop(self) -> None:
+        """Return the active WinMM buffer immediately from any calling thread."""
+        if sys.platform != "win32":
+            return
+
+        with self._lock:
+            if self._active_playback is None:
+                return
+            device_handle_value, _ = self._active_playback
+            result = _configured_winmm().waveOutReset(ctypes.c_void_p(device_handle_value))
+            if result != MMSYSERR_NOERROR:
+                logger.warning("waveOutReset could not stop playback: %s", _wave_out_error(result))
+
+    def _release_playback(
+        self,
+        winmm: Any,
+        device_handle: ctypes.c_void_p,
+        header: _WaveHeader,
+        prepared: bool,
+        playback_token: object,
+        audio_buffer: ctypes.Array[ctypes.c_char],
+    ) -> None:
+        """Unprepare and close only after the driver has returned the live buffer."""
+        with self._lock:
+            if prepared and not header.dwFlags & WHDR_DONE:
+                reset_result = winmm.waveOutReset(device_handle)
+                if reset_result != MMSYSERR_NOERROR:
+                    logger.warning(
+                        "waveOutReset during playback cleanup failed: %s",
+                        _wave_out_error(reset_result),
+                    )
+
+            if prepared:
+                unprepare_result = winmm.waveOutUnprepareHeader(
+                    device_handle,
+                    ctypes.byref(header),
+                    ctypes.sizeof(header),
+                )
+                if unprepare_result == WAVERR_STILLPLAYING:
+                    winmm.waveOutReset(device_handle)
+                    unprepare_result = winmm.waveOutUnprepareHeader(
+                        device_handle,
+                        ctypes.byref(header),
+                        ctypes.sizeof(header),
+                    )
+                if unprepare_result != MMSYSERR_NOERROR:
+                    logger.warning(
+                        "waveOutUnprepareHeader failed: %s",
+                        _wave_out_error(unprepare_result),
+                    )
+
+            close_result = winmm.waveOutClose(device_handle)
+            if close_result != MMSYSERR_NOERROR:
+                logger.warning("waveOutClose failed: %s", _wave_out_error(close_result))
+
+            active_playback = self._active_playback
+            if active_playback is not None and active_playback[1] is playback_token:
+                self._active_playback = None
+
+        # Keep an explicit reference through unprepare and close; the driver must not
+        # observe a freed PCM buffer while it still owns the WAVEHDR.
+        del audio_buffer
 
 
 class SpeechService:
@@ -71,6 +276,7 @@ class SpeechService:
         self._last_metrics: SpeechMetrics | None = None
         self._is_shutdown = False
         self._enabled = self._configuration.enabled
+        self._player = _WindowsWavePlayer()
 
     def load(self) -> bool:
         """Find and select an installed OneCore Chinese voice."""
@@ -164,7 +370,7 @@ class SpeechService:
 
         if current_future is not None:
             current_future.cancel()
-        _stop_windows_playback()
+        self._player.stop()
 
     def synthesize(self, text: str) -> SynthesizedAudio:
         """Produce an in-memory WAV clip without using an audio output device."""
@@ -196,7 +402,7 @@ class SpeechService:
         with self._lock:
             self._is_shutdown = True
             self._voice = None
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._executor.shutdown(wait=True, cancel_futures=True)
 
     def last_metrics(self) -> SpeechMetrics | None:
         """Return timing captured for the latest request that reached playback."""
@@ -223,22 +429,41 @@ class SpeechService:
         if not self._is_current_generation(generation):
             return
 
-        playback_started_at = time.perf_counter()
+        try:
+            self._player.play(
+                audio.wav_bytes,
+                lambda: self._is_current_generation(generation),
+                lambda playback_started_at: self._record_playback_started(
+                    synthesis_finished_at - synthesis_started_at,
+                    request_started_at,
+                    playback_started_at,
+                ),
+            )
+        except (OSError, RuntimeError, ValueError, wave.Error) as error:
+            logger.warning("system speech playback is unavailable; continuing silently: %s", error)
+
+    def _is_current_generation(self, generation: int) -> bool:
+        with self._lock:
+            return generation == self._generation and not self._is_shutdown
+
+    def _record_playback_started(
+        self,
+        synthesis_seconds: float,
+        request_started_at: float,
+        playback_started_at: float,
+    ) -> None:
+        """Store metrics at the instant WinMM accepts the playback buffer."""
         with self._lock:
             self._last_metrics = SpeechMetrics(
-                synthesis_seconds=synthesis_finished_at - synthesis_started_at,
+                synthesis_seconds=synthesis_seconds,
                 playback_start_latency_seconds=playback_started_at - request_started_at,
+                playback_started_at=playback_started_at,
             )
 
         logger.info(
             "system speech playback started %.3f seconds after utterance dispatch",
             playback_started_at - request_started_at,
         )
-        _play_windows_wav(audio.wav_bytes)
-
-    def _is_current_generation(self, generation: int) -> bool:
-        with self._lock:
-            return generation == self._generation and not self._is_shutdown
 
 
 def _select_voice(
@@ -346,31 +571,84 @@ def _has_wave_output_device() -> bool:
         return False
 
 
-def _play_windows_wav(wav_bytes: bytes) -> None:
-    """Play an in-memory WAV synchronously from a dedicated worker thread."""
-    if sys.platform != "win32":
-        logger.warning("system speech playback is only implemented for Windows")
-        return
-
+def _decode_pcm_wav(wav_bytes: bytes) -> _PcmWave:
+    """Extract the PCM frames and format required by the WinMM waveOut API."""
     try:
-        import winsound
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+            if wav_file.getcomptype() != "NONE":
+                raise ValueError("Windows waveOut playback requires uncompressed PCM audio")
+            channels = wav_file.getnchannels()
+            sample_width_bytes = wav_file.getsampwidth()
+            frame_rate = wav_file.getframerate()
+            frames = wav_file.readframes(wav_file.getnframes())
+    except (EOFError, wave.Error) as error:
+        raise ValueError("speech synthesis returned an invalid WAV container") from error
 
-        winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
-    except (OSError, RuntimeError) as error:
-        logger.warning("system speech playback is unavailable; continuing silently: %s", error)
+    if channels <= 0 or sample_width_bytes <= 0 or frame_rate <= 0 or not frames:
+        raise ValueError("speech synthesis returned empty or invalid PCM audio")
+    return _PcmWave(
+        channels=channels,
+        sample_width_bytes=sample_width_bytes,
+        frame_rate=frame_rate,
+        frames=frames,
+    )
 
 
-def _stop_windows_playback() -> None:
-    """Request immediate cancellation of active Windows WAV playback."""
+def _configured_winmm() -> Any:
+    """Return WinMM with pointer-sized ctypes signatures declared explicitly."""
+    winmm = ctypes.windll.winmm
+    winmm.waveOutOpen.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_uint,
+        ctypes.POINTER(_WaveFormatEx),
+        ctypes.c_size_t,
+        ctypes.c_size_t,
+        ctypes.c_uint32,
+    ]
+    winmm.waveOutOpen.restype = ctypes.c_uint
+    winmm.waveOutPrepareHeader.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_WaveHeader),
+        ctypes.c_uint,
+    ]
+    winmm.waveOutPrepareHeader.restype = ctypes.c_uint
+    winmm.waveOutWrite.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_WaveHeader),
+        ctypes.c_uint,
+    ]
+    winmm.waveOutWrite.restype = ctypes.c_uint
+    winmm.waveOutReset.argtypes = [ctypes.c_void_p]
+    winmm.waveOutReset.restype = ctypes.c_uint
+    winmm.waveOutUnprepareHeader.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_WaveHeader),
+        ctypes.c_uint,
+    ]
+    winmm.waveOutUnprepareHeader.restype = ctypes.c_uint
+    winmm.waveOutClose.argtypes = [ctypes.c_void_p]
+    winmm.waveOutClose.restype = ctypes.c_uint
+    winmm.waveOutGetErrorTextW.argtypes = [ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint]
+    winmm.waveOutGetErrorTextW.restype = ctypes.c_uint
+    return winmm
+
+
+def _check_wave_out_result(result: int, operation: str) -> None:
+    """Raise a useful error when one WinMM operation fails."""
+    if result != MMSYSERR_NOERROR:
+        raise OSError(f"{operation} failed: {_wave_out_error(result)}")
+
+
+def _wave_out_error(result: int) -> str:
+    """Translate one WinMM result code without introducing an audio dependency."""
     if sys.platform != "win32":
-        return
+        return f"WinMM error {result}"
 
-    try:
-        import winsound
-
-        winsound.PlaySound(None, 0)
-    except (OSError, RuntimeError) as error:
-        logger.warning("could not stop system speech playback: %s", error)
+    message = ctypes.create_unicode_buffer(256)
+    translated = _configured_winmm().waveOutGetErrorTextW(result, message, len(message))
+    if translated == MMSYSERR_NOERROR and message.value:
+        return f"{message.value} ({result})"
+    return f"WinMM error {result}"
 
 
 _ONECORE_ENUMERATION_SCRIPT = r'''
