@@ -465,6 +465,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             snapshots,
             configuration.events,
             configuration.policy,
+            personality_style=configuration.personality.style,
         )
         print(format_commentary_replay(commentary_result))
         return 0

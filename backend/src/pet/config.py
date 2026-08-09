@@ -6,7 +6,7 @@ import logging
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -64,6 +64,17 @@ class PolicyConfig(BaseModel):
     minimum_gap_seconds: float = Field(default=2.0, ge=0, le=10)
 
 
+PersonalityStyle = Literal["brother", "caster"]
+
+
+class PersonalityConfig(BaseModel):
+    """Dialogue style selected once when the backend starts."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    style: PersonalityStyle = "brother"
+
+
 class PetConfig(BaseModel):
     """The complete runtime configuration for the local pet backend."""
 
@@ -74,6 +85,7 @@ class PetConfig(BaseModel):
     gsi: GsiConfig = Field(default_factory=GsiConfig)
     events: EventsConfig = Field(default_factory=EventsConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    personality: PersonalityConfig = Field(default_factory=PersonalityConfig)
 
 
 ConfigSection = TypeVar(
@@ -83,6 +95,7 @@ ConfigSection = TypeVar(
     GsiConfig,
     EventsConfig,
     PolicyConfig,
+    PersonalityConfig,
 )
 
 
@@ -101,12 +114,18 @@ def load_config(
     gsi = _validate_section("gsi", GsiConfig, merged_data.get("gsi", {}))
     events = _validate_section("events", EventsConfig, merged_data.get("events", {}))
     policy = _validate_section("policy", PolicyConfig, merged_data.get("policy", {}))
+    personality = _validate_section(
+        "personality",
+        PersonalityConfig,
+        merged_data.get("personality", {}),
+    )
     configuration = PetConfig(
         speech=speech,
         idle=idle,
         gsi=gsi,
         events=events,
         policy=policy,
+        personality=personality,
     )
 
     if configuration.idle.max_interval_seconds < configuration.idle.min_interval_seconds:
@@ -155,6 +174,7 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
         "gsi": GsiConfig().model_dump(),
         "events": EventsConfig().model_dump(),
         "policy": PolicyConfig().model_dump(),
+        "personality": PersonalityConfig().model_dump(),
     }
     expected_fields = {
         "speech": ("enabled", "voice_name"),
@@ -175,6 +195,7 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
             "cooldown_override_priority",
             "minimum_gap_seconds",
         ),
+        "personality": ("style",),
     }
     for section_name, field_names in expected_fields.items():
         section = configuration_data.get(section_name)

@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import json
 from pathlib import Path
 import random
+import re
 from typing import Any
 
 from fastapi import FastAPI, Request, WebSocket
@@ -21,7 +22,14 @@ from pet.commentary import (
     replay_commentary,
 )
 from pet.commentary_templates import COMMENTARY_TEMPLATES, CommentaryCategory
-from pet.config import EventsConfig, GsiConfig, IdleConfig, PolicyConfig, SpeechConfig
+from pet.config import (
+    EventsConfig,
+    GsiConfig,
+    IdleConfig,
+    PersonalityStyle,
+    PolicyConfig,
+    SpeechConfig,
+)
 from pet.events import EventType, GameEvent
 from pet.gsi import (
     GSI_SILENCE_SECONDS,
@@ -42,6 +50,43 @@ VALID_EMOTIONS: set[Emotion] = {
     "surprised",
     "speechless",
 }
+FORBIDDEN_ADVICE = (
+    "稳住",
+    "别急",
+    "注意",
+    "小心",
+    "建议",
+    "应该",
+    "最好",
+    "冷静",
+    "深呼吸",
+    "心态",
+    "慢一点",
+    "记得",
+    "记住",
+    "别忘",
+)
+FORBIDDEN_RAW_CURSES = ("草", "操", "妈", "傻逼", "废物")
+COLLECTIVE_MARKERS = ("咱们", "我们这边", "这波", "这一分")
+PERSONAL_ACTION_PHRASES = (
+    "你拆",
+    "你引爆",
+    "你守住",
+    "你埋",
+    "你灭队",
+)
+PERSONAL_CATEGORIES = {
+    "kill",
+    "kill_headshot",
+    "multi_2",
+    "multi_3",
+    "multi_4",
+    "multi_5",
+    "multi_general",
+    "death",
+    "death_thrown_away",
+}
+PLACEHOLDER_PATTERN = re.compile(r"\{[^{}]+\}")
 
 
 @pytest.fixture(scope="module")
@@ -107,22 +152,72 @@ def _recorded_death_snapshots(
     )
 
 
-def test_every_template_category_has_five_real_lines_and_generates_valid_output() -> None:
-    assert COMMENTARY_TEMPLATES
-    for category, templates in COMMENTARY_TEMPLATES.items():
-        event = _event_for_category(category)
-        utterances = tuple(
-            CommentaryGenerator(random.Random(seed)).generate(event)
-            for seed in range(10)
-        )
+def _visible_template_text(text: str) -> str:
+    return PLACEHOLDER_PATTERN.sub("", text)
 
-        assert len(templates) >= 5
-        assert commentary_category(event) == category
-        assert len({utterance.text for utterance in utterances}) == len(templates)
-        assert all(utterance.text.strip() for utterance in utterances)
-        assert all(utterance.emotion in VALID_EMOTIONS for utterance in utterances)
-        assert all("None" not in utterance.text for utterance in utterances)
-        assert all("_win_" not in utterance.text for utterance in utterances)
+
+def test_every_template_category_has_five_real_lines_and_generates_valid_output() -> None:
+    assert set(COMMENTARY_TEMPLATES) == {"brother", "caster"}
+    for personality_style, category_tables in COMMENTARY_TEMPLATES.items():
+        for category, templates in category_tables.items():
+            event = _event_for_category(category)
+            utterances = tuple(
+                CommentaryGenerator(
+                    random.Random(seed),
+                    personality_style=personality_style,
+                ).generate(event)
+                for seed in range(10)
+            )
+
+            assert len(templates) >= 5
+            assert commentary_category(event) == category
+            assert len({utterance.text for utterance in utterances}) == len(templates)
+            assert all(utterance.text.strip() for utterance in utterances)
+            assert all(utterance.emotion in VALID_EMOTIONS for utterance in utterances)
+            assert all("None" not in utterance.text for utterance in utterances)
+            assert all("_win_" not in utterance.text for utterance in utterances)
+
+
+def test_all_personality_templates_pass_style_and_person_rules() -> None:
+    """Scan the raw product corpus so one bad random line cannot hide."""
+    expected_categories = set(COMMENTARY_TEMPLATES["brother"])
+    all_text = ""
+    for category_tables in COMMENTARY_TEMPLATES.values():
+        assert set(category_tables) == expected_categories
+        for category, templates in category_tables.items():
+            texts = tuple(template.text for template in templates)
+            visible_texts = tuple(_visible_template_text(text) for text in texts)
+            all_text += "".join(texts)
+
+            assert len(templates) >= 5
+            assert len(set(texts)) == len(texts)
+            assert any(len(text) <= 8 for text in visible_texts)
+            assert any(len(text) > 15 for text in visible_texts)
+            assert all(template.emotion in VALID_EMOTIONS for template in templates)
+            assert all(
+                forbidden not in text
+                for text in texts
+                for forbidden in (*FORBIDDEN_ADVICE, *FORBIDDEN_RAW_CURSES)
+            )
+            assert all("_win_" not in text for text in texts)
+            assert all("TODO" not in text and "话术" not in text for text in texts)
+
+            if category in PERSONAL_CATEGORIES:
+                assert all("你" in text for text in texts)
+            else:
+                assert all(
+                    any(marker in text for marker in COLLECTIVE_MARKERS)
+                    for text in texts
+                )
+                assert all("你" not in text for text in texts)
+                assert all(
+                    phrase not in text
+                    for text in texts
+                    for phrase in PERSONAL_ACTION_PHRASES
+                )
+
+    assert any(term in all_text for term in ("A点", "A1", "B洞", "中路", "狗洞"))
+    assert all(name in all_text for name in ("s1mple", "NiKo", "ZywOo"))
 
 
 @pytest.mark.parametrize(
@@ -137,10 +232,15 @@ def test_every_template_category_has_five_real_lines_and_generates_valid_output(
         "round_loss",
     ),
 )
+@pytest.mark.parametrize("personality_style", ("brother", "caster"))
 def test_missing_facts_still_produce_natural_non_none_commentary(
     event_type: EventType,
+    personality_style: PersonalityStyle,
 ) -> None:
-    utterance = CommentaryGenerator(random.Random(4)).generate(_event(event_type))
+    utterance = CommentaryGenerator(
+        random.Random(4),
+        personality_style=personality_style,
+    ).generate(_event(event_type))
 
     assert utterance.text.strip()
     assert "None" not in utterance.text
@@ -189,6 +289,20 @@ def test_same_category_never_repeats_the_same_line_consecutively() -> None:
     assert all(current != previous for previous, current in zip(lines, lines[1:]))
 
 
+def test_personality_switch_produces_clearly_different_commentary() -> None:
+    event = _event("kill_headshot", facts={"round_kill_index": 2})
+
+    brother = CommentaryGenerator(
+        random.Random(7), personality_style="brother"
+    ).generate(event)
+    caster = CommentaryGenerator(
+        random.Random(7), personality_style="caster"
+    ).generate(event)
+
+    assert brother.text != caster.text
+    assert brother.model_dump() != caster.model_dump()
+
+
 def test_real_recording_generates_exactly_one_line_per_selected_event(
     event_samples: dict[str, Any],
 ) -> None:
@@ -213,16 +327,31 @@ def test_fixed_seed_makes_real_recording_replay_identical(
 ) -> None:
     snapshots = _recorded_death_snapshots(event_samples)
 
-    first = format_commentary_replay(
-        replay_commentary(snapshots, EventsConfig(), PolicyConfig())
-    )
-    second = format_commentary_replay(
-        replay_commentary(snapshots, EventsConfig(), PolicyConfig())
-    )
+    outputs: dict[PersonalityStyle, str] = {}
+    for personality_style in ("brother", "caster"):
+        first = format_commentary_replay(
+            replay_commentary(
+                snapshots,
+                EventsConfig(),
+                PolicyConfig(),
+                personality_style=personality_style,
+            )
+        )
+        second = format_commentary_replay(
+            replay_commentary(
+                snapshots,
+                EventsConfig(),
+                PolicyConfig(),
+                personality_style=personality_style,
+            )
+        )
 
-    assert first == second
-    assert "实际生成话术：1" in first
-    assert "话术[" in first
+        assert first == second
+        assert "实际生成话术：1" in first
+        assert "话术[" in first
+        outputs[personality_style] = first
+
+    assert outputs["brother"] != outputs["caster"]
 
 
 def _create_real_gsi_commentary_app() -> FastAPI:

@@ -32,6 +32,7 @@ def test_missing_configuration_file_uses_validated_defaults(
     assert configuration.policy.alive_priority_threshold == 0
     assert configuration.policy.cooldown_override_priority == 70
     assert configuration.policy.minimum_gap_seconds == 2.0
+    assert configuration.personality.style == "brother"
     assert "configuration file is missing" in caplog.text
 
 
@@ -341,3 +342,54 @@ def test_invalid_policy_section_falls_back_alone_and_logs_warning(
     assert "configuration section idle" not in caplog.text
     assert "configuration section gsi" not in caplog.text
     assert "configuration section events" not in caplog.text
+
+
+def test_personality_section_switches_to_caster(tmp_path: Path) -> None:
+    """A valid startup style is retained without runtime mutation machinery."""
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        '[personality]\nstyle = "caster"\n',
+        encoding="utf-8",
+    )
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.personality.style == "caster"
+
+
+@pytest.mark.parametrize(
+    "personality_section",
+    (
+        'style = "coach"\n',
+        "style = 1\n",
+        'style = "caster"\nextra = true\n',
+    ),
+)
+def test_invalid_personality_falls_back_only_that_section_and_warns(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    personality_section: str,
+) -> None:
+    """Invalid style data cannot discard valid policy and idle sections."""
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[idle]\nenabled = false\nmin_interval_seconds = 200\n"
+        "max_interval_seconds = 400\n\n"
+        "[policy]\ncooldown_seconds = 9\nmax_lines_per_round = 8\n"
+        "alive_priority_threshold = 25\ncooldown_override_priority = 90\n"
+        "minimum_gap_seconds = 4\n\n"
+        "[personality]\n"
+        + personality_section,
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="pet.config")
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.personality.style == "brother"
+    assert configuration.idle.min_interval_seconds == 200
+    assert configuration.policy.cooldown_seconds == 9
+    assert configuration.policy.cooldown_override_priority == 90
+    assert "configuration section personality at personality." in caplog.text
+    assert "configuration section idle" not in caplog.text
+    assert "configuration section policy" not in caplog.text

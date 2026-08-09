@@ -7,7 +7,7 @@ from concurrent.futures import Future
 
 import pytest
 
-from pet.lines import IDLE_UTTERANCES
+from pet.lines import IDLE_UTTERANCES_BY_PERSONALITY
 from pet.speech import SpeechMetrics, SpeechService
 
 INTERRUPTION_LIMIT_SECONDS = 1.3
@@ -101,7 +101,7 @@ def test_speak_without_an_available_voice_returns_without_raising(
 def test_stop_returns_real_long_playback_within_interruption_limit() -> None:
     """Stopping after one second returns a real 3+ second WinMM playback promptly."""
     speech_service = create_playable_speech_service()
-    long_text = IDLE_UTTERANCES[7].text
+    long_text = IDLE_UTTERANCES_BY_PERSONALITY["brother"][7].text
 
     try:
         assert speech_service.synthesize(long_text).duration_seconds >= 3.0
@@ -123,7 +123,7 @@ def test_stop_returns_real_long_playback_within_interruption_limit() -> None:
 def test_new_utterance_interrupts_real_previous_playback_within_limit() -> None:
     """Dispatching a replacement returns the old real WinMM buffer promptly."""
     speech_service = create_playable_speech_service()
-    long_text = IDLE_UTTERANCES[7].text
+    long_text = IDLE_UTTERANCES_BY_PERSONALITY["brother"][7].text
 
     try:
         first_future = speech_service.speak(long_text)

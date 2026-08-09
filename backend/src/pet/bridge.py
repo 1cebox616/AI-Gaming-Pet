@@ -12,7 +12,7 @@ from typing import Any, Literal
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from pet.config import IdleConfig
+from pet.config import IdleConfig, PersonalityStyle
 from pet.lines import Utterance, next_idle_utterance
 from pet.session import GameState
 from pet.speech import SpeechService
@@ -45,10 +45,12 @@ class PetBridge:
         speech_service: SpeechService,
         idle_configuration: IdleConfig | None = None,
         initial_game: GameState | None = None,
+        personality_style: PersonalityStyle = "brother",
     ) -> None:
         self._connections: set[WebSocket] = set()
         self._speech_service = speech_service
         self._idle_configuration = idle_configuration or IdleConfig()
+        self._personality_style = personality_style
         self._idle_task: asyncio.Task[None] | None = None
         self._idle_reset_event: asyncio.Event | None = None
         self._speech_enabled = speech_service.is_enabled()
@@ -91,7 +93,10 @@ class PetBridge:
 
         try:
             await self._send_state(websocket)
-            await self._send_utterance(websocket, next_idle_utterance())
+            await self._send_utterance(
+                websocket,
+                next_idle_utterance(self._personality_style),
+            )
 
             while True:
                 raw_message = await websocket.receive_text()
@@ -115,7 +120,10 @@ class PetBridge:
         message_type = message.get("type")
         if message_type == REQUEST_IDLE_LINE_MESSAGE_TYPE:
             self._reset_idle_timer()
-            await self._send_utterance(websocket, next_idle_utterance())
+            await self._send_utterance(
+                websocket,
+                next_idle_utterance(self._personality_style),
+            )
             return
 
         if message_type == SET_SPEECH_ENABLED_MESSAGE_TYPE:
@@ -172,7 +180,7 @@ class PetBridge:
                     logger.info("idle broadcast interval elapsed with no connected pets")
                     continue
                 await self._broadcast_utterance(
-                    next_idle_utterance(),
+                    next_idle_utterance(self._personality_style),
                     source="automatic idle",
                     skip_when_muted=True,
                 )

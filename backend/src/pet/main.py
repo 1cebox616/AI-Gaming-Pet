@@ -63,11 +63,16 @@ class HealthResponse(BaseModel):
 configure_pet_logging()
 configuration = load_config()
 speech_service = SpeechService(configuration.speech)
-pet_bridge = PetBridge(speech_service, configuration.idle)
+pet_bridge = PetBridge(
+    speech_service,
+    configuration.idle,
+    personality_style=configuration.personality.style,
+)
 game_session_tracker = GameSessionTracker(offline_timeout_seconds=GSI_SILENCE_SECONDS)
 game_commentary_engine = GameCommentaryEngine(
     configuration.events,
     configuration.policy,
+    personality_style=configuration.personality.style,
 )
 
 

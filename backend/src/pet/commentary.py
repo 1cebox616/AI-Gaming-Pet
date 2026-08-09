@@ -15,7 +15,7 @@ from pet.commentary_templates import (
     CommentaryCategory,
     CommentaryTemplate,
 )
-from pet.config import EventsConfig, PolicyConfig
+from pet.config import EventsConfig, PersonalityStyle, PolicyConfig
 from pet.events import EventDetector, EventType, GameEvent
 from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot
 from pet.lines import Utterance
@@ -121,14 +121,20 @@ class CommentaryReplayResult:
 class CommentaryGenerator:
     """Choose and safely fill templates without repeating one category consecutively."""
 
-    def __init__(self, rng: random.Random | None = None) -> None:
+    def __init__(
+        self,
+        rng: random.Random | None = None,
+        *,
+        personality_style: PersonalityStyle = "brother",
+    ) -> None:
         self._rng = rng or random.Random()
+        self._templates = COMMENTARY_TEMPLATES[personality_style]
         self._last_template_indexes: dict[CommentaryCategory, int] = {}
 
     def generate(self, event: GameEvent) -> Utterance:
         """Generate one valid utterance without exposing missing or raw method values."""
         category = commentary_category(event)
-        templates = COMMENTARY_TEMPLATES[category]
+        templates = self._templates[category]
         template_index = self._choose_template_index(category, templates)
         template = templates[template_index]
         text = template.text.format_map(_template_context(event))
@@ -162,10 +168,14 @@ class GameCommentaryEngine:
         events_config: EventsConfig,
         policy_config: PolicyConfig,
         generator: CommentaryGenerator | None = None,
+        *,
+        personality_style: PersonalityStyle = "brother",
     ) -> None:
         self._detector = EventDetector(events_config)
         self._policy = SpeechPolicy(policy_config)
-        self._generator = generator or CommentaryGenerator()
+        self._generator = generator or CommentaryGenerator(
+            personality_style=personality_style
+        )
 
     def observe(
         self,
@@ -216,13 +226,17 @@ def replay_commentary(
     *,
     muted: bool = False,
     random_seed: int = REPLAY_RANDOM_SEED,
+    personality_style: PersonalityStyle = "brother",
 ) -> CommentaryReplayResult:
     """Replay the complete session-to-commentary chain with a fixed random seed."""
     session = GameSessionTracker(GSI_SILENCE_SECONDS)
     engine = GameCommentaryEngine(
         events_config,
         policy_config,
-        CommentaryGenerator(random.Random(random_seed)),
+        CommentaryGenerator(
+            random.Random(random_seed),
+            personality_style=personality_style,
+        ),
     )
     dispositions: list[CommentaryDisposition] = []
     for snapshot in snapshots:
