@@ -11,11 +11,13 @@ from pet.gsi import GameSnapshot, WeaponSlot, human_round_number
 from pet.session import GameState
 from pet.situation import (
     RoundSituation,
+    TimelineEntry,
     armor_status,
     held_weapon,
     is_carrying_bomb,
     is_currently_flashed,
     is_currently_smoked,
+    weapon_display_name,
 )
 
 _MODE_LABELS = {
@@ -39,25 +41,6 @@ _BOMB_STATE_LABELS = {
     "defused": "炸弹已拆除",
     "exploded": "炸弹已爆炸",
 }
-_WEAPON_LABELS = {
-    "ak47": "AK47",
-    "aug": "AUG",
-    "awp": "AWP",
-    "bizon": "PP-Bizon",
-    "c4": "C4",
-    "deagle": "沙鹰",
-    "famas": "FAMAS",
-    "galilar": "Galil AR",
-    "glock": "Glock",
-    "hkp2000": "P2000",
-    "m4a1": "M4A4",
-    "m4a1_silencer": "M4A1-S",
-    "mac10": "MAC-10",
-    "mp9": "MP9",
-    "p250": "P250",
-    "ssg08": "SSG 08",
-    "usp_silencer": "USP-S",
-}
 _FACT_ORDER = (
     "round_kill_index",
     "delta",
@@ -73,6 +56,13 @@ _FACT_ORDER = (
     "score_ct",
     "score_t",
 )
+_ZERO_SIGNAL_EVENT_FACTS = {
+    "round_kill_index",
+    "delta",
+    "count",
+    "round_kills",
+    "team_consecutive_round_losses",
+}
 
 
 def render_situation_card(
@@ -83,15 +73,15 @@ def render_situation_card(
 ) -> str:
     """Render everything the model may know about this moment as Chinese text."""
     sections = [
-        _section("对局", _match_facts(snapshot, game)),
+        _section("对局", _match_facts(snapshot, round_situation)),
         _section("我", _player_facts(snapshot, game, round_situation)),
     ]
     current_round = human_round_number(snapshot)
-    if (
-        game.subject_is_self is True
-        and round_situation.round_number == current_round
-    ):
-        sections.append(_section("本回合", _round_facts(snapshot, round_situation)))
+    if round_situation.round_number == current_round:
+        sections.append(
+            _section("本回合", _round_facts(snapshot, game, round_situation))
+        )
+        sections.append(_timeline_section(round_situation.timeline))
     sections.extend(
         (
             _section("全场", _match_statistics(snapshot, game)),
@@ -106,7 +96,9 @@ def _section(name: str, facts: Iterable[str]) -> str | None:
     return f"【{name}】{content}" if content else None
 
 
-def _match_facts(snapshot: GameSnapshot, game: GameState) -> list[str]:
+def _match_facts(
+    snapshot: GameSnapshot, round_situation: RoundSituation
+) -> list[str]:
     facts: list[str] = []
     if snapshot.map_mode is not None:
         facts.append(_MODE_LABELS.get(snapshot.map_mode.lower(), snapshot.map_mode))
@@ -117,14 +109,14 @@ def _match_facts(snapshot: GameSnapshot, game: GameState) -> list[str]:
         facts.append(f"第{round_number}回合")
     if snapshot.score_ct is not None and snapshot.score_t is not None:
         facts.append(f"CT {snapshot.score_ct}:{snapshot.score_t} T")
-    if game.subject_is_self is True and snapshot.team in {"CT", "T"}:
-        facts.append(f"我在{snapshot.team}方")
+    if round_situation.self_team in {"CT", "T"}:
+        facts.append(f"我在{round_situation.self_team}方")
         losses = (
             snapshot.ct_consecutive_round_losses
-            if snapshot.team == "CT"
+            if round_situation.self_team == "CT"
             else snapshot.t_consecutive_round_losses
         )
-        if losses is not None:
+        if losses is not None and losses > 0:
             facts.append(f"我方连败{losses}轮")
     return facts
 
@@ -155,56 +147,70 @@ def _player_facts(
     if weapon is not None:
         facts.append(_held_weapon_fact(weapon))
     elif snapshot.active_weapon is not None:
-        facts.append(f"手持{_weapon_label(snapshot.active_weapon)}")
-    carrying_bomb = is_carrying_bomb(snapshot)
-    if carrying_bomb is not None:
-        facts.append("带包" if carrying_bomb else "没带包")
-    if snapshot.has_defusekit is not None:
-        facts.append("带拆弹器" if snapshot.has_defusekit else "没带拆弹器")
-    flashed = is_currently_flashed(snapshot)
-    if flashed is not None:
-        facts.append("正被闪" if flashed else "未被闪")
-    smoked = is_currently_smoked(snapshot)
-    if smoked is not None:
-        facts.append("正在烟中" if smoked else "不在烟中")
+        facts.append(f"手持{weapon_display_name(snapshot.active_weapon)}")
+    if is_carrying_bomb(snapshot) is True:
+        facts.append("带包")
+    if snapshot.has_defusekit is True:
+        facts.append("带拆弹器")
+    if is_currently_flashed(snapshot) is True:
+        facts.append("正被闪")
+    if is_currently_smoked(snapshot) is True:
+        facts.append("正在烟中")
     return facts
 
 
 def _round_facts(
     snapshot: GameSnapshot,
+    game: GameState,
     situation: RoundSituation,
 ) -> list[str]:
     facts: list[str] = []
-    if snapshot.round_kills is not None:
+    if (
+        game.subject_is_self is True
+        and snapshot.round_kills is not None
+        and snapshot.round_kills > 0
+    ):
         facts.append(f"{snapshot.round_kills}个击杀")
-    if snapshot.round_killhs is not None:
+    if (
+        game.subject_is_self is True
+        and snapshot.round_killhs is not None
+        and snapshot.round_killhs > 0
+    ):
         facts.append(f"{snapshot.round_killhs}个爆头击杀")
-    facts.extend(
-        (
-            f"被闪{situation.flash_count}次",
-            f"被闪累计{_seconds(situation.flashed_seconds_total)}秒",
-            f"最长{_seconds(situation.longest_flash_seconds)}秒",
-            f"在烟中累计{_seconds(situation.smoked_seconds_total)}秒",
-        )
-    )
-    if situation.max_smoke_intensity is not None:
+    if situation.flash_count > 0:
+        facts.append(f"被闪{situation.flash_count}次")
+    if situation.flashed_seconds_total > 0:
+        facts.append(f"被闪累计{_seconds(situation.flashed_seconds_total)}秒")
+    if situation.longest_flash_seconds > 0:
+        facts.append(f"最长{_seconds(situation.longest_flash_seconds)}秒")
+    if situation.smoked_seconds_total > 0:
+        facts.append(f"在烟中累计{_seconds(situation.smoked_seconds_total)}秒")
+    if situation.max_smoke_intensity is not None and situation.max_smoke_intensity > 0:
         facts.append(f"最高烟雾强度{situation.max_smoke_intensity}")
-    facts.extend(
-        (
-            f"燃烧{situation.burn_count}次",
-            f"累计掉血{situation.total_damage_taken}",
-        )
-    )
-    if situation.lowest_health_while_alive is not None:
+    if situation.burn_count > 0:
+        facts.append(f"燃烧{situation.burn_count}次")
+    if situation.total_damage_taken > 0:
+        facts.append(f"累计掉血{situation.total_damage_taken}")
+    if (
+        situation.lowest_health_while_alive is not None
+        and situation.lowest_health_while_alive < 100
+    ):
         facts.append(f"存活时最低{situation.lowest_health_while_alive}血")
     if situation.primary_weapons_used:
         facts.append(
-            "用过" + "、".join(_weapon_label(name) for name in situation.primary_weapons_used)
+            "用过"
+            + "、".join(
+                weapon_display_name(name) for name in situation.primary_weapons_used
+            )
         )
-    facts.append("本回合买过装备" if situation.bought_equipment else "本回合未买装备")
+    if situation.bought_equipment:
+        facts.append("本回合买过装备")
     if snapshot.bomb_state is not None:
         facts.append(_BOMB_STATE_LABELS.get(snapshot.bomb_state, snapshot.bomb_state))
-    if situation.seconds_since_bomb_planted is not None:
+    if (
+        situation.seconds_since_bomb_planted is not None
+        and situation.seconds_since_bomb_planted > 0
+    ):
         facts.append(f"安放后{_seconds(situation.seconds_since_bomb_planted)}秒")
     return facts
 
@@ -218,9 +224,9 @@ def _match_statistics(snapshot: GameSnapshot, game: GameState) -> list[str]:
         (snapshot.match_assists, "助"),
         (snapshot.match_deaths, "死"),
     ):
-        if value is not None:
+        if value is not None and value > 0:
             facts.append(f"{value}{suffix}")
-    if snapshot.match_mvps is not None:
+    if snapshot.match_mvps is not None and snapshot.match_mvps > 0:
         facts.append(f"MVP{snapshot.match_mvps}次")
     return facts
 
@@ -230,7 +236,7 @@ def _event_facts(event: GameEvent) -> list[str]:
     renderers = {
         "round_kill_index": lambda value: f"本回合第{value}杀",
         "delta": lambda value: f"连续增加{value}杀",
-        "weapon": lambda value: f"武器{_weapon_label(str(value))}",
+        "weapon": lambda value: f"武器{weapon_display_name(str(value))}",
         "count": lambda value: f"本回合累计{value}杀",
         "survival_seconds": lambda value: f"存活{_seconds(value)}秒",
         "round_kills": lambda value: f"本回合{value}杀",
@@ -244,13 +250,15 @@ def _event_facts(event: GameEvent) -> list[str]:
     }
     for key in _FACT_ORDER:
         value = event.facts.get(key)
-        if value is not None:
+        if value is not None and not (
+            key in _ZERO_SIGNAL_EVENT_FACTS and value == 0
+        ):
             facts.append(renderers[key](value))
     return facts
 
 
 def _held_weapon_fact(weapon: WeaponSlot) -> str:
-    fact = f"手持{_weapon_label(weapon.name)}"
+    fact = f"手持{weapon_display_name(weapon.name)}"
     if weapon.ammo_clip is not None:
         clip = str(weapon.ammo_clip)
         if weapon.ammo_clip_max is not None:
@@ -261,9 +269,39 @@ def _held_weapon_fact(weapon: WeaponSlot) -> str:
     return fact
 
 
-def _weapon_label(name: str) -> str:
-    normalized = name.removeprefix("weapon_").lower()
-    return _WEAPON_LABELS.get(normalized, normalized)
+def _timeline_section(entries: tuple[TimelineEntry, ...]) -> str | None:
+    if not entries:
+        return None
+    lines = ["【本回合时间线】"]
+    lines.extend(
+        f"  {_seconds(entry.seconds)}s {_timeline_entry_text(entry)}"
+        for entry in entries
+    )
+    return "\n".join(lines)
+
+
+def _timeline_entry_text(entry: TimelineEntry) -> str:
+    detail = entry.detail
+    if entry.kind == "bought":
+        return "买了装备"
+    if entry.kind == "flash_start":
+        return "被闪"
+    if entry.kind == "flash_end":
+        return "闪光结束" + (f" {detail}" if detail else "")
+    if entry.kind == "smoke_start":
+        return "进烟"
+    if entry.kind == "smoke_end":
+        smoke_duration = detail.removeprefix("持续") if detail else None
+        return "出烟" + (f" 在烟中{smoke_duration}" if smoke_duration else "")
+    if entry.kind == "kill":
+        return "击杀" + (f" {detail}" if detail else "")
+    if entry.kind == "damage":
+        return detail or "受到伤害"
+    if entry.kind == "primary_weapon":
+        return "主武器" + (f" {detail}" if detail else "")
+    if entry.kind == "bomb":
+        return "炸弹" + (detail or "状态变化")
+    return "阵亡"
 
 
 def _seconds(value: Any) -> str:

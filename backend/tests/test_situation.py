@@ -10,6 +10,7 @@ from pet.session import GameSessionTracker, GameState, MatchLifecycleTracker
 from pet.situation import (
     RoundSituation,
     SituationTracker,
+    TimelineEntry,
     armor_status,
     held_weapon,
     is_carrying_bomb,
@@ -41,6 +42,10 @@ def _snapshot(
     ammo_clip: int | None = 30,
     weapon_slots: tuple[tuple[str, str | None, str], ...] | None = None,
     bomb_state: str | None = None,
+    round_kills: int | None = 0,
+    round_killhs: int | None = 0,
+    team: str = "CT",
+    has_defusekit: bool | None = None,
 ) -> GameSnapshot:
     state: dict[str, object] = {}
     for name, value in (
@@ -52,6 +57,9 @@ def _snapshot(
         ("helmet", helmet),
         ("money", money),
         ("equip_value", equip_value),
+        ("round_kills", round_kills),
+        ("round_killhs", round_killhs),
+        ("defusekit", has_defusekit),
     ):
         if value is not None:
             state[name] = value
@@ -91,7 +99,7 @@ def _snapshot(
         "player": {
             "steamid": player_id,
             "activity": "playing",
-            "team": "CT",
+            "team": team,
             "state": state,
             "weapons": weapons,
         },
@@ -409,6 +417,131 @@ def test_bomb_plant_time_and_elapsed_seconds_use_first_planted_snapshot() -> Non
 
     assert result.bomb_planted_at_ts == 12.0
     assert result.seconds_since_bomb_planted == 8.0
+
+
+def test_timeline_records_state_changes_in_time_order_with_human_details() -> None:
+    result = _observe_all(
+        (
+            _snapshot(
+                10.0,
+                money=5000,
+                equip_value=1000,
+                health=100,
+                round_kills=0,
+                round_killhs=0,
+            ),
+            _snapshot(
+                11.0,
+                money=3000,
+                equip_value=3000,
+                health=90,
+                flashed=1,
+                smoked=255,
+                round_kills=0,
+                round_killhs=0,
+            ),
+            _snapshot(
+                11.5,
+                money=3000,
+                equip_value=3000,
+                health=80,
+                flashed=1,
+                smoked=255,
+                round_kills=0,
+                round_killhs=0,
+            ),
+            _snapshot(
+                12.0,
+                money=3000,
+                equip_value=3000,
+                health=80,
+                flashed=0,
+                smoked=0,
+                round_kills=1,
+                round_killhs=1,
+                active_weapon="weapon_awp",
+                bomb_state="planted",
+            ),
+            _snapshot(
+                13.0,
+                money=3000,
+                equip_value=3000,
+                health=0,
+                round_kills=1,
+                round_killhs=1,
+                active_weapon="weapon_awp",
+                bomb_state="defused",
+            ),
+        )
+    )
+
+    assert tuple(entry.kind for entry in result.timeline) == (
+        "primary_weapon",
+        "bought",
+        "flash_start",
+        "smoke_start",
+        "damage",
+        "primary_weapon",
+        "flash_end",
+        "smoke_end",
+        "kill",
+        "bomb",
+        "damage",
+        "bomb",
+        "death",
+    )
+    assert result.timeline[0] == TimelineEntry(0.0, "primary_weapon", "AK47")
+    assert result.timeline[4] == TimelineEntry(1.0, "damage", "掉了20血 剩80血")
+    assert result.timeline[6] == TimelineEntry(2.0, "flash_end", "持续1.0秒")
+    assert result.timeline[7] == TimelineEntry(2.0, "smoke_end", "持续1.0秒")
+    assert result.timeline[8] == TimelineEntry(2.0, "kill", "AWP 爆头")
+    assert result.timeline[-1] == TimelineEntry(3.0, "death", None)
+
+
+def test_damage_entries_at_least_one_second_apart_do_not_merge() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, health=100),
+            _snapshot(11.0, health=90),
+            _snapshot(12.0, health=80),
+        )
+    )
+
+    damage = tuple(entry for entry in result.timeline if entry.kind == "damage")
+    assert damage == (
+        TimelineEntry(1.0, "damage", "掉了10血 剩90血"),
+        TimelineEntry(2.0, "damage", "掉了10血 剩80血"),
+    )
+
+
+def test_timeline_caps_at_25_by_dropping_earliest_damage_and_adding_note() -> None:
+    snapshots = tuple(
+        _snapshot(10.0 + index * 1.1, health=100 - index)
+        for index in range(30)
+    )
+
+    result = _observe_all(snapshots)
+
+    assert len(result.timeline) == 25
+    assert result.timeline[0] == TimelineEntry(0.0, "primary_weapon", "AK47")
+    assert result.timeline[-1].kind == "damage"
+    assert result.timeline[-1].detail == "较早的6条受伤记录已省略"
+
+
+def test_self_team_updates_only_from_self_and_resets_with_round() -> None:
+    tracker = SituationTracker()
+    self_snapshot = _snapshot(1.0, team="CT")
+    own = tracker.observe(self_snapshot, _game(self_snapshot))
+    teammate = _snapshot(2.0, player_id=TEAMMATE_ID, team="T")
+
+    spectating = tracker.observe(teammate, _game(teammate))
+    next_round = _snapshot(3.0, map_round=1, team="T")
+    reset = tracker.observe(next_round, _game(next_round))
+
+    assert own.self_team == "CT"
+    assert spectating.self_team == "CT"
+    assert reset.self_team == "T"
+    assert reset.timeline[0] == TimelineEntry(0.0, "primary_weapon", "AK47")
 
 
 PURE_FUNCTIONS: tuple[Callable[[GameSnapshot], object | None], ...] = (
