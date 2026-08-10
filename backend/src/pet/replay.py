@@ -24,7 +24,7 @@ from pet.gsi import (
 )
 from pet.lines import Utterance
 from pet.policy import DecisionReason, PolicyDecision, SpeechPolicy
-from pet.session import GameSessionTracker, MatchLifecycleTracker
+from pet.session import GameSessionTracker, GameState, MatchLifecycleTracker
 from pet.situation import (
     RoundSituation,
     SituationTracker,
@@ -154,6 +154,9 @@ class CommentaryDisposition:
 
     decision: PolicyDecision
     utterance: Utterance | None
+    snapshot: GameSnapshot
+    game: GameState
+    round_situation: RoundSituation
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,7 +409,7 @@ def replay_commentary(
             detector.reset()
             situation.reset()
             policy.reset()
-        situation.observe(snapshot, game)
+        round_situation = situation.observe(snapshot, game)
         policy.observe_snapshot(snapshot)
         events = detector.observe(snapshot, game)
         batch = policy.decide(events, game, now=snapshot.ts, muted=muted)
@@ -419,6 +422,9 @@ def replay_commentary(
             CommentaryDisposition(
                 decision=decision,
                 utterance=utterance if decision.selected else None,
+                snapshot=snapshot,
+                game=game,
+                round_situation=round_situation,
             )
             for decision in batch.decisions
         )

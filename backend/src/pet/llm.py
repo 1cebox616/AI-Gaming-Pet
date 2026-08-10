@@ -56,6 +56,7 @@ class LlmClientProtocol(Protocol):
         self,
         *,
         model: str,
+        provider: str | None = None,
         system_prompt: str,
         user_prompt: str,
         max_tokens: int,
@@ -110,6 +111,7 @@ class OpenRouterClient:
         self,
         *,
         model: str,
+        provider: str | None = None,
         system_prompt: str,
         user_prompt: str,
         max_tokens: int,
@@ -117,19 +119,26 @@ class OpenRouterClient:
     ) -> LlmResult:
         """Send one non-streaming chat completion and never retry failures."""
         started_at = time.perf_counter()
+        request_body: dict[str, object] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        }
+        if provider is not None:
+            request_body["provider"] = {
+                "only": [provider],
+                "allow_fallbacks": False,
+            }
+
         try:
             response = self._client.post(
                 "chat/completions",
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "max_tokens": max_tokens,
-                    "temperature": temperature,
-                    "stream": False,
-                },
+                json=request_body,
             )
         except httpx.TimeoutException as error:
             latency = time.perf_counter() - started_at

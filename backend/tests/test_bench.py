@@ -3,16 +3,13 @@
 import json
 import math
 from pathlib import Path
-import random
 import re
 from typing import Any
 
 import pytest
 
 from pet.bench import (
-    BLINDING_SEED,
     BenchResult,
-    build_system_prompt,
     calculate_length_statistics,
     check_output,
     commentary_length_statistics,
@@ -22,6 +19,7 @@ from pet.bench import (
 )
 from pet.commentary_templates import COMMENTARY_TEMPLATES
 from pet.llm import LlmError, LlmResult, LlmUsage
+from pet.prompt import load_system_prompt
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 
@@ -31,19 +29,20 @@ class FakeLlmClient:
 
     def __init__(self, *, fail_call: int | None = None) -> None:
         self.fail_call = fail_call
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str | None, str, str]] = []
 
     def complete(
         self,
         *,
         model: str,
+        provider: str | None = None,
         system_prompt: str,
         user_prompt: str,
         max_tokens: int,
         temperature: float,
     ) -> LlmResult:
         del max_tokens, temperature
-        self.calls.append((system_prompt, user_prompt))
+        self.calls.append((provider, system_prompt, user_prompt))
         call_number = len(self.calls)
         if call_number == self.fail_call:
             raise LlmError("injected failure", status_code=503, latency_seconds=0.25)
@@ -73,37 +72,42 @@ def real_recording(tmp_path: Path) -> Path:
     return recording
 
 
-def test_bare_and_styled_prompts_share_rules_but_only_styled_has_samples() -> None:
-    sample = "这下不算白给了"
-    bare = build_system_prompt(
-        "bare",
-        personality_style="brother",
-        category="kill",
-        max_chars=18,
-        community_lore="测试梗库",
+@pytest.fixture()
+def prompts_directory(tmp_path: Path) -> Path:
+    directory = tmp_path / "prompts"
+    directory.mkdir()
+    (directory / "brother.md").write_text(
+        "外置搭子提示词\n最多 {max_chars} 个汉字",
+        encoding="utf-8",
     )
-    styled = build_system_prompt(
-        "styled",
-        personality_style="brother",
-        category="kill",
-        max_chars=18,
-        community_lore="测试梗库",
+    (directory / "caster.md").write_text(
+        "外置解说提示词\n最多 {max_chars} 个汉字",
+        encoding="utf-8",
+    )
+    return directory
+
+
+def test_external_prompt_loads_and_replaces_measured_limit() -> None:
+    prompt = load_system_prompt(
+        "brother",
+        max_chars=19,
     )
 
-    for prompt in (bare, styled):
-        assert "只输出一句话本身" in prompt
-        assert "最多包含 18 个汉字" in prompt
-        assert "不得出现任何地图点位称呼" in prompt
-        assert "不得暗示是玩家本人执行" in prompt
-        assert "不强制使用人称" in prompt
-    assert sample not in bare
-    assert "测试梗库" not in bare
-    assert sample in styled
-    assert "测试梗库" in styled
-    assert all(
-        re.sub(r"\{[^{}]+\}", "", template.text).strip() in styled
-        for template in COMMENTARY_TEMPLATES["brother"]["kill"]
-    )
+    assert prompt.startswith("你是观战朋友打 CS2 的中文游戏搭子")
+    assert "最多包含 19 个汉字" in prompt
+    assert "没有提供的信息不要推断，更不要编造" in prompt
+    assert "{max_chars}" not in prompt
+
+
+def test_missing_or_empty_prompt_raises_instead_of_falling_back(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(FileNotFoundError, match="系统提示词文件不存在"):
+        load_system_prompt("brother", max_chars=19, prompts_directory=tmp_path)
+
+    (tmp_path / "brother.md").write_text("  \n", encoding="utf-8")
+    with pytest.raises(ValueError, match="系统提示词文件为空"):
+        load_system_prompt("brother", max_chars=19, prompts_directory=tmp_path)
 
 
 def test_nearest_rank_p90_and_current_pool_statistics_are_correct() -> None:
@@ -141,37 +145,20 @@ def test_factual_output_checks_identify_all_three_violations() -> None:
     assert "草" in checks.raw_curses
 
 
-def test_one_failed_call_does_not_interrupt_the_other_variant(
+def test_report_prints_exact_full_situation_card_and_single_attempt(
     real_recording: Path,
-) -> None:
-    client = FakeLlmClient(fail_call=1)
-
-    result = run_bench(
-        real_recording,
-        model="vendor/model-under-test",
-        personality_style="brother",
-        client=client,
-        max_events=20,
-    )
-
-    assert len(result.events) == 1
-    assert len(client.calls) == 2
-    first, second = result.events[0].attempts
-    assert first.result is None
-    assert first.error is not None and "injected failure" in first.error
-    assert second.result is not None
-
-
-def test_real_fixture_generates_report_with_seeded_blind_mapping(
-    real_recording: Path,
+    prompts_directory: Path,
     tmp_path: Path,
 ) -> None:
+    client = FakeLlmClient()
     result = run_bench(
         real_recording,
         model="vendor/model-under-test",
+        provider="provider-under-test",
         personality_style="caster",
-        client=FakeLlmClient(),
+        client=client,
         max_events=20,
+        prompts_directory=prompts_directory,
     )
     report = render_report(result)
     output_path = tmp_path / "report.md"
@@ -180,17 +167,37 @@ def test_real_fixture_generates_report_with_seeded_blind_mapping(
     assert isinstance(result, BenchResult)
     assert result.selected_event_count == 1
     assert len(result.events) == 1
-    assert "- 模板：" in report
-    assert "- 甲：" in report
-    assert "- 乙：" in report
-    assert "延迟：P50" in report
-    assert "平均输入 token" in report
-    assert "命中点位词" in report
-    assert f"固定打乱种子：`{BLINDING_SEED}`" in report
-    variants = ["bare", "styled"]
-    random.Random(BLINDING_SEED).shuffle(variants)
-    expected_mapping = f"甲 = `{variants[0]}`；乙 = `{variants[1]}`"
-    assert report.rstrip().splitlines()[-1] == expected_mapping
-    assert report.count("`bare`") == 1
-    assert report.count("`styled`") == 1
+    assert len(client.calls) == 1
+    provider, system_prompt, user_prompt = client.calls[0]
+    assert provider == "provider-under-test"
+    assert system_prompt.startswith("外置解说提示词")
+    assert user_prompt == result.events[0].situation_card
+    for card_line in user_prompt.splitlines():
+        assert f"    {card_line}" in report
+    assert "模板句：" in report
+    assert "模型句：第1次模型输出" in report
+    assert "甲" not in report and "乙" not in report
+    assert "实际返回的上游服务商去重列表：`test-provider`" in report
     assert report == output_path.read_text(encoding="utf-8")
+
+
+def test_failed_call_is_recorded_without_a_second_attempt(
+    real_recording: Path,
+    prompts_directory: Path,
+) -> None:
+    client = FakeLlmClient(fail_call=1)
+
+    result = run_bench(
+        real_recording,
+        model="vendor/model-under-test",
+        provider=None,
+        personality_style="brother",
+        client=client,
+        max_events=20,
+        prompts_directory=prompts_directory,
+    )
+
+    assert len(client.calls) == 1
+    assert result.events[0].attempt.result is None
+    assert "injected failure" in (result.events[0].attempt.error or "")
+    assert "未锁定（延迟数字不可比）" in render_report(result)

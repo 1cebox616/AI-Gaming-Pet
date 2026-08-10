@@ -16,6 +16,7 @@ def test_complete_parses_text_usage_cost_and_actual_routing() -> None:
         payload = json.loads(request.content)
         assert payload["stream"] is False
         assert payload["model"] == "vendor/model-under-test"
+        assert "provider" not in payload
         return httpx.Response(
             200,
             json={
@@ -53,6 +54,68 @@ def test_complete_parses_text_usage_cost_and_actual_routing() -> None:
     assert result.usage.completion_tokens == 8
     assert result.usage.cost_usd == pytest.approx(0.00125)
     assert result.latency_seconds >= 0
+
+
+def test_provider_lock_uses_only_requested_provider_and_disables_fallbacks() -> None:
+    request_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_body.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "vendor/model-actual",
+                "provider": "provider-under-test",
+                "choices": [{"message": {"content": "锁定成功"}}],
+            },
+        )
+
+    client = OpenRouterClient("test-api-key", transport=httpx.MockTransport(handler))
+    try:
+        client.complete(
+            model="vendor/model-under-test",
+            provider="provider-under-test",
+            system_prompt="system",
+            user_prompt="user",
+            max_tokens=32,
+            temperature=0.9,
+        )
+    finally:
+        client.close()
+
+    assert request_body["provider"] == {
+        "only": ["provider-under-test"],
+        "allow_fallbacks": False,
+    }
+
+
+def test_unavailable_locked_provider_fails_once_without_fallback() -> None:
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            503,
+            json={"error": {"message": "No endpoints found matching your data policy"}},
+        )
+
+    client = OpenRouterClient("test-api-key", transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(LlmError, match="No endpoints found") as caught:
+            client.complete(
+                model="vendor/model-under-test",
+                provider="unavailable-provider",
+                system_prompt="system",
+                user_prompt="user",
+                max_tokens=32,
+                temperature=0.9,
+            )
+    finally:
+        client.close()
+
+    assert request_count == 1
+    assert caught.value.status_code == 503
 
 
 def test_upstream_error_raises_once_without_retry() -> None:
