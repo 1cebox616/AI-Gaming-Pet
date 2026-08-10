@@ -1,6 +1,7 @@
 """Round-situation accumulation and single-snapshot derivation tests."""
 
 from collections.abc import Callable
+import logging
 
 import pytest
 
@@ -11,6 +12,7 @@ from pet.situation import (
     SituationTracker,
     armor_status,
     held_weapon,
+    is_carrying_bomb,
     is_currently_flashed,
     is_currently_smoked,
     is_eco_round,
@@ -37,6 +39,8 @@ def _snapshot(
     equip_value: int | None = 2000,
     active_weapon: str | None = "weapon_ak47",
     ammo_clip: int | None = 30,
+    weapon_slots: tuple[tuple[str, str | None, str], ...] | None = None,
+    bomb_state: str | None = None,
 ) -> GameSnapshot:
     state: dict[str, object] = {}
     for name, value in (
@@ -53,7 +57,14 @@ def _snapshot(
             state[name] = value
 
     weapons: dict[str, object] = {}
-    if active_weapon is not None:
+    if weapon_slots is not None:
+        for index, (name, weapon_type, state_name) in enumerate(weapon_slots):
+            weapons[f"weapon_{index}"] = {
+                "name": name,
+                "type": weapon_type,
+                "state": state_name,
+            }
+    elif active_weapon is not None:
         weapon: dict[str, object] = {
             "name": active_weapon,
             "type": "Rifle",
@@ -73,7 +84,10 @@ def _snapshot(
             "team_ct": {"score": 0},
             "team_t": {"score": 0},
         },
-        "round": {"phase": "live"},
+        "round": {
+            "phase": "live",
+            **({"bomb": bomb_state} if bomb_state is not None else {}),
+        },
         "player": {
             "steamid": player_id,
             "activity": "playing",
@@ -113,6 +127,89 @@ def test_flash_count_tracks_zero_or_missing_to_positive_transitions() -> None:
     assert result.flash_count == 2
 
 
+def test_effect_durations_close_normally_from_adjacent_timestamps() -> None:
+    result = _observe_all(
+        (
+            _snapshot(1.0, flashed=0, smoked=0),
+            _snapshot(2.0, flashed=1, smoked=80),
+            _snapshot(5.0, flashed=1, smoked=255),
+            _snapshot(7.0, flashed=0, smoked=0),
+        )
+    )
+
+    assert result.flashed_seconds_total == 5.0
+    assert result.longest_flash_seconds == 5.0
+    assert result.smoked_seconds_total == 5.0
+    assert result.max_smoke_intensity == 255
+
+
+def test_effect_durations_close_at_round_boundary_without_counting_gap() -> None:
+    tracker = SituationTracker()
+    first = _snapshot(1.0, map_round=0, flashed=1, smoked=100)
+    tracker.observe(first, _game(first))
+    last_self = _snapshot(4.0, map_round=0, flashed=1, smoked=100)
+    before_boundary = tracker.observe(last_self, _game(last_self))
+    next_round = _snapshot(20.0, map_round=1, flashed=1, smoked=100)
+
+    after_boundary = tracker.observe(next_round, _game(next_round))
+
+    assert before_boundary.flashed_seconds_total == 3.0
+    assert before_boundary.smoked_seconds_total == 3.0
+    assert after_boundary.round_number == 2
+    assert after_boundary.flashed_seconds_total == 0.0
+    assert after_boundary.smoked_seconds_total == 0.0
+
+
+def test_effect_durations_close_when_subject_switches_to_teammate() -> None:
+    tracker = SituationTracker()
+    first = _snapshot(1.0, flashed=1, smoked=200)
+    tracker.observe(first, _game(first))
+    own = _snapshot(4.0, flashed=1, smoked=200)
+    tracker.observe(own, _game(own))
+    teammate = _snapshot(
+        20.0,
+        player_id=TEAMMATE_ID,
+        flashed=1,
+        smoked=255,
+    )
+
+    result = tracker.observe(teammate, _game(teammate))
+
+    assert result.flashed_seconds_total == 3.0
+    assert result.longest_flash_seconds == 3.0
+    assert result.smoked_seconds_total == 3.0
+
+
+def test_effect_durations_close_at_recording_end() -> None:
+    tracker = SituationTracker()
+    first = _snapshot(1.0, flashed=1, smoked=150)
+    tracker.observe(first, _game(first))
+    last = _snapshot(4.5, flashed=1, smoked=150)
+    tracker.observe(last, _game(last))
+
+    result = tracker.finish()
+
+    assert result.flashed_seconds_total == 3.5
+    assert result.longest_flash_seconds == 3.5
+    assert result.smoked_seconds_total == 3.5
+
+
+def test_missing_effect_fields_neither_open_nor_extend_intervals() -> None:
+    result = _observe_all(
+        (
+            _snapshot(1.0, flashed=1, smoked=100),
+            _snapshot(4.0, flashed=None, smoked=None),
+            _snapshot(6.0, flashed=1, smoked=100),
+            _snapshot(8.0, flashed=0, smoked=0),
+        )
+    )
+
+    assert result.flash_count == 2
+    assert result.flashed_seconds_total == 2.0
+    assert result.longest_flash_seconds == 2.0
+    assert result.smoked_seconds_total == 2.0
+
+
 def test_burn_count_tracks_zero_or_missing_to_positive_transitions() -> None:
     result = _observe_all(
         (
@@ -139,16 +236,28 @@ def test_total_damage_taken_sums_only_health_drops() -> None:
     assert result.total_damage_taken == 67
 
 
-def test_lowest_health_includes_zero() -> None:
+def test_lowest_health_while_alive_stays_at_full_health() -> None:
+    result = _observe_all((_snapshot(1.0, health=100), _snapshot(2.0, health=100)))
+
+    assert result.lowest_health_while_alive == 100
+
+
+def test_lowest_health_while_alive_excludes_death_zero() -> None:
     result = _observe_all(
         (
             _snapshot(1.0, health=100),
-            _snapshot(2.0, health=24),
+            _snapshot(2.0, health=12),
             _snapshot(3.0, health=0),
         )
     )
 
-    assert result.lowest_health == 0
+    assert result.lowest_health_while_alive == 12
+
+
+def test_lowest_health_while_alive_is_unknown_without_health_data() -> None:
+    result = _observe_all((_snapshot(1.0, health=None), _snapshot(2.0, health=None)))
+
+    assert result.lowest_health_while_alive is None
 
 
 def test_health_before_death_keeps_last_nonzero_value() -> None:
@@ -164,18 +273,50 @@ def test_health_before_death_keeps_last_nonzero_value() -> None:
     assert result.health_before_death == 31
 
 
-def test_weapon_switch_count_ignores_first_appearance() -> None:
+def test_primary_weapons_used_filters_deduplicates_and_preserves_first_order() -> None:
     result = _observe_all(
         (
-            _snapshot(1.0, active_weapon=None),
-            _snapshot(2.0, active_weapon="weapon_ak47"),
-            _snapshot(3.0, active_weapon="weapon_knife"),
-            _snapshot(4.0, active_weapon="weapon_knife"),
-            _snapshot(5.0, active_weapon="weapon_deagle"),
+            _snapshot(
+                1.0,
+                weapon_slots=(
+                    ("weapon_knife", "Knife", "active"),
+                    ("weapon_ak47", "Rifle", "holstered"),
+                    ("weapon_flashbang", "Grenade", "holstered"),
+                ),
+            ),
+            _snapshot(
+                2.0,
+                weapon_slots=(
+                    ("weapon_ak47", "Rifle", "holstered"),
+                    ("weapon_awp", "SniperRifle", "active"),
+                    ("weapon_deagle", "Pistol", "holstered"),
+                ),
+            ),
         )
     )
 
-    assert result.weapon_switch_count == 2
+    assert result.primary_weapons_used == ("weapon_ak47", "weapon_awp")
+
+
+def test_unknown_weapon_type_warns_once_and_is_not_primary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="pet.situation")
+    snapshots = (
+        _snapshot(
+            1.0,
+            weapon_slots=(("weapon_future", "FutureWeapon", "active"),),
+        ),
+        _snapshot(
+            2.0,
+            weapon_slots=(("weapon_future", "FutureWeapon", "active"),),
+        ),
+    )
+
+    result = _observe_all(snapshots)
+
+    assert result.primary_weapons_used == ()
+    assert caplog.text.count("FutureWeapon") == 1
 
 
 def test_bought_equipment_requires_money_down_and_value_up_together() -> None:
@@ -216,7 +357,11 @@ def test_human_round_change_resets_all_accumulations() -> None:
 
     result = tracker.observe(next_round, _game(next_round))
 
-    assert result == RoundSituation(2, 0, 0, 0, 100, None, 0, False)
+    assert result.round_number == 2
+    assert result.flash_count == 0
+    assert result.total_damage_taken == 0
+    assert result.lowest_health_while_alive == 100
+    assert result.primary_weapons_used == ("weapon_ak47",)
 
 
 def test_match_lifecycle_signal_resets_tracker_before_new_match() -> None:
@@ -246,7 +391,24 @@ def test_match_lifecycle_signal_resets_tracker_before_new_match() -> None:
         tracker.reset()
     result = tracker.observe(new_match, new_game)
 
-    assert result == RoundSituation(1, 0, 0, 0, 100, None, 0, False)
+    assert result.round_number == 1
+    assert result.flash_count == 0
+    assert result.total_damage_taken == 0
+    assert result.lowest_health_while_alive == 100
+
+
+def test_bomb_plant_time_and_elapsed_seconds_use_first_planted_snapshot() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, bomb_state=None),
+            _snapshot(12.0, bomb_state="planted"),
+            _snapshot(17.5, bomb_state="planted"),
+            _snapshot(20.0, bomb_state="defused"),
+        )
+    )
+
+    assert result.bomb_planted_at_ts == 12.0
+    assert result.seconds_since_bomb_planted == 8.0
 
 
 PURE_FUNCTIONS: tuple[Callable[[GameSnapshot], object | None], ...] = (
@@ -257,6 +419,7 @@ PURE_FUNCTIONS: tuple[Callable[[GameSnapshot], object | None], ...] = (
     held_weapon,
     is_currently_flashed,
     is_currently_smoked,
+    is_carrying_bomb,
 )
 
 
@@ -297,3 +460,28 @@ def test_pure_derivations_apply_declared_thresholds_and_weapon_state() -> None:
     assert held_weapon(snapshot).name == "weapon_deagle"
     assert is_currently_flashed(snapshot) is True
     assert is_currently_smoked(snapshot) is True
+
+
+def test_is_carrying_bomb_distinguishes_missing_known_and_c4_lists() -> None:
+    missing = parse_snapshot(
+        {
+            "provider": {"steamid": SELF_ID},
+            "player": {"steamid": SELF_ID, "activity": "playing"},
+        },
+        received_at=1.0,
+    )
+    no_c4 = _snapshot(
+        2.0,
+        weapon_slots=(("weapon_ak47", "Rifle", "active"),),
+    )
+    with_c4 = _snapshot(
+        3.0,
+        weapon_slots=(
+            ("weapon_ak47", "Rifle", "active"),
+            ("weapon_c4", "C4", "holstered"),
+        ),
+    )
+
+    assert is_carrying_bomb(missing) is None
+    assert is_carrying_bomb(no_c4) is False
+    assert is_carrying_bomb(with_c4) is True

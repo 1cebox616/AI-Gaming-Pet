@@ -84,6 +84,7 @@ def test_complete_recorded_payload_maps_every_snapshot_group() -> None:
         "helmet": True,
         "money": 3400,
         "equip_value": 1600,
+        "has_defusekit": False,
         "flashed": 0,
         "smoked": 0,
         "burning": 0,
@@ -157,6 +158,22 @@ def test_recorded_payload_without_player_keeps_map_fields() -> None:
     assert snapshot.active_weapon is None
     assert snapshot.map_mode == "casual"
     assert snapshot.round_number == 5
+
+
+def test_defusekit_is_presence_boolean_when_state_is_known() -> None:
+    with_kit = deepcopy(COMPLETE_RECORDED_PAYLOAD)
+    with_kit["player"]["state"]["defusekit"] = True  # type: ignore[index]
+
+    present = parse_snapshot(with_kit, received_at=1.0)
+    absent = parse_snapshot(COMPLETE_RECORDED_PAYLOAD, received_at=2.0)
+    missing_state = parse_snapshot(
+        {"player": {"steamid": "self", "activity": "playing"}},
+        received_at=3.0,
+    )
+
+    assert present.has_defusekit is True
+    assert absent.has_defusekit is False
+    assert missing_state.has_defusekit is None
 
 
 def test_type_errors_are_isolated_and_warn_once(caplog: pytest.LogCaptureFixture) -> None:
@@ -316,8 +333,6 @@ def test_generated_config_requests_every_required_data_group() -> None:
         "map_round_wins",
     ):
         assert f'"{group}" "1"' in GSI_CONFIG_CONTENT
-    for probe_group in ("phase_countdowns", "bomb"):
-        assert f'"{probe_group}" "1"' in GSI_CONFIG_CONTENT
-    for unused_group in ("allplayers_state",):
+    for unused_group in ("allplayers_state", "phase_countdowns", "bomb"):
         assert f'"{unused_group}" "1"' not in GSI_CONFIG_CONTENT
     assert '"uri" "http://127.0.0.1:8737/gsi"' in GSI_CONFIG_CONTENT

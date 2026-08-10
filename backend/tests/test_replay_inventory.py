@@ -135,8 +135,8 @@ def test_inventory_counts_raw_paths_ranges_and_all_derivations(tmp_path: Path) -
     assert "| `player.weapons.*.ammo_clip` | 2 | 最小 1 / 最大 7 | 是 |" in report
     assert "| `player.weapons.*.paintkit` | 2 | \"default\" | 否 |" in report
     assert "| `round.bomb` | 1 | \"planted\" | 是 |" in report
-    assert "| `bomb` | 0 | — | 否 |" in report
-    assert "| `phase_countdowns` | 0 | — | 否 |" in report
+    assert "| `bomb` |" not in report
+    assert "| `phase_countdowns` |" not in report
     for identity_path in (
         "player.name",
         "player.steamid",
@@ -174,12 +174,18 @@ def test_inventory_counts_raw_paths_ranges_and_all_derivations(tmp_path: Path) -
         assert private_value not in report
     for fact_name in (
         "flash_count",
+        "flashed_seconds_total",
+        "longest_flash_seconds",
+        "smoked_seconds_total",
+        "max_smoke_intensity",
         "burn_count",
         "total_damage_taken",
-        "lowest_health",
+        "lowest_health_while_alive",
         "health_before_death",
-        "weapon_switch_count",
+        "primary_weapons_used",
         "bought_equipment",
+        "bomb_planted_at_ts",
+        "seconds_since_bomb_planted",
         "is_low_health",
         "is_eco_round",
         "is_low_ammo",
@@ -187,5 +193,26 @@ def test_inventory_counts_raw_paths_ranges_and_all_derivations(tmp_path: Path) -
         "held_weapon",
         "is_currently_flashed",
         "is_currently_smoked",
+        "is_carrying_bomb",
     ):
         assert report.count(f"| `{fact_name}` |") == 1
+
+
+def test_inventory_keeps_up_to_ten_distinct_string_samples(tmp_path: Path) -> None:
+    recording = tmp_path / "ten-string-values.jsonl"
+    rows = tuple(
+        {"ts": float(index), "payload": {"custom": {"label": f"value-{index}"}}}
+        for index in range(10)
+    )
+    recording.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    report = generate_data_inventory(recording)
+    row = next(
+        line for line in report.splitlines() if line.startswith("| `custom.label` |")
+    )
+
+    for index in range(10):
+        assert f'"value-{index}"' in row

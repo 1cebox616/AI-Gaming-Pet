@@ -50,8 +50,6 @@ GSI_CONFIG_CONTENT = f'''"AI Gaming Pet"
         "player_match_stats" "1"
         "player_weapons" "1"
         "map_round_wins" "1"
-        "phase_countdowns" "1"
-        "bomb" "1"
     }}
 }}
 '''
@@ -101,6 +99,7 @@ class GameSnapshot(BaseModel):
     helmet: bool | None = None
     money: int | None = None
     equip_value: int | None = None
+    has_defusekit: bool | None = None
     flashed: int | None = None
     smoked: int | None = None
     burning: int | None = None
@@ -151,6 +150,9 @@ def parse_snapshot(payload: object, *, received_at: float | None = None) -> Game
         helmet=_read(payload, ("player", "state", "helmet"), bool),
         money=_read(payload, ("player", "state", "money"), int),
         equip_value=_read(payload, ("player", "state", "equip_value"), int),
+        has_defusekit=_read_presence_bool(
+            payload, ("player", "state", "defusekit")
+        ),
         flashed=_read(payload, ("player", "state", "flashed"), int),
         smoked=_read(payload, ("player", "state", "smoked"), int),
         burning=_read(payload, ("player", "state", "burning"), int),
@@ -203,6 +205,23 @@ def _read(
         return current  # type: ignore[return-value]
 
     _warn_type_once(".".join(path), current, expected_type.__name__)
+    return None
+
+
+def _read_presence_bool(
+    payload: Mapping[str, Any], path: tuple[str, ...]
+) -> bool | None:
+    """Read a boolean that GSI omits when false, preserving missing parents."""
+    parent = _mapping_at(payload, path[:-1])
+    if parent is None:
+        return None
+    field = path[-1]
+    if field not in parent:
+        return False
+    value = parent[field]
+    if isinstance(value, bool):
+        return value
+    _warn_type_once(".".join(path), value, "bool")
     return None
 
 

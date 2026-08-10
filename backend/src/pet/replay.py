@@ -30,6 +30,7 @@ from pet.situation import (
     SituationTracker,
     armor_status,
     held_weapon,
+    is_carrying_bomb,
     is_currently_flashed,
     is_currently_smoked,
     is_eco_round,
@@ -76,6 +77,7 @@ _PARSED_RAW_PATHS: frozenset[str] = frozenset(
         "player.state.flashed",
         "player.state.health",
         "player.state.helmet",
+        "player.state.defusekit",
         "player.state.money",
         "player.state.round_killhs",
         "player.state.round_kills",
@@ -94,8 +96,6 @@ _PARSED_RAW_PATHS: frozenset[str] = frozenset(
         "round.win_team",
     }
 )
-_PROBED_TOP_LEVEL_GROUPS: tuple[str, ...] = ("bomb", "phase_countdowns")
-_PROBED_RAW_PATHS: tuple[str, ...] = (*_PROBED_TOP_LEVEL_GROUPS, "round.bomb")
 
 _EVENT_LABELS: dict[EventType, str] = {
     "kill": "击杀",
@@ -193,15 +193,53 @@ class _InventoryAnalysis:
 
 _ACCUMULATED_FACTS: tuple[_DerivedFact, ...] = (
     _DerivedFact("flash_count", "player.state.flashed", "被闪值从 0 或缺失变为大于 0 时加一"),
+    _DerivedFact(
+        "flashed_seconds_total",
+        "player.state.flashed + ts",
+        "按相邻本人快照时间差累计被闪时长",
+    ),
+    _DerivedFact(
+        "longest_flash_seconds",
+        "player.state.flashed + ts",
+        "取本回合单次连续被闪的最长时长",
+    ),
+    _DerivedFact(
+        "smoked_seconds_total",
+        "player.state.smoked + ts",
+        "按相邻本人快照时间差累计处于烟雾中的时长",
+    ),
+    _DerivedFact(
+        "max_smoke_intensity",
+        "player.state.smoked",
+        "取本回合观测到的最大烟雾强度",
+    ),
     _DerivedFact("burn_count", "player.state.burning", "燃烧值从 0 或缺失变为大于 0 时加一"),
     _DerivedFact("total_damage_taken", "player.state.health", "累加相邻快照中血量的下降量"),
-    _DerivedFact("lowest_health", "player.state.health", "取本回合出现过的最低血量，包含 0"),
+    _DerivedFact(
+        "lowest_health_while_alive",
+        "player.state.health",
+        "取本回合出现过的大于 0 的最低血量",
+    ),
     _DerivedFact("health_before_death", "player.state.health", "记录血量归零前最后一个非零值"),
-    _DerivedFact("weapon_switch_count", "player.weapons.*.state", "手持武器名称变化时加一，首次出现不计"),
+    _DerivedFact(
+        "primary_weapons_used",
+        "player.weapons.*.name + player.weapons.*.type",
+        "按首次出现顺序记录本回合不同主武器",
+    ),
     _DerivedFact(
         "bought_equipment",
         "player.state.money + player.state.equip_value",
         "同次更新中金钱下降且装备价值上升即为真",
+    ),
+    _DerivedFact(
+        "bomb_planted_at_ts",
+        "round.bomb + ts",
+        "记录本回合 bomb 首次变为 planted 的时间",
+    ),
+    _DerivedFact(
+        "seconds_since_bomb_planted",
+        "round.bomb + ts",
+        "当前本人快照时间减去首次安放时间",
     ),
 )
 _PURE_FACTS: tuple[
@@ -236,12 +274,20 @@ _PURE_FACTS: tuple[
         held_weapon,
     ),
     (
-        _DerivedFact("is_currently_flashed", "player.state.flashed", "被闪强度大于 0"),
+        _DerivedFact("is_currently_flashed", "player.state.flashed", "被闪标记大于 0"),
         is_currently_flashed,
     ),
     (
         _DerivedFact("is_currently_smoked", "player.state.smoked", "烟雾强度大于 0"),
         is_currently_smoked,
+    ),
+    (
+        _DerivedFact(
+            "is_carrying_bomb",
+            "player.weapons.*.type",
+            "武器列表已知且含 C4 类型",
+        ),
+        is_carrying_bomb,
     ),
 )
 
@@ -404,7 +450,6 @@ def generate_data_inventory(
         f"- 生成时间：{timestamp.isoformat(timespec='seconds')}",
         "",
         "> “是否已解析”依据源码中的人工维护路径清单判断，可能随解析器改动而滞后。",
-        "> `bomb`、`phase_countdowns` 与 `round.bomb` 是本任务探针；未出现时仍以 0 次列出。",
         "",
         "## 表一：原始字段清单",
         "",
@@ -434,7 +479,9 @@ def generate_data_inventory(
         lines.append(
             _format_derived_row(
                 fact,
-                _summarize_round_values(values, round_count=len(analysis.rounds)),
+                _summarize_accumulated_values(
+                    fact.name, values, round_count=len(analysis.rounds)
+                ),
             )
         )
     for fact, _ in _PURE_FACTS:
@@ -450,9 +497,7 @@ def generate_data_inventory(
 def _collect_raw_path_stats(
     rows: Sequence[_RecordingRow],
 ) -> dict[str, _RawPathStats]:
-    collected: dict[str, _RawPathStats] = {
-        path: _RawPathStats() for path in _PROBED_RAW_PATHS
-    }
+    collected: dict[str, _RawPathStats] = {}
     for row in rows:
         per_payload: dict[str, list[object]] = {}
         _walk_raw_leaves(row.payload, (), per_payload)
@@ -460,14 +505,6 @@ def _collect_raw_path_stats(
             stats = collected.setdefault(path_name, _RawPathStats())
             stats.occurrences += 1
             stats.values.extend(values)
-
-        if not isinstance(row.payload, Mapping):
-            continue
-        for group in _PROBED_TOP_LEVEL_GROUPS:
-            if group in row.payload and group not in per_payload:
-                stats = collected[group]
-                stats.occurrences += 1
-                stats.values.append(row.payload[group])
     return collected
 
 
@@ -519,6 +556,8 @@ def _analyze_inventory(snapshots: Sequence[GameSnapshot]) -> _InventoryAnalysis:
             value = derive(snapshot) if game.subject_is_self is True else None
             pure_values[fact.name].append(value)
 
+    tracker.finish()
+
     return _InventoryAnalysis(
         rounds=tuple(rounds.values()),
         pure_values=tuple(
@@ -553,7 +592,7 @@ def _summarize_raw_values(path: str, values: Sequence[object]) -> str:
         return f"最小 {_format_number(min(numeric))} / 最大 {_format_number(max(numeric))}"
     if all(isinstance(value, str) for value in values):
         unique = _unique_json_values(values)
-        return "、".join(unique[:5])
+        return "、".join(unique[:10])
     if all(isinstance(value, bool) for value in values):
         unique = _unique_json_values(values)
         return "、".join(unique[:5])
@@ -589,6 +628,8 @@ def _summarize_round_values(
 ) -> str:
     if not values:
         return "在 0 个回合中无数据"
+    if all(value is None for value in values):
+        return f"在 {round_count} 个回合中均无法判断"
     if all(value is None or isinstance(value, bool) for value in values):
         return _format_boolean_counts(values)
     known = [
@@ -606,6 +647,22 @@ def _summarize_round_values(
     if unknown:
         summary += f"（无法判断 {unknown} 回合）"
     return summary
+
+
+def _summarize_accumulated_values(
+    name: str, values: Sequence[object | None], *, round_count: int
+) -> str:
+    if name != "primary_weapons_used":
+        return _summarize_round_values(values, round_count=round_count)
+    sequences = [value for value in values if isinstance(value, tuple)]
+    unique = list(dict.fromkeys(sequences))
+    samples = "、".join(
+        "(" + ", ".join(f"`{weapon}`" for weapon in weapons) + ")"
+        if weapons
+        else "()"
+        for weapons in unique[:10]
+    )
+    return f"在 {round_count} 个回合中：{samples or '无数据'}"
 
 
 def _summarize_pure_values(name: str, values: Sequence[object | None]) -> str:
