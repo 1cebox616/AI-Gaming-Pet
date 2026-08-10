@@ -18,6 +18,7 @@ from pet.commentary import (
     commentary_category,
     templates_for_map,
 )
+from pet.commentary_rules import CALLOUT_TERMS, FORBIDDEN_RAW_CURSES
 from pet.commentary_templates import (
     COMMENTARY_TEMPLATES,
     CommentaryCategory,
@@ -47,7 +48,6 @@ from pet.session import GameSessionTracker
 from pet.speech import SpeechService
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
-FORBIDDEN_RAW_CURSES = ("草", "操", "妈", "傻逼", "废物")
 PERSONAL_ACTION_PHRASES = (
     "你拆",
     "你引爆",
@@ -66,7 +66,6 @@ MAP_NAMES = (
     "vertigo",
     "cache",
 )
-CALLOUT_TERMS = ("A点", "A1", "B点", "B洞", "中路", "狗洞", "跳台", "电梯", "大坑", "超市", "包点", "水下")
 
 
 @pytest.fixture(scope="module")

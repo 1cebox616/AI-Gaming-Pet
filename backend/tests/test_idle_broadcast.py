@@ -14,6 +14,17 @@ from pet.config import IdleConfig, SpeechConfig
 from pet.session import GameState
 from pet.speech import SpeechService
 
+TEST_IDLE_INTERVAL_SECONDS = 1
+
+
+def _fast_idle_configuration() -> IdleConfig:
+    """Bypass production's 10-second floor only for real WebSocket timing tests."""
+    return IdleConfig.model_construct(
+        enabled=True,
+        min_interval_seconds=TEST_IDLE_INTERVAL_SECONDS,
+        max_interval_seconds=TEST_IDLE_INTERVAL_SECONDS,
+    )
+
 
 def _create_idle_test_app(idle_configuration: IdleConfig) -> tuple[FastAPI, PetBridge]:
     """Build a real app with speech disabled so tests never need an audio device."""
@@ -42,7 +53,7 @@ def _create_idle_test_app(idle_configuration: IdleConfig) -> tuple[FastAPI, PetB
         await websocket.accept()
         bridge._connections.add(websocket)
         await websocket.close()
-        await asyncio.sleep(12)
+        await asyncio.sleep(1.2)
 
     @app.post("/game")
     async def update_game(game: GameState) -> None:
@@ -85,9 +96,7 @@ def _receive_initial_messages(websocket: Any) -> None:
 
 def test_idle_broadcast_reaches_two_clients_with_one_shared_utterance() -> None:
     """The background loop broadcasts exactly one generated line to all live pets."""
-    app, _ = _create_idle_test_app(
-        IdleConfig(enabled=True, min_interval_seconds=10, max_interval_seconds=10)
-    )
+    app, _ = _create_idle_test_app(_fast_idle_configuration())
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as first_websocket:
@@ -105,9 +114,7 @@ def test_idle_broadcast_reaches_two_clients_with_one_shared_utterance() -> None:
 
 def test_failed_broadcast_connection_is_removed_without_blocking_a_live_pet() -> None:
     """A closed client is pruned while a live client still receives the idle line."""
-    app, bridge = _create_idle_test_app(
-        IdleConfig(enabled=True, min_interval_seconds=10, max_interval_seconds=10)
-    )
+    app, bridge = _create_idle_test_app(_fast_idle_configuration())
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as live_websocket:
@@ -121,14 +128,12 @@ def test_failed_broadcast_connection_is_removed_without_blocking_a_live_pet() ->
 
 def test_manual_idle_request_restarts_the_automatic_broadcast_interval() -> None:
     """An on-demand line prevents a nearly due automatic line from following it."""
-    app, _ = _create_idle_test_app(
-        IdleConfig(enabled=True, min_interval_seconds=10, max_interval_seconds=10)
-    )
+    app, _ = _create_idle_test_app(_fast_idle_configuration())
 
     with TestClient(app) as client:
         with client.websocket_connect("/ws") as websocket:
             _receive_initial_messages(websocket)
-            time.sleep(6)
+            time.sleep(0.6)
             websocket.send_json({"type": "request_idle_line"})
             manual_reply = websocket.receive_json()
             manual_completed_at = time.perf_counter()
@@ -139,14 +144,12 @@ def test_manual_idle_request_restarts_the_automatic_broadcast_interval() -> None
     _assert_utterance(manual_reply)
     _assert_utterance(automatic_reply)
     assert automatic_reply["id"] != manual_reply["id"]
-    assert 9 <= automatic_elapsed <= 12
+    assert 0.8 <= automatic_elapsed <= 1.5
 
 
 def test_gameplay_pauses_idle_broadcast_and_menu_restarts_full_interval() -> None:
     """No idle line is queued in-game; returning to menu starts a fresh wait."""
-    app, _ = _create_idle_test_app(
-        IdleConfig(enabled=True, min_interval_seconds=10, max_interval_seconds=10)
-    )
+    app, _ = _create_idle_test_app(_fast_idle_configuration())
     playing = GameState(
         state="playing",
         mode="casual",
@@ -169,7 +172,7 @@ def test_gameplay_pauses_idle_broadcast_and_menu_restarts_full_interval() -> Non
             assert client.post("/game", json=playing.model_dump()).status_code == 200
             assert websocket.receive_json()["game"]["state"] == "playing"
 
-            time.sleep(10.5)
+            time.sleep(1.05)
             assert client.post("/game", json=menu.model_dump()).status_code == 200
             menu_message = websocket.receive_json()
             resumed_at = time.perf_counter()
@@ -178,4 +181,4 @@ def test_gameplay_pauses_idle_broadcast_and_menu_restarts_full_interval() -> Non
 
     assert menu_message["game"]["state"] == "menu"
     _assert_utterance(automatic_reply)
-    assert 9 <= resumed_elapsed <= 12
+    assert 0.8 <= resumed_elapsed <= 1.5
