@@ -45,6 +45,7 @@ from pet.main import GameSnapshotProcessor
 from pet.policy import SpeechPolicy
 from pet.replay import format_commentary_replay, replay_commentary
 from pet.session import GameSessionTracker
+from pet.situation import SituationTracker
 from pet.speech import SpeechService
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
@@ -367,6 +368,7 @@ def _create_real_gsi_commentary_app(
         bridge,
         session,
         EventDetector(EventsConfig()),
+        SituationTracker(),
         SpeechPolicy(policy_config or PolicyConfig()),
         generator,
     )

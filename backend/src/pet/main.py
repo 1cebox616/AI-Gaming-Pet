@@ -27,6 +27,7 @@ from pet.gsi import (
 from pet.network import HOST, PORT
 from pet.policy import SpeechPolicy
 from pet.session import GameSessionTracker, MatchLifecycleTracker
+from pet.situation import SituationTracker
 from pet.speech import SpeechService
 
 PACKAGE_NAME = "pet"
@@ -81,6 +82,7 @@ class GameSnapshotProcessor:
         bridge: PetBridge,
         session: GameSessionTracker,
         detector: EventDetector,
+        situation: SituationTracker,
         policy: SpeechPolicy,
         generator: CommentaryGenerator,
     ) -> None:
@@ -88,6 +90,7 @@ class GameSnapshotProcessor:
         self._session = session
         self._lifecycle = MatchLifecycleTracker()
         self._detector = detector
+        self._situation = situation
         self._policy = policy
         self._generator = generator
 
@@ -96,8 +99,10 @@ class GameSnapshotProcessor:
         game = self._session.observe(snapshot)
         if self._lifecycle.observe(game):
             self._detector.reset()
+            self._situation.reset()
             self._policy.reset()
 
+        self._situation.observe(snapshot, game)
         self._policy.observe_snapshot(snapshot)
         events = self._detector.observe(snapshot, game)
         await self._bridge.update_game(game)
@@ -123,6 +128,7 @@ class GameSnapshotProcessor:
         game = self._session.current(now=now)
         if self._lifecycle.observe(game):
             self._detector.reset()
+            self._situation.reset()
             self._policy.reset()
         await self._bridge.update_game(game)
 
@@ -131,6 +137,7 @@ game_snapshot_processor = GameSnapshotProcessor(
     pet_bridge,
     game_session_tracker,
     EventDetector(configuration.events),
+    SituationTracker(),
     SpeechPolicy(configuration.policy),
     CommentaryGenerator(personality_style=configuration.personality.style),
 )

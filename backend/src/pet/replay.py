@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
 import json
 from pathlib import Path
 import random
@@ -17,14 +18,69 @@ from pet.events import EVENT_TYPES, EventDetector, EventType, GameEvent
 from pet.gsi import (
     GSI_SILENCE_SECONDS,
     GameSnapshot,
+    WeaponSlot,
     human_round_number,
     parse_snapshot,
 )
 from pet.lines import Utterance
 from pet.policy import DecisionReason, PolicyDecision, SpeechPolicy
 from pet.session import GameSessionTracker, MatchLifecycleTracker
+from pet.situation import (
+    RoundSituation,
+    SituationTracker,
+    armor_status,
+    held_weapon,
+    is_currently_flashed,
+    is_currently_smoked,
+    is_eco_round,
+    is_low_ammo,
+    is_low_health,
+)
 
 REPLAY_RANDOM_SEED = 20260809
+
+_PARSED_RAW_PATHS: frozenset[str] = frozenset(
+    {
+        "map.mode",
+        "map.name",
+        "map.phase",
+        "map.round",
+        "map.team_ct.consecutive_round_losses",
+        "map.team_ct.score",
+        "map.team_t.consecutive_round_losses",
+        "map.team_t.score",
+        "player.activity",
+        "player.match_stats.assists",
+        "player.match_stats.deaths",
+        "player.match_stats.kills",
+        "player.match_stats.mvps",
+        "player.match_stats.score",
+        "player.state.armor",
+        "player.state.burning",
+        "player.state.equip_value",
+        "player.state.flashed",
+        "player.state.health",
+        "player.state.helmet",
+        "player.state.money",
+        "player.state.round_killhs",
+        "player.state.round_kills",
+        "player.state.smoked",
+        "player.steamid",
+        "player.team",
+        "player.weapons.*.ammo_clip",
+        "player.weapons.*.ammo_clip_max",
+        "player.weapons.*.ammo_reserve",
+        "player.weapons.*.name",
+        "player.weapons.*.state",
+        "player.weapons.*.type",
+        "provider.steamid",
+        "round.bomb",
+        "round.phase",
+        "round.win_team",
+    }
+)
+_PROBED_TOP_LEVEL_GROUPS: tuple[str, ...] = ("bomb", "phase_countdowns")
+_PROBED_RAW_PATHS: tuple[str, ...] = (*_PROBED_TOP_LEVEL_GROUPS, "round.bomb")
 
 _EVENT_LABELS: dict[EventType, str] = {
     "kill": "击杀",
@@ -94,9 +150,95 @@ class CommentaryReplayResult:
     snapshot_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class _RecordingRow:
+    ts: float
+    line_number: int
+    payload: object
+
+
+@dataclass(slots=True)
+class _RawPathStats:
+    occurrences: int = 0
+    values: list[object] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class _DerivedFact:
+    name: str
+    dependencies: str
+    rule: str
+
+
+@dataclass(frozen=True, slots=True)
+class _InventoryAnalysis:
+    rounds: tuple[RoundSituation, ...]
+    pure_values: tuple[tuple[str, tuple[object | None, ...]], ...]
+
+
+_ACCUMULATED_FACTS: tuple[_DerivedFact, ...] = (
+    _DerivedFact("flash_count", "player.state.flashed", "被闪值从 0 或缺失变为大于 0 时加一"),
+    _DerivedFact("burn_count", "player.state.burning", "燃烧值从 0 或缺失变为大于 0 时加一"),
+    _DerivedFact("total_damage_taken", "player.state.health", "累加相邻快照中血量的下降量"),
+    _DerivedFact("lowest_health", "player.state.health", "取本回合出现过的最低血量，包含 0"),
+    _DerivedFact("health_before_death", "player.state.health", "记录血量归零前最后一个非零值"),
+    _DerivedFact("weapon_switch_count", "player.weapons.*.state", "手持武器名称变化时加一，首次出现不计"),
+    _DerivedFact(
+        "bought_equipment",
+        "player.state.money + player.state.equip_value",
+        "同次更新中金钱下降且装备价值上升即为真",
+    ),
+)
+_PURE_FACTS: tuple[
+    tuple[_DerivedFact, Callable[[GameSnapshot], object | None]], ...
+] = (
+    (
+        _DerivedFact("is_low_health", "player.state.health", "血量大于 0 且不高于 30"),
+        is_low_health,
+    ),
+    (
+        _DerivedFact(
+            "is_eco_round",
+            "player.state.money + player.state.equip_value",
+            "金钱低于 1500 且装备价值低于 2000",
+        ),
+        is_eco_round,
+    ),
+    (
+        _DerivedFact("is_low_ammo", "player.weapons.*", "手持武器弹夹余弹不高于 1"),
+        is_low_ammo,
+    ),
+    (
+        _DerivedFact(
+            "armor_status",
+            "player.state.armor + player.state.helmet",
+            "按护甲值与头盔组合返回无甲、有甲无头或满甲",
+        ),
+        armor_status,
+    ),
+    (
+        _DerivedFact("held_weapon", "player.weapons.*.state", "返回状态为 active 的武器"),
+        held_weapon,
+    ),
+    (
+        _DerivedFact("is_currently_flashed", "player.state.flashed", "被闪强度大于 0"),
+        is_currently_flashed,
+    ),
+    (
+        _DerivedFact("is_currently_smoked", "player.state.smoked", "烟雾强度大于 0"),
+        is_currently_smoked,
+    ),
+)
+
+
 def load_recording(path: Path) -> tuple[GameSnapshot, ...]:
     """Parse a raw JSONL recording and return snapshots in timestamp order."""
-    rows: list[tuple[float, int, object]] = []
+    rows = _load_recording_rows(path)
+    return tuple(parse_snapshot(row.payload, received_at=row.ts) for row in rows)
+
+
+def _load_recording_rows(path: Path) -> tuple[_RecordingRow, ...]:
+    rows: list[_RecordingRow] = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
@@ -106,9 +248,15 @@ def load_recording(path: Path) -> tuple[GameSnapshot, ...]:
         ts = decoded.get("ts")
         if not isinstance(ts, (int, float)) or isinstance(ts, bool):
             raise ValueError(f"recording line {line_number} has no numeric ts")
-        rows.append((float(ts), line_number, decoded.get("payload")))
-    rows.sort(key=lambda row: (row[0], row[1]))
-    return tuple(parse_snapshot(payload, received_at=ts) for ts, _, payload in rows)
+        rows.append(
+            _RecordingRow(
+                ts=float(ts),
+                line_number=line_number,
+                payload=decoded.get("payload"),
+            )
+        )
+    rows.sort(key=lambda row: (row.ts, row.line_number))
+    return tuple(rows)
 
 
 def replay_recording(path: Path, config: EventsConfig) -> ReplayResult:
@@ -117,12 +265,15 @@ def replay_recording(path: Path, config: EventsConfig) -> ReplayResult:
     detector = EventDetector(config)
     session = GameSessionTracker(GSI_SILENCE_SECONDS)
     lifecycle = MatchLifecycleTracker()
+    situation = SituationTracker()
     events: list[GameEvent] = []
     covered_rounds: set[tuple[str | None, int]] = set()
     for snapshot in snapshots:
         game = session.observe(snapshot)
         if lifecycle.observe(game):
             detector.reset()
+            situation.reset()
+        situation.observe(snapshot, game)
         events.extend(detector.observe(snapshot, game))
         if snapshot.map_phase == "live" and snapshot.round_number is not None:
             round_number = human_round_number(snapshot)
@@ -147,13 +298,16 @@ def replay_policy(
     detector = EventDetector(events_config)
     session = GameSessionTracker(GSI_SILENCE_SECONDS)
     lifecycle = MatchLifecycleTracker()
+    situation = SituationTracker()
     policy = SpeechPolicy(policy_config)
     decisions: list[PolicyDecision] = []
     for snapshot in snapshots:
         game = session.observe(snapshot)
         if lifecycle.observe(game):
             detector.reset()
+            situation.reset()
             policy.reset()
+        situation.observe(snapshot, game)
         policy.observe_snapshot(snapshot)
         events = detector.observe(snapshot, game)
         batch = policy.decide(events, game, now=snapshot.ts, muted=muted)
@@ -178,6 +332,7 @@ def replay_commentary(
     detector = EventDetector(events_config)
     session = GameSessionTracker(GSI_SILENCE_SECONDS)
     lifecycle = MatchLifecycleTracker()
+    situation = SituationTracker()
     policy = SpeechPolicy(policy_config)
     generator = CommentaryGenerator(
         random.Random(random_seed),
@@ -188,7 +343,9 @@ def replay_commentary(
         game = session.observe(snapshot)
         if lifecycle.observe(game):
             detector.reset()
+            situation.reset()
             policy.reset()
+        situation.observe(snapshot, game)
         policy.observe_snapshot(snapshot)
         events = detector.observe(snapshot, game)
         batch = policy.decide(events, game, now=snapshot.ts, muted=muted)
@@ -209,6 +366,256 @@ def replay_commentary(
         started_at=snapshots[0].ts if snapshots else 0.0,
         snapshot_count=len(snapshots),
     )
+
+
+def generate_data_inventory(
+    path: Path, *, generated_at: datetime | None = None
+) -> str:
+    """Generate a Markdown inventory entirely from one raw recording."""
+    rows = _load_recording_rows(path)
+    snapshots = tuple(
+        parse_snapshot(row.payload, received_at=row.ts) for row in rows
+    )
+    raw_stats = _collect_raw_path_stats(rows)
+    analysis = _analyze_inventory(snapshots)
+    timestamp = generated_at or datetime.now().astimezone()
+
+    lines = [
+        "# CS2 GSI 数据清单",
+        "",
+        f"- 录制文件：`{path.name}`",
+        f"- payload 条数：{len(rows)}",
+        f"- 覆盖回合数：{len(analysis.rounds)}",
+        f"- 生成时间：{timestamp.isoformat(timespec='seconds')}",
+        "",
+        "> “是否已解析”依据源码中的人工维护路径清单判断，可能随解析器改动而滞后。",
+        "> `bomb`、`phase_countdowns` 与 `round.bomb` 是本任务探针；未出现时仍以 0 次列出。",
+        "",
+        "## 表一：原始字段清单",
+        "",
+        "| 字段路径 | 出现次数 | 取值样例 | 是否已解析 |",
+        "|---|---:|---|:---:|",
+    ]
+    for path_name in sorted(raw_stats):
+        stats = raw_stats[path_name]
+        lines.append(
+            f"| `{_escape_markdown(path_name)}` | {stats.occurrences} | "
+            f"{_escape_markdown(_summarize_raw_values(stats.values))} | "
+            f"{'是' if _is_parsed_raw_path(path_name) else '否'} |"
+        )
+
+    pure_values = dict(analysis.pure_values)
+    lines.extend(
+        (
+            "",
+            "## 表二：推导事实清单",
+            "",
+            "| 事实名 | 依赖字段 | 推导规则 | 本录制中的表现 |",
+            "|---|---|---|---|",
+        )
+    )
+    for fact in _ACCUMULATED_FACTS:
+        values = tuple(getattr(round_state, fact.name) for round_state in analysis.rounds)
+        lines.append(
+            _format_derived_row(
+                fact,
+                _summarize_round_values(values, round_count=len(analysis.rounds)),
+            )
+        )
+    for fact, _ in _PURE_FACTS:
+        lines.append(
+            _format_derived_row(
+                fact,
+                _summarize_pure_values(fact.name, pure_values[fact.name]),
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _collect_raw_path_stats(
+    rows: Sequence[_RecordingRow],
+) -> dict[str, _RawPathStats]:
+    collected: dict[str, _RawPathStats] = {
+        path: _RawPathStats() for path in _PROBED_RAW_PATHS
+    }
+    for row in rows:
+        per_payload: dict[str, list[object]] = {}
+        _walk_raw_leaves(row.payload, (), per_payload)
+        for path_name, values in per_payload.items():
+            stats = collected.setdefault(path_name, _RawPathStats())
+            stats.occurrences += 1
+            stats.values.extend(values)
+
+        if not isinstance(row.payload, Mapping):
+            continue
+        for group in _PROBED_TOP_LEVEL_GROUPS:
+            if group in row.payload and group not in per_payload:
+                stats = collected[group]
+                stats.occurrences += 1
+                stats.values.append(row.payload[group])
+    return collected
+
+
+def _walk_raw_leaves(
+    value: object,
+    path: tuple[str, ...],
+    found: dict[str, list[object]],
+) -> None:
+    if isinstance(value, Mapping):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            if path and path[-1] == "weapons" and key.startswith("weapon_"):
+                suffix = key.removeprefix("weapon_")
+                key = "*" if suffix.isdecimal() else key
+            _walk_raw_leaves(child, (*path, key), found)
+        return
+    if isinstance(value, list):
+        for child in value:
+            _walk_raw_leaves(child, (*path, "*"), found)
+        return
+    if path:
+        found.setdefault(".".join(path), []).append(value)
+
+
+def _analyze_inventory(snapshots: Sequence[GameSnapshot]) -> _InventoryAnalysis:
+    session = GameSessionTracker(GSI_SILENCE_SECONDS)
+    lifecycle = MatchLifecycleTracker()
+    tracker = SituationTracker()
+    match_sequence = 0
+    rounds: dict[tuple[int, str | None, int], RoundSituation] = {}
+    pure_values: dict[str, list[object | None]] = {
+        fact.name: [] for fact, _ in _PURE_FACTS
+    }
+
+    for snapshot in snapshots:
+        game = session.observe(snapshot)
+        if lifecycle.observe(game):
+            tracker.reset()
+            match_sequence += 1
+        current = tracker.observe(snapshot, game)
+        if (
+            game.subject_is_self is True
+            and snapshot.map_phase == "live"
+            and current.round_number is not None
+        ):
+            rounds[(match_sequence, snapshot.map_name, current.round_number)] = current
+
+        for fact, derive in _PURE_FACTS:
+            value = derive(snapshot) if game.subject_is_self is True else None
+            pure_values[fact.name].append(value)
+
+    return _InventoryAnalysis(
+        rounds=tuple(rounds.values()),
+        pure_values=tuple(
+            (fact.name, tuple(pure_values[fact.name])) for fact, _ in _PURE_FACTS
+        ),
+    )
+
+
+def _is_parsed_raw_path(path: str) -> bool:
+    return path in _PARSED_RAW_PATHS or (
+        path.startswith("map.round_wins.")
+        and path.removeprefix("map.round_wins.").isdecimal()
+    )
+
+
+def _summarize_raw_values(values: Sequence[object]) -> str:
+    if not values:
+        return "—"
+    if all(isinstance(value, Mapping) for value in values):
+        return "对象（字段见子项）"
+    if all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in values
+    ):
+        numeric = tuple(
+            value
+            for value in values
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        )
+        return f"最小 {_format_number(min(numeric))} / 最大 {_format_number(max(numeric))}"
+    if all(isinstance(value, str) for value in values):
+        unique = _unique_json_values(values)
+        return "、".join(unique[:5])
+    if all(isinstance(value, bool) for value in values):
+        unique = _unique_json_values(values)
+        return "、".join(unique[:5])
+    return "、".join(_unique_json_values(values)[:5])
+
+
+def _unique_json_values(values: Sequence[object]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if encoded in seen:
+            continue
+        seen.add(encoded)
+        unique.append(encoded)
+    return unique
+
+
+def _format_number(value: int | float) -> str:
+    if isinstance(value, int) or value.is_integer():
+        return str(int(value))
+    return f"{value:.15g}"
+
+
+def _format_derived_row(fact: _DerivedFact, performance: str) -> str:
+    return (
+        f"| `{fact.name}` | `{fact.dependencies}` | {fact.rule} | {performance} |"
+    )
+
+
+def _summarize_round_values(
+    values: Sequence[object | None], *, round_count: int
+) -> str:
+    if not values:
+        return "在 0 个回合中无数据"
+    if all(value is None or isinstance(value, bool) for value in values):
+        return _format_boolean_counts(values)
+    known = [
+        value
+        for value in values
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    if not known:
+        return f"在 {round_count} 个回合中均无法判断"
+    summary = (
+        f"在 {round_count} 个回合中取值范围 "
+        f"{_format_number(min(known))}–{_format_number(max(known))}"
+    )
+    unknown = sum(value is None for value in values)
+    if unknown:
+        summary += f"（无法判断 {unknown} 回合）"
+    return summary
+
+
+def _summarize_pure_values(name: str, values: Sequence[object | None]) -> str:
+    if name == "armor_status":
+        counts = Counter(values)
+        return (
+            f"无甲 {counts['无甲']} 次 / 有甲无头 {counts['有甲无头']} 次 / "
+            f"满甲 {counts['满甲']} 次 / 无法判断 {counts[None]} 次"
+        )
+    if name == "held_weapon":
+        names = [value.name for value in values if isinstance(value, WeaponSlot)]
+        unique_names = list(dict.fromkeys(names))
+        samples = "、".join(f"`{weapon}`" for weapon in unique_names[:5]) or "无"
+        unknown = sum(value is None for value in values)
+        return f"手持武器样例 {samples} / 无法判断 {unknown} 次"
+    return _format_boolean_counts(values)
+
+
+def _format_boolean_counts(values: Sequence[object | None]) -> str:
+    true_count = sum(value is True for value in values)
+    false_count = sum(value is False for value in values)
+    unknown_count = sum(value is None for value in values)
+    return f"真 {true_count} 次 / 假 {false_count} 次 / 无法判断 {unknown_count} 次"
+
+
+def _escape_markdown(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", "<br>")
 
 
 def format_replay(result: ReplayResult, *, started_at: float) -> str:
@@ -425,9 +832,21 @@ def _format_limit(decision: PolicyDecision) -> str:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="回放 CS2 GSI 录制并打印事件时间线")
-    parser.add_argument("--replay", type=Path, required=True, help="GSI JSONL 录制文件")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--replay", type=Path, help="GSI JSONL 录制文件")
+    source.add_argument(
+        "--data-inventory",
+        type=Path,
+        help="从 GSI JSONL 录制生成字段与推导事实清单",
+    )
+    parser.add_argument("--out", type=Path, help="数据清单 Markdown 输出路径")
     parser.add_argument(
         "--with-policy",
+        action="store_true",
+        help="展示发言策略决定、丢弃原因与实际模板话术",
+    )
+    parser.add_argument(
+        "--with-commentary",
         action="store_true",
         help="展示发言策略决定、丢弃原因与实际模板话术",
     )
@@ -436,9 +855,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the recording replay CLI."""
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.data_inventory is not None:
+        if args.out is None:
+            parser.error("--data-inventory requires --out")
+        if args.with_policy or args.with_commentary:
+            parser.error("commentary flags can only be used with --replay")
+        report = generate_data_inventory(args.data_inventory)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(report, encoding="utf-8", newline="\n")
+        print(f"数据清单已写入：{args.out}")
+        return 0
+
+    if args.out is not None:
+        parser.error("--out can only be used with --data-inventory")
+    if args.replay is None:
+        parser.error("--replay is required")
     configuration = load_config()
-    if args.with_policy:
+    if args.with_policy or args.with_commentary:
         snapshots = load_recording(args.replay)
         commentary_result = replay_commentary(
             snapshots,

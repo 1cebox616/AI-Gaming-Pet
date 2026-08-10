@@ -9,7 +9,13 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 import pytest
 
-from pet.gsi import GSI_CONFIG_CONTENT, RawGsiRecorder, RoundWin, parse_snapshot
+from pet.gsi import (
+    GSI_CONFIG_CONTENT,
+    RawGsiRecorder,
+    RoundWin,
+    WeaponSlot,
+    parse_snapshot,
+)
 from pet.main import app
 
 T7_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_t7_samples.json"
@@ -71,18 +77,47 @@ def test_complete_recorded_payload_maps_every_snapshot_group() -> None:
         "round_number": 5,
         "round_phase": "freezetime",
         "round_win_team": None,
+        "bomb_state": None,
         "team": "CT",
         "health": 100,
+        "armor": 100,
+        "helmet": True,
+        "money": 3400,
         "equip_value": 1600,
+        "flashed": 0,
+        "smoked": 0,
+        "burning": 0,
         "round_kills": 0,
         "round_killhs": 0,
+        "match_kills": 0,
+        "match_assists": 0,
         "match_deaths": 0,
+        "match_mvps": 0,
+        "match_score": 0,
         "score_ct": 2,
         "score_t": 3,
         "ct_consecutive_round_losses": None,
         "t_consecutive_round_losses": None,
         "round_wins": None,
         "active_weapon": "weapon_usp_silencer",
+        "weapons": (
+            {
+                "name": "weapon_knife",
+                "type": None,
+                "ammo_clip": None,
+                "ammo_clip_max": None,
+                "ammo_reserve": None,
+                "state": "holstered",
+            },
+            {
+                "name": "weapon_usp_silencer",
+                "type": None,
+                "ammo_clip": None,
+                "ammo_clip_max": None,
+                "ammo_reserve": None,
+                "state": "active",
+            },
+        ),
     }
 
 
@@ -196,6 +231,48 @@ def test_real_round_wins_history_preserves_round_team_and_method() -> None:
     )
 
 
+def test_weapons_are_sorted_by_numeric_key_and_preserve_optional_ammo() -> None:
+    payload = deepcopy(COMPLETE_RECORDED_PAYLOAD)
+    payload["round"] = {"phase": "live", "bomb": "planted"}
+    payload["player"]["weapons"] = {  # type: ignore[index]
+        "weapon_12": {
+            "name": "weapon_flashbang",
+            "type": "Grenade",
+            "ammo_reserve": 1,
+            "state": "holstered",
+        },
+        "weapon_2": {
+            "name": "weapon_ak47",
+            "type": "Rifle",
+            "ammo_clip": 17,
+            "ammo_clip_max": 30,
+            "ammo_reserve": 62,
+            "state": "active",
+        },
+        "weapon_0": {
+            "name": "weapon_knife",
+            "type": "Knife",
+            "state": "holstered",
+        },
+    }
+    reversed_payload = deepcopy(payload)
+    weapons = payload["player"]["weapons"]  # type: ignore[index]
+    reversed_payload["player"]["weapons"] = dict(  # type: ignore[index]
+        reversed(tuple(weapons.items()))  # type: ignore[union-attr]
+    )
+
+    first = parse_snapshot(payload, received_at=21.0)
+    second = parse_snapshot(reversed_payload, received_at=21.0)
+
+    assert first.weapons == second.weapons == (
+        WeaponSlot("weapon_knife", "Knife", None, None, None, "holstered"),
+        WeaponSlot("weapon_ak47", "Rifle", 17, 30, 62, "active"),
+        WeaponSlot("weapon_flashbang", "Grenade", None, None, 1, "holstered"),
+    )
+    assert first.active_weapon == "weapon_ak47"
+    assert first.bomb_state == "planted"
+
+
 def test_invalid_json_and_non_object_payloads_are_acknowledged() -> None:
     client = TestClient(app)
 
@@ -239,6 +316,8 @@ def test_generated_config_requests_every_required_data_group() -> None:
         "map_round_wins",
     ):
         assert f'"{group}" "1"' in GSI_CONFIG_CONTENT
-    for unused_group in ("phase_countdowns", "bomb", "allplayers_state"):
+    for probe_group in ("phase_countdowns", "bomb"):
+        assert f'"{probe_group}" "1"' in GSI_CONFIG_CONTENT
+    for unused_group in ("allplayers_state",):
         assert f'"{unused_group}" "1"' not in GSI_CONFIG_CONTENT
     assert '"uri" "http://127.0.0.1:8737/gsi"' in GSI_CONFIG_CONTENT

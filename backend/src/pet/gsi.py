@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime
 import json
 import logging
@@ -49,6 +50,8 @@ GSI_CONFIG_CONTENT = f'''"AI Gaming Pet"
         "player_match_stats" "1"
         "player_weapons" "1"
         "map_round_wins" "1"
+        "phase_countdowns" "1"
+        "bomb" "1"
     }}
 }}
 '''
@@ -66,6 +69,18 @@ class RoundWin(BaseModel):
     method: str
 
 
+@dataclass(frozen=True, slots=True)
+class WeaponSlot:
+    """One weapon from CS2's player.weapons block."""
+
+    name: str
+    type: str | None
+    ammo_clip: int | None
+    ammo_clip_max: int | None
+    ammo_reserve: int | None
+    state: str | None
+
+
 class GameSnapshot(BaseModel):
     """The normalized subset of one CS2 GSI payload used by later milestones."""
 
@@ -79,18 +94,30 @@ class GameSnapshot(BaseModel):
     round_number: int | None = None
     round_phase: str | None = None
     round_win_team: str | None = None
+    bomb_state: str | None = None
     team: str | None = None
     health: int | None = None
+    armor: int | None = None
+    helmet: bool | None = None
+    money: int | None = None
     equip_value: int | None = None
+    flashed: int | None = None
+    smoked: int | None = None
+    burning: int | None = None
     round_kills: int | None = None
     round_killhs: int | None = None
+    match_kills: int | None = None
+    match_assists: int | None = None
     match_deaths: int | None = None
+    match_mvps: int | None = None
+    match_score: int | None = None
     score_ct: int | None = None
     score_t: int | None = None
     ct_consecutive_round_losses: int | None = None
     t_consecutive_round_losses: int | None = None
     round_wins: tuple[RoundWin, ...] | None = None
     active_weapon: str | None = None
+    weapons: tuple[WeaponSlot, ...] | None = None
 
 
 class GsiAck(BaseModel):
@@ -117,12 +144,23 @@ def parse_snapshot(payload: object, *, received_at: float | None = None) -> Game
         round_number=_read(payload, ("map", "round"), int),
         round_phase=_read(payload, ("round", "phase"), str),
         round_win_team=_read(payload, ("round", "win_team"), str),
+        bomb_state=_read(payload, ("round", "bomb"), str),
         team=_read(payload, ("player", "team"), str),
         health=_read(payload, ("player", "state", "health"), int),
+        armor=_read(payload, ("player", "state", "armor"), int),
+        helmet=_read(payload, ("player", "state", "helmet"), bool),
+        money=_read(payload, ("player", "state", "money"), int),
         equip_value=_read(payload, ("player", "state", "equip_value"), int),
+        flashed=_read(payload, ("player", "state", "flashed"), int),
+        smoked=_read(payload, ("player", "state", "smoked"), int),
+        burning=_read(payload, ("player", "state", "burning"), int),
         round_kills=_read(payload, ("player", "state", "round_kills"), int),
         round_killhs=_read(payload, ("player", "state", "round_killhs"), int),
+        match_kills=_read(payload, ("player", "match_stats", "kills"), int),
+        match_assists=_read(payload, ("player", "match_stats", "assists"), int),
         match_deaths=_read(payload, ("player", "match_stats", "deaths"), int),
+        match_mvps=_read(payload, ("player", "match_stats", "mvps"), int),
+        match_score=_read(payload, ("player", "match_stats", "score"), int),
         score_ct=_read(payload, ("map", "team_ct", "score"), int),
         score_t=_read(payload, ("map", "team_t", "score"), int),
         ct_consecutive_round_losses=_read(
@@ -133,6 +171,7 @@ def parse_snapshot(payload: object, *, received_at: float | None = None) -> Game
         ),
         round_wins=_read_round_wins(payload),
         active_weapon=_read_active_weapon(payload),
+        weapons=_read_weapons(payload),
     )
 
 
@@ -182,6 +221,69 @@ def _read_active_weapon(payload: Mapping[str, Any]) -> str | None:
             return name
         _warn_type_once("player.weapons.<active>.name", name, "str")
         return None
+    return None
+
+
+def _read_weapons(payload: Mapping[str, Any]) -> tuple[WeaponSlot, ...] | None:
+    weapons = _mapping_at(payload, ("player", "weapons"))
+    if weapons is None:
+        return None
+
+    indexed_weapons: list[tuple[int, str, Mapping[str, Any]]] = []
+    for weapon_key, weapon in weapons.items():
+        if not isinstance(weapon_key, str):
+            _warn_type_once("player.weapons.<key>", weapon_key, "str")
+            continue
+        match = re.fullmatch(r"weapon_(\d+)", weapon_key)
+        if match is None:
+            _warn_type_once("player.weapons.<key>", weapon_key, "weapon_<number>")
+            continue
+        if not isinstance(weapon, Mapping):
+            _warn_type_once(f"player.weapons.{weapon_key}", weapon, "object")
+            continue
+        indexed_weapons.append((int(match.group(1)), weapon_key, weapon))
+
+    parsed: list[WeaponSlot] = []
+    for _, weapon_key, weapon in sorted(
+        indexed_weapons, key=lambda item: (item[0], item[1])
+    ):
+        name = _read_weapon_value(weapon, weapon_key, "name", str)
+        if name is None:
+            continue
+        parsed.append(
+            WeaponSlot(
+                name=name,
+                type=_read_weapon_value(weapon, weapon_key, "type", str),
+                ammo_clip=_read_weapon_value(weapon, weapon_key, "ammo_clip", int),
+                ammo_clip_max=_read_weapon_value(
+                    weapon, weapon_key, "ammo_clip_max", int
+                ),
+                ammo_reserve=_read_weapon_value(
+                    weapon, weapon_key, "ammo_reserve", int
+                ),
+                state=_read_weapon_value(weapon, weapon_key, "state", str),
+            )
+        )
+    return tuple(parsed)
+
+
+def _read_weapon_value(
+    weapon: Mapping[str, Any],
+    weapon_key: str,
+    field: str,
+    expected_type: type[str | int],
+) -> str | int | None:
+    if field not in weapon:
+        return None
+    value = weapon[field]
+    valid = isinstance(value, expected_type)
+    if expected_type is int and isinstance(value, bool):
+        valid = False
+    if valid:
+        return value  # type: ignore[return-value]
+    _warn_type_once(
+        f"player.weapons.{weapon_key}.{field}", value, expected_type.__name__
+    )
     return None
 
 
