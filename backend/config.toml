@@ -24,6 +24,8 @@ record = false
 # 判定为「白给」。数值越小越严格。
 thrown_away_max_survival_seconds = 15
 thrown_away_min_equip_value = 3000
+# 击杀后多少秒内死亡，算作「暴露位置被补枪」，给正反馈而不是负反馈。
+death_after_kill_max_seconds = 8
 
 [policy]
 # 两次发言之间的最短间隔秒数。数值越大，宠物越安静。

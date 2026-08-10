@@ -125,7 +125,7 @@ def test_alive_combat_drops_normal_kills_but_allows_three_kill(
     assert three_kill.reason == "优先级 80"
 
 
-def test_death_event_is_not_blocked_by_alive_combat_threshold(
+def test_death_after_kill_is_not_blocked_by_alive_combat_threshold(
     recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
     snapshots = _event_sequence(recorded_fixtures, "ordinary_death_with_trade_kill")
@@ -134,14 +134,16 @@ def test_death_event_is_not_blocked_by_alive_combat_threshold(
     for snapshot in snapshots:
         game = tracker.observe(snapshot)
     decisions = _decisions(snapshots)
-    death = next(decision for decision in decisions if decision.event.type == "death")
+    death = next(
+        decision for decision in decisions if decision.event.type == "death_after_kill"
+    )
 
     assert game is not None
     assert game.state == "playing"
     assert snapshots[-1].health == 0
     assert death.selected is True
-    assert death.priority == 45
-    assert death.reason == "优先级 45"
+    assert death.priority == 50
+    assert death.reason == "优先级 50"
     assert all(decision.reason_code != "alive_threshold" for decision in decisions)
 
 

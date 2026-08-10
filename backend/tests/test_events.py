@@ -11,6 +11,7 @@ from pet.events import EventDetector, GameEvent, format_replay, replay_recording
 from pet.gsi import GameSnapshot, parse_snapshot
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
+T7_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_t7_samples.json"
 OVER_DEATH_FIXTURE_PATH = (
     Path(__file__).parent / "fixtures" / "gsi_over_death_samples.json"
 )
@@ -25,8 +26,24 @@ def event_samples() -> dict[str, Any]:
     return loaded
 
 
+@pytest.fixture(scope="module")
+def t7_samples() -> dict[str, Any]:
+    """Load additional scrubbed fragments added from the same real recording set."""
+    loaded: object = json.loads(T7_FIXTURE_PATH.read_text(encoding="utf-8"))
+    assert isinstance(loaded, dict)
+    return loaded
+
+
 def _snapshots(event_samples: dict[str, Any], name: str) -> tuple[GameSnapshot, ...]:
     entries: object = event_samples[name]["samples"]
+    assert isinstance(entries, list)
+    return tuple(
+        parse_snapshot(entry["payload"], received_at=entry["ts"]) for entry in entries
+    )
+
+
+def _t7_snapshots(t7_samples: dict[str, Any], name: str) -> tuple[GameSnapshot, ...]:
+    entries: object = t7_samples[name]["samples"]
     assert isinstance(entries, list)
     return tuple(
         parse_snapshot(entry["payload"], received_at=entry["ts"]) for entry in entries
@@ -146,6 +163,8 @@ def test_first_round_result_has_finished_round_number_and_is_deduplicated(
         "method": "elimination",
         "score_ct": 0,
         "score_t": 1,
+        "score_situation": "领先",
+        "team_consecutive_round_losses": None,
     }
 
 
@@ -158,15 +177,21 @@ def test_second_round_loss_has_finished_round_number_and_uses_self_team(
     assert events[0].subject_steamid == SELF_STEAMID
     assert events[0].subject_is_self is True
     assert events[0].round_number == 2
-    assert events[0].facts == {"method": "bomb", "score_ct": 0, "score_t": 2}
+    assert events[0].facts == {
+        "method": "bomb",
+        "score_ct": 0,
+        "score_t": 2,
+        "score_situation": "落后",
+        "team_consecutive_round_losses": None,
+    }
 
 
-def test_death_after_trade_kill_is_not_thrown_away_and_keeps_event_order(
+def test_same_snapshot_trade_kill_is_classified_as_death_after_kill(
     event_samples: dict[str, Any],
 ) -> None:
     events = _detect(_snapshots(event_samples, "ordinary_death_with_trade_kill"))
 
-    assert [event.type for event in events] == ["kill_headshot", "death"]
+    assert [event.type for event in events] == ["kill_headshot", "death_after_kill"]
     assert events[0].facts == {
         "round_kill_index": 1,
         "delta": 1,
@@ -174,8 +199,79 @@ def test_death_after_trade_kill_is_not_thrown_away_and_keeps_event_order(
     }
     assert events[1].facts["survival_seconds"] == pytest.approx(11.7535846)
     assert events[1].facts["round_kills"] == 1
+    assert events[1].facts["seconds_since_last_kill"] == 0
     assert events[1].facts["equip_value"] == 4200
     assert events[1].subject_is_self is True
+
+
+def test_death_after_kill_uses_real_kill_interval_and_positive_classification(
+    t7_samples: dict[str, Any],
+) -> None:
+    events = _detect(_t7_snapshots(t7_samples, "death_after_kill"))
+
+    assert [event.type for event in events] == ["kill", "multi_kill", "death_after_kill"]
+    death = events[-1]
+    assert death.round_number == 6
+    assert death.facts == {
+        "survival_seconds": None,
+        "round_kills": 3,
+        "seconds_since_last_kill": pytest.approx(0.7124858),
+        "equip_value": 4500,
+        "score_situation": "落后",
+        "team_consecutive_round_losses": 1,
+    }
+
+
+def test_death_classifications_are_mutually_exclusive_on_real_fragments(
+    event_samples: dict[str, Any], t7_samples: dict[str, Any]
+) -> None:
+    after_kill = _detect(_t7_snapshots(t7_samples, "death_after_kill"))[-1]
+    ordinary = _detect(_snapshots(event_samples, "teammate_thrown_away"))[-1]
+    thrown_away = _detect(
+        _snapshots(event_samples, "teammate_thrown_away"),
+        EventsConfig(thrown_away_max_survival_seconds=30),
+    )[-1]
+
+    assert after_kill.type == "death_after_kill"
+    assert ordinary.type == "death"
+    assert thrown_away.type == "death_thrown_away"
+    assert {after_kill.type, ordinary.type, thrown_away.type} == {
+        "death_after_kill",
+        "death",
+        "death_thrown_away",
+    }
+
+
+def test_death_after_kill_threshold_changes_real_fragment_classification(
+    t7_samples: dict[str, Any],
+) -> None:
+    """Reuse recorded payloads while stretching only their replay time spacing."""
+    snapshots = _t7_snapshots(t7_samples, "death_after_kill")
+    stretched = (
+        snapshots[0],
+        snapshots[1],
+        snapshots[2].model_copy(update={"ts": snapshots[1].ts + 5.0}),
+    )
+
+    permissive = _detect(stretched, EventsConfig(death_after_kill_max_seconds=8))
+    strict = _detect(stretched, EventsConfig(death_after_kill_max_seconds=4))
+
+    assert permissive[-1].type == "death_after_kill"
+    assert permissive[-1].facts["seconds_since_last_kill"] == pytest.approx(5.0)
+    assert strict[-1].type == "death"
+
+
+def test_score_situation_facts_cover_leading_trailing_and_tied_real_states(
+    event_samples: dict[str, Any], t7_samples: dict[str, Any]
+) -> None:
+    leading = _detect(_snapshots(event_samples, "round_win_dedup"))[0]
+    trailing = _detect(_snapshots(event_samples, "round_loss_uses_self_team"))[0]
+    tied = _detect(_t7_snapshots(t7_samples, "tied_death"))[-1]
+
+    assert leading.facts["score_situation"] == "领先"
+    assert trailing.facts["score_situation"] == "落后"
+    assert tied.facts["score_situation"] == "追平"
+    assert tied.facts["team_consecutive_round_losses"] == 0
 
 
 def test_configured_thrown_away_threshold_changes_same_real_death_classification(

@@ -27,6 +27,7 @@ def test_missing_configuration_file_uses_validated_defaults(
     assert configuration.gsi.record is False
     assert configuration.events.thrown_away_max_survival_seconds == 15.0
     assert configuration.events.thrown_away_min_equip_value == 3000
+    assert configuration.events.death_after_kill_max_seconds == 8.0
     assert configuration.policy.cooldown_seconds == 6.0
     assert configuration.policy.max_lines_per_round == 4
     assert configuration.policy.alive_priority_threshold == 0
@@ -209,7 +210,8 @@ def test_events_section_loads_custom_thresholds(tmp_path: Path) -> None:
     default_path = tmp_path / "config.toml"
     default_path.write_text(
         "[events]\nthrown_away_max_survival_seconds = 22.5\n"
-        "thrown_away_min_equip_value = 4567\n",
+        "thrown_away_min_equip_value = 4567\n"
+        "death_after_kill_max_seconds = 6.5\n",
         encoding="utf-8",
     )
 
@@ -217,6 +219,7 @@ def test_events_section_loads_custom_thresholds(tmp_path: Path) -> None:
 
     assert configuration.events.thrown_away_max_survival_seconds == 22.5
     assert configuration.events.thrown_away_min_equip_value == 4567
+    assert configuration.events.death_after_kill_max_seconds == 6.5
 
 
 @pytest.mark.parametrize(
@@ -230,6 +233,9 @@ def test_events_section_loads_custom_thresholds(tmp_path: Path) -> None:
         "thrown_away_min_equip_value = 20001\n",
         "thrown_away_max_survival_seconds = 15\n"
         "thrown_away_min_equip_value = 3000\nunknown_threshold = 1\n",
+        "thrown_away_max_survival_seconds = 15\n"
+        "thrown_away_min_equip_value = 3000\n"
+        "death_after_kill_max_seconds = 61\n",
     ),
 )
 def test_invalid_events_section_falls_back_alone_and_logs_warning(
@@ -254,6 +260,7 @@ def test_invalid_events_section_falls_back_alone_and_logs_warning(
 
     assert configuration.events.thrown_away_max_survival_seconds == 15.0
     assert configuration.events.thrown_away_min_equip_value == 3000
+    assert configuration.events.death_after_kill_max_seconds == 8.0
     assert configuration.speech.enabled is False
     assert configuration.idle.enabled is False
     assert configuration.idle.min_interval_seconds == 30

@@ -14,6 +14,7 @@ from pet.commentary_templates import (
     COMMENTARY_TEMPLATES,
     CommentaryCategory,
     CommentaryTemplate,
+    templates_for_map,
 )
 from pet.config import EventsConfig, PersonalityStyle, PolicyConfig
 from pet.events import EventDetector, EventType, GameEvent
@@ -68,6 +69,7 @@ _DIRECT_CATEGORIES: dict[EventType, CommentaryCategory] = {
     "kill": "kill",
     "kill_headshot": "kill_headshot",
     "death": "death",
+    "death_after_kill": "death_after_kill",
     "death_thrown_away": "death_thrown_away",
 }
 _EVENT_LABELS: dict[EventType, str] = {
@@ -75,6 +77,7 @@ _EVENT_LABELS: dict[EventType, str] = {
     "kill_headshot": "爆头击杀",
     "multi_kill": "多杀",
     "death": "死亡",
+    "death_after_kill": "击杀后被补枪",
     "death_thrown_away": "白给",
     "round_win": "回合胜利",
     "round_loss": "回合失败",
@@ -129,12 +132,16 @@ class CommentaryGenerator:
     ) -> None:
         self._rng = rng or random.Random()
         self._templates = COMMENTARY_TEMPLATES[personality_style]
-        self._last_template_indexes: dict[CommentaryCategory, int] = {}
+        self._last_templates: dict[CommentaryCategory, CommentaryTemplate] = {}
 
-    def generate(self, event: GameEvent) -> Utterance:
+    def generate(self, event: GameEvent, *, map_name: str | None = None) -> Utterance:
         """Generate one valid utterance without exposing missing or raw method values."""
         category = commentary_category(event)
-        templates = self._templates[category]
+        templates = templates_for_map(self._templates[category], map_name)
+        if not templates:
+            raise ValueError(
+                f"no commentary template for category {category!r} on map {map_name!r}"
+            )
         template_index = self._choose_template_index(category, templates)
         template = templates[template_index]
         text = template.text.format_map(_template_context(event))
@@ -149,14 +156,15 @@ class CommentaryGenerator:
         category: CommentaryCategory,
         templates: tuple[CommentaryTemplate, ...],
     ) -> int:
-        previous = self._last_template_indexes.get(category)
-        if previous is None:
+        previous = self._last_templates.get(category)
+        if previous is None or len(templates) == 1:
             selected = self._rng.randrange(len(templates))
         else:
-            selected = self._rng.randrange(len(templates) - 1)
-            if selected >= previous:
-                selected += 1
-        self._last_template_indexes[category] = selected
+            alternatives = tuple(
+                index for index, template in enumerate(templates) if template != previous
+            )
+            selected = self._rng.choice(alternatives)
+        self._last_templates[category] = templates[selected]
         return selected
 
 
@@ -194,7 +202,10 @@ class GameCommentaryEngine:
             muted=muted,
         )
         utterance = (
-            self._generator.generate(policy_batch.selected_event)
+            self._generator.generate(
+                policy_batch.selected_event,
+                map_name=snapshot.map_name,
+            )
             if policy_batch.selected_event is not None
             else None
         )

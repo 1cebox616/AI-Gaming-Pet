@@ -1,0 +1,101 @@
+{
+  "_provenance": {
+    "recording": "gsi-20260809-112213.jsonl",
+    "note": "Trimmed, Steam-ID-scrubbed fragments from a real casual recording."
+  },
+  "death_after_kill": {
+    "source_lines": ["gsi-20260809-112213.jsonl:61", "gsi-20260809-112213.jsonl:62", "gsi-20260809-112213.jsonl:65"],
+    "samples": [
+      {
+        "ts": 1786289331.1065023,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {
+            "mode": "casual", "name": "de_anubis", "phase": "live", "round": 5,
+            "team_ct": {"score": 2, "consecutive_round_losses": 1},
+            "team_t": {"score": 3, "consecutive_round_losses": 0}
+          },
+          "round": {"phase": "live"},
+          "player": {
+            "steamid": "76561198000000001", "team": "CT", "activity": "playing",
+            "state": {"health": 73, "round_kills": 2, "round_killhs": 0, "equip_value": 4500},
+            "match_stats": {"deaths": 0}
+          }
+        }
+      },
+      {
+        "ts": 1786289331.349874,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {
+            "mode": "casual", "name": "de_anubis", "phase": "live", "round": 5,
+            "team_ct": {"score": 2, "consecutive_round_losses": 1},
+            "team_t": {"score": 3, "consecutive_round_losses": 0}
+          },
+          "round": {"phase": "live"},
+          "player": {
+            "steamid": "76561198000000001", "team": "CT", "activity": "playing",
+            "state": {"health": 73, "round_kills": 3, "round_killhs": 0, "equip_value": 4500},
+            "match_stats": {"deaths": 0}
+          }
+        }
+      },
+      {
+        "ts": 1786289332.0623598,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {
+            "mode": "casual", "name": "de_anubis", "phase": "live", "round": 5,
+            "team_ct": {"score": 2, "consecutive_round_losses": 1},
+            "team_t": {"score": 3, "consecutive_round_losses": 0}
+          },
+          "round": {"phase": "live"},
+          "player": {
+            "steamid": "76561198000000001", "team": "CT", "activity": "playing",
+            "state": {"health": 0, "round_kills": 3, "round_killhs": 0, "equip_value": 4500},
+            "match_stats": {"deaths": 1}
+          }
+        }
+      }
+    ]
+  },
+  "tied_death": {
+    "source_lines": ["gsi-20260809-112213.jsonl:6", "gsi-20260809-112213.jsonl:7"],
+    "samples": [
+      {
+        "ts": 1786289201.475322,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {
+            "mode": "casual", "name": "de_anubis", "phase": "live", "round": 4,
+            "team_ct": {"score": 2, "consecutive_round_losses": 0},
+            "team_t": {"score": 2, "consecutive_round_losses": 2}
+          },
+          "round": {"phase": "live"},
+          "player": {
+            "steamid": "76561198000000009", "team": "CT", "activity": "playing",
+            "state": {"health": 9, "round_kills": 1, "round_killhs": 0, "equip_value": 4800},
+            "match_stats": {"deaths": 1}
+          }
+        }
+      },
+      {
+        "ts": 1786289201.6872675,
+        "payload": {
+          "provider": {"steamid": "76561198000000001"},
+          "map": {
+            "mode": "casual", "name": "de_anubis", "phase": "live", "round": 4,
+            "team_ct": {"score": 2, "consecutive_round_losses": 0},
+            "team_t": {"score": 2, "consecutive_round_losses": 2}
+          },
+          "round": {"phase": "live"},
+          "player": {
+            "steamid": "76561198000000009", "team": "CT", "activity": "playing",
+            "state": {"health": 0, "round_kills": 1, "round_killhs": 0, "equip_value": 4800},
+            "match_stats": {"deaths": 2}
+          }
+        }
+      }
+    ]
+  }
+}

@@ -15,6 +15,7 @@ CommentaryCategory = Literal[
     "multi_5",
     "multi_general",
     "death",
+    "death_after_kill",
     "death_thrown_away",
     "round_win_elimination",
     "round_win_bomb",
@@ -35,9 +36,38 @@ class CommentaryTemplate:
 
     text: str
     emotion: Emotion
+    applicable_maps: tuple[str, ...] | None = None
 
 
 T = CommentaryTemplate
+
+
+def templates_for_map(
+    templates: tuple[CommentaryTemplate, ...], map_name: str | None
+) -> tuple[CommentaryTemplate, ...]:
+    """Return generic lines plus lines explicitly scoped to the active map."""
+    normalized_current_map = _normalize_map_name(map_name)
+    return tuple(
+        template
+        for template in templates
+        if template.applicable_maps is None
+        or (
+            normalized_current_map is not None
+            and any(
+                _normalize_map_name(scoped_map) == normalized_current_map
+                for scoped_map in template.applicable_maps
+            )
+        )
+    )
+
+
+def _normalize_map_name(map_name: str | None) -> str | None:
+    if not isinstance(map_name, str):
+        return None
+    normalized = map_name.strip().casefold()
+    if normalized.startswith("de_"):
+        normalized = normalized.removeprefix("de_")
+    return normalized or None
 
 COMMENTARY_TEMPLATES: dict[
     PersonalityStyle,
@@ -69,14 +99,14 @@ COMMENTARY_TEMPLATES: dict[
             T("你三杀了！", "happy"),
             T("兄弟，你杀成串了。", "surprised"),
             T("你这波啊，这波是s1mple附体。", "happy"),
-            T("你一个人在A点水下游龙，三个全没。", "surprised"),
+            T("你一个人游龙，三个全没。", "surprised"),
             T("我超，你把三个人的屏幕一次性全调成黑白了。", "surprised"),
         ),
         "multi_4": (
             T("你四杀了！", "surprised"),
             T("兄弟，你把图杀空了。", "happy"),
             T("你四个全包，ZywOo看了都点头。", "happy"),
-            T("你从A点一路卷到中路，对面像没刷新出来。", "surprised"),
+            T("你一路卷过去，对面像没刷新出来。", "surprised"),
             T("卧了个槽，你这四杀把服务器都打得有点沉默。", "surprised"),
         ),
         "multi_5": (
@@ -90,7 +120,7 @@ COMMENTARY_TEMPLATES: dict[
             T("你杀疯了！", "surprised"),
             T("兄弟，你还在收。", "happy"),
             T("你这串人头，糖葫芦都没这么齐。", "happy"),
-            T("你从狗洞杀到A1，地图像被你包场了。", "surprised"),
+            T("你从头杀到尾，地图像被你包场了。", "surprised"),
             T("我超，你这连杀滚起来以后，对面复活速度都快跟不上了。", "surprised"),
         ),
         "death": (
@@ -100,26 +130,33 @@ COMMENTARY_TEMPLATES: dict[
             T("可惜可惜", "surprised"),
             T("不是，这波运气不好", "speechless"),
         ),
+        "death_after_kill": (
+            T("有来有回，这波不亏。", "happy"),
+            T("兄弟，拿到人头再倒，不算白忙。", "happy"),
+            T("补枪到了？这波至少换到了。", "neutral"),
+            T("刚收一个就被补，正常对枪。", "surprised"),
+            T("人头已经到手，这波不是白给。", "happy"),
+        ),
         "death_thrown_away": (
             T("你白给了！", "angry"),
             T("{equip_detail}兄弟，你这身装备送得挺有排面。", "speechless"),
             T("{survival_detail}你这波像外卖，送到就走。", "angry"),
             T("你枪还没捂热，人先成对面经济了。", "speechless"),
-            T("我超，你这波从满配到灰屏，速度堪比A1快递。", "angry"),
+            T("我超，你这波从满配到灰屏，速度堪比闪送快递。", "angry"),
         ),
         "round_win_elimination": (
             T("{score_detail}咱们清场！", "happy"),
             T("这波全给扬了。", "happy"),
             T("咱们一人一张票，对面集体回大厅。", "surprised"),
             T("这一分是纯灭队，地上枪比人还多。", "happy"),
-            T("我超，咱们这波从A点扫到B洞，地图打扫得真干净。", "surprised"),
+            T("我超，咱们这波从头扫到尾，地图打扫得真干净。", "surprised"),
         ),
         "round_win_bomb": (
             T("{score_detail}这波炸了！", "surprised"),
             T("咱们听响收分。", "happy"),
             T("这一分滴到最后，boom，GG。", "happy"),
             T("咱们这包一响，对面拆包梦当场断电。", "surprised"),
-            T("这波爆炸声一出来，Mirage超市都像在放胜利烟花。", "happy"),
+            T("这波爆炸声一出来，整张地图都像在放胜利烟花。", "happy"),
         ),
         "round_win_defuse": (
             T("{score_detail}咱们拆了！", "happy"),
@@ -146,7 +183,7 @@ COMMENTARY_TEMPLATES: dict[
             T("{score_detail}咱们没了", "speechless"),
             T("这波全躺平了。", "speechless"),
             T("咱们集体变灰，Unlucky。", "neutral"),
-            T("这一分被对面从A点一路清到家。", "angry"),
+            T("这一分被对面一路清到家。", "angry"),
             T("卧了个槽，我们这边像排队进场，结果排队回了观战席。", "speechless"),
         ),
         "round_loss_bomb": (
@@ -154,7 +191,7 @@ COMMENTARY_TEMPLATES: dict[
             T("咱们听了个响。", "neutral"),
             T("这一分boom，对面收走。", "angry"),
             T("这波包响得很准，咱们的分也飞得很快。", "speechless"),
-            T("我们这边刚摸到包点，爆炸已经把结算页掀出来了。", "surprised"),
+            T("我们这边刚回到现场，爆炸已经把结算页掀出来了。", "surprised"),
         ),
         "round_loss_defuse": (
             T("{score_detail}这波被拆了", "speechless"),
@@ -175,7 +212,7 @@ COMMENTARY_TEMPLATES: dict[
             T("这一分没了。", "neutral"),
             T("这波Unlucky，翻篇。", "neutral"),
             T("我们这边差一口气，比分牌没给面子。", "speechless"),
-            T("咱们这回合打得像Nuke电梯，门一开就直接去了地下层。", "angry"),
+            T("咱们这回合打得像坐滑梯，开场就直接去了地下层。", "angry"),
         ),
     },
     "caster": {
@@ -183,7 +220,7 @@ COMMENTARY_TEMPLATES: dict[
             T("{kill_detail}你这枪nice", "happy"),
             T("镜头给你，一拉一颗。", "happy"),
             T("这位选手，你出枪没有前摇！", "surprised"),
-            T("观众朋友们，你这一枪把中路直接点亮了。", "happy"),
+            T("观众朋友们，你这一枪把画面直接点亮了。", "happy"),
             T("导播甚至没来得及切镜头，你已经让对面进入灰屏画面。", "surprised"),
         ),
         "kill_headshot": (
@@ -198,19 +235,19 @@ COMMENTARY_TEMPLATES: dict[
             T("吃闪？你白着秒了两个！", "surprised"),
             T("这位选手，你左右各收一位。", "happy"),
             T("镜头不切了，你这双杀值得完整回放。", "surprised"),
-            T("观众朋友们，你在B洞完成一穿二，画面像提前写好了剧本。", "happy"),
+            T("观众朋友们，你完成一穿二，画面像提前写好了剧本。", "happy"),
         ),
         "multi_3": (
             T("你拿三杀！", "surprised"),
             T("这位选手，你接管了。", "happy"),
-            T("哇，你一个人在A点水下游龙！", "surprised"),
+            T("哇，你一个人游龙！", "surprised"),
             T("镜头里的你，三个人，三次谢幕。", "happy"),
             T("观众朋友们，你这波请神请到s1mple，解说席已经站起来了。", "surprised"),
         ),
         "multi_4": (
             T("你拿四杀！", "surprised"),
             T("不是啊，你还在杀！", "surprised"),
-            T("这位选手，你把A点变成个人舞台。", "happy"),
+            T("这位选手，你把全场变成个人舞台。", "happy"),
             T("四个镜头全归你，导播今晚不用剪片了。", "happy"),
             T("啊？不是啊？你这是人类啊，怎么把四个人打成了背景板。", "surprised"),
         ),
@@ -226,14 +263,14 @@ COMMENTARY_TEMPLATES: dict[
             T("镜头锁你，别切。", "happy"),
             T("这位选手，你的人头数字还在滚。", "happy"),
             T("导播追不上你，击杀信息已经开始刷屏。", "surprised"),
-            T("观众朋友们，你从中路一路游龙，比赛画面快变成个人纪录片了。", "surprised"),
+            T("观众朋友们，你一路游龙，比赛画面快变成个人纪录片了。", "surprised"),
         ),
         "death": (
             T("{survival_detail}你倒下了", "speechless"),
             T("Unlucky，你退场。", "neutral"),
             T("这位选手，你的画面突然黑白。", "speechless"),
             T("镜头给到你，刚探出去就被精准捕捉。", "surprised"),
-            T("哎呀，你在Dust2大坑被一枪按掉，解说席只剩半句话。", "speechless"),
+            T("哎呀，你被一枪按掉，解说席只剩半句话。", "speechless"),
         ),
         "death_thrown_away": (
             T("你白给了！", "angry"),
@@ -242,19 +279,26 @@ COMMENTARY_TEMPLATES: dict[
             T("画面给你，满配登场，灰屏谢幕。", "speechless"),
             T("观众朋友们，你这波经济转化率惊人，全转成了对面的。", "angry"),
         ),
+        "death_after_kill": (
+            T("击杀已经到账，随后被补，交换成立。", "happy"),
+            T("这位选手先收一人，镜头才转黑。", "neutral"),
+            T("有来有回，这波不是白忙。", "happy"),
+            T("导播回放：先击杀，后被补枪。", "surprised"),
+            T("人头换到，现场接受这次交换。", "neutral"),
+        ),
         "round_win_elimination": (
             T("{score_detail}咱们清场！", "happy"),
             T("这波全数带走。", "happy"),
             T("我们这边完成灭队，优美的CS。", "surprised"),
             T("这一分没有悬念，对面五张灰屏同时亮起。", "happy"),
-            T("观众朋友们，咱们从A1清到B洞，整张地图只剩胜利音乐。", "surprised"),
+            T("观众朋友们，咱们一路清场，整张地图只剩胜利音乐。", "surprised"),
         ),
         "round_win_bomb": (
             T("{score_detail}这波引爆！", "surprised"),
             T("咱们听响拿分。", "happy"),
             T("这一分随着爆炸声正式落袋。", "happy"),
             T("我们这边的倒计时走完，画面定格胜利。", "surprised"),
-            T("观众朋友们，这波包点烟花升空，比分牌也跟着完成跳动。", "happy"),
+            T("观众朋友们，这波烟花升空，比分牌也跟着完成跳动。", "happy"),
         ),
         "round_win_defuse": (
             T("{score_detail}咱们拆掉！", "happy"),
@@ -288,7 +332,7 @@ COMMENTARY_TEMPLATES: dict[
             T("{score_detail}这波爆炸", "speechless"),
             T("咱们没赶上。", "neutral"),
             T("这一分随爆炸声离开画面。", "angry"),
-            T("我们这边回到包点，迎面只剩结算动画。", "speechless"),
+            T("我们这边回到现场，迎面只剩结算动画。", "speechless"),
             T("观众朋友们，这波倒计时无情归零，比分被对面完整带走。", "surprised"),
         ),
         "round_loss_defuse": (

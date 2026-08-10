@@ -42,12 +42,12 @@ IDLE_UTTERANCES_BY_PERSONALITY: dict[
         ),
         Utterance(
             id="idle-brother-007",
-            text="你今天这专注度，A点五个人架你都拉不走。",
+            text="你今天这专注度，五个人架你都拉不走。",
             emotion="surprised",
         ),
         Utterance(
             id="idle-brother-008",
-            text="你忙你的，我就在旁边挂着；等你回头一看，兄弟还在，桌面也没被我偷偷改成Dust2大坑旅游照。",
+            text="你忙你的，我就在旁边挂着；等你回头一看，兄弟还在，桌面也没被我偷偷改成旅游照。",
             emotion="happy",
         ),
         Utterance(

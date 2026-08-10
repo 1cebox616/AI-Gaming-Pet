@@ -12,6 +12,7 @@ import pytest
 from pet.gsi import GSI_CONFIG_CONTENT, RawGsiRecorder, RoundWin, parse_snapshot
 from pet.main import app
 
+T7_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_t7_samples.json"
 
 # Captured in a real M2-T1 casual match; Steam IDs, names, and cosmetic values are scrubbed.
 COMPLETE_RECORDED_PAYLOAD: dict[str, object] = {
@@ -89,9 +90,24 @@ def test_complete_recorded_payload_maps_every_snapshot_group() -> None:
         "match_score": 0,
         "score_ct": 2,
         "score_t": 3,
+        "ct_consecutive_round_losses": None,
+        "t_consecutive_round_losses": None,
         "round_wins": None,
         "active_weapon": "weapon_usp_silencer",
     }
+
+
+def test_real_payload_parses_team_consecutive_round_losses() -> None:
+    """The new fields are taken from a scrubbed fragment of a real casual recording."""
+    loaded: object = json.loads(T7_FIXTURE_PATH.read_text(encoding="utf-8"))
+    assert isinstance(loaded, dict)
+    samples: object = loaded["death_after_kill"]["samples"]
+    assert isinstance(samples, list)
+
+    snapshot = parse_snapshot(samples[0]["payload"], received_at=samples[0]["ts"])
+
+    assert snapshot.ct_consecutive_round_losses == 1
+    assert snapshot.t_consecutive_round_losses == 0
 
 
 def test_recorded_payload_without_map_keeps_player_fields() -> None:

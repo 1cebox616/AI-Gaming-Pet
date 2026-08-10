@@ -22,6 +22,7 @@ EventType = Literal[
     "kill_headshot",
     "multi_kill",
     "death",
+    "death_after_kill",
     "death_thrown_away",
     "round_win",
     "round_loss",
@@ -32,16 +33,19 @@ EVENT_TYPES: tuple[EventType, ...] = (
     "kill_headshot",
     "multi_kill",
     "death",
+    "death_after_kill",
     "death_thrown_away",
     "round_win",
     "round_loss",
 )
 MULTI_KILL_THRESHOLDS = (2, 3, 4, 5)
+LARGE_SCORE_GAP = 4
 _EVENT_LABELS: dict[EventType, str] = {
     "kill": "击杀",
     "kill_headshot": "爆头击杀",
     "multi_kill": "多杀",
     "death": "死亡",
+    "death_after_kill": "击杀后被补枪",
     "death_thrown_away": "白给",
     "round_win": "回合胜利",
     "round_loss": "回合失利",
@@ -66,6 +70,8 @@ class GameEvent(BaseModel):
 @dataclass(slots=True)
 class _SubjectBaseline:
     snapshot: GameSnapshot
+    last_kill_at: float | None = None
+    last_kill_round_number: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,13 +109,16 @@ class EventDetector:
         baseline = self._subjects.get(snapshot.player_steamid)
         events: list[GameEvent] = []
         if baseline is not None and game.state in _EMITTING_STATES:
-            events.extend(self._detect_subject_events(baseline.snapshot, snapshot))
+            events.extend(self._detect_subject_events(baseline, snapshot))
         if self._has_observed_snapshot and game.state in _EMITTING_STATES:
             result = self._detect_round_result(snapshot)
             if result is not None:
                 events.append(result)
 
-        self._subjects[snapshot.player_steamid] = _SubjectBaseline(snapshot=snapshot)
+        if baseline is None:
+            self._subjects[snapshot.player_steamid] = _SubjectBaseline(snapshot=snapshot)
+        else:
+            baseline.snapshot = snapshot
         self._has_observed_snapshot = True
         return tuple(events)
 
@@ -154,8 +163,9 @@ class EventDetector:
             self._last_round_phase = snapshot.round_phase
 
     def _detect_subject_events(
-        self, previous: GameSnapshot, current: GameSnapshot
+        self, baseline: _SubjectBaseline, current: GameSnapshot
     ) -> list[GameEvent]:
+        previous = baseline.snapshot
         self_steamid = current.provider_steamid or self._self_steamid
         subject_is_self = (
             current.player_steamid is not None
@@ -166,21 +176,27 @@ class EventDetector:
 
         round_boundary = (
             current.round_phase == "freezetime"
+            or previous.map_name != current.map_name
             or (
                 previous.round_number is not None
                 and current.round_number is not None
                 and previous.round_number != current.round_number
             )
         )
+        if round_boundary:
+            baseline.last_kill_at = None
+            baseline.last_kill_round_number = None
         if not round_boundary:
-            events.extend(
-                self._detect_kills(
-                    previous,
-                    current,
-                    subject_is_self=subject_is_self,
-                    round_number=round_number,
-                )
+            kill_events = self._detect_kills(
+                previous,
+                current,
+                subject_is_self=subject_is_self,
+                round_number=round_number,
             )
+            if kill_events:
+                baseline.last_kill_at = current.ts
+                baseline.last_kill_round_number = round_number
+            events.extend(kill_events)
 
         if current.round_phase != "freezetime" and _is_death(previous, current):
             survival_seconds = (
@@ -189,8 +205,20 @@ class EventDetector:
                 else None
             )
             round_kills = current.round_kills if current.round_kills is not None else 0
+            seconds_since_last_kill = _seconds_since_last_kill(
+                baseline,
+                current,
+                round_number,
+            )
+            death_after_kill = (
+                round_kills >= 1
+                and seconds_since_last_kill is not None
+                and seconds_since_last_kill
+                <= self._config.death_after_kill_max_seconds
+            )
             thrown_away = (
-                round_kills == 0
+                not death_after_kill
+                and round_kills == 0
                 and survival_seconds is not None
                 and survival_seconds < self._config.thrown_away_max_survival_seconds
                 and current.equip_value is not None
@@ -198,7 +226,11 @@ class EventDetector:
             )
             events.append(
                 self._make_event(
-                    event_type="death_thrown_away" if thrown_away else "death",
+                    event_type=(
+                        "death_after_kill"
+                        if death_after_kill
+                        else "death_thrown_away" if thrown_away else "death"
+                    ),
                     snapshot=current,
                     subject_steamid=current.player_steamid,
                     subject_is_self=subject_is_self,
@@ -206,7 +238,9 @@ class EventDetector:
                     facts={
                         "survival_seconds": survival_seconds,
                         "round_kills": round_kills,
+                        "seconds_since_last_kill": seconds_since_last_kill,
                         "equip_value": current.equip_value,
+                        **_score_situation_facts(current, current.team),
                     },
                 )
             )
@@ -289,6 +323,7 @@ class EventDetector:
                 "method": _round_win_method(snapshot),
                 "score_ct": snapshot.score_ct,
                 "score_t": snapshot.score_t,
+                **_score_situation_facts(snapshot, self._self_team),
             },
         )
 
@@ -335,6 +370,63 @@ def _is_death(previous: GameSnapshot, current: GameSnapshot) -> bool:
         and current.health in {0, None}
     )
     return health_reached_zero or deaths_increased
+
+
+def _seconds_since_last_kill(
+    baseline: _SubjectBaseline,
+    current: GameSnapshot,
+    round_number: int | None,
+) -> float | None:
+    """Return a same-round kill interval without borrowing another round's kill."""
+    if (
+        baseline.last_kill_at is None
+        or baseline.last_kill_round_number != round_number
+    ):
+        return None
+    return max(0.0, current.ts - baseline.last_kill_at)
+
+
+def _score_situation_facts(
+    snapshot: GameSnapshot, team: str | None
+) -> dict[str, str | int | None]:
+    """Describe the subject team's score position from the authoritative map scores."""
+    own_score, opposing_score, losses = _team_score_values(snapshot, team)
+    if own_score is None or opposing_score is None:
+        situation: str | None = None
+    else:
+        difference = own_score - opposing_score
+        if difference >= LARGE_SCORE_GAP:
+            situation = "大比分领先"
+        elif difference > 0:
+            situation = "领先"
+        elif difference == 0:
+            situation = "追平"
+        elif difference <= -LARGE_SCORE_GAP:
+            situation = "大比分落后"
+        else:
+            situation = "落后"
+    return {
+        "score_situation": situation,
+        "team_consecutive_round_losses": losses,
+    }
+
+
+def _team_score_values(
+    snapshot: GameSnapshot, team: str | None
+) -> tuple[int | None, int | None, int | None]:
+    if team == "CT":
+        return (
+            snapshot.score_ct,
+            snapshot.score_t,
+            snapshot.ct_consecutive_round_losses,
+        )
+    if team == "T":
+        return (
+            snapshot.score_t,
+            snapshot.score_ct,
+            snapshot.t_consecutive_round_losses,
+        )
+    return None, None, None
 
 
 def _round_win_method(snapshot: GameSnapshot) -> str | None:
@@ -427,19 +519,31 @@ def _format_facts(event: GameEvent) -> str:
         )
     if event.type == "multi_kill":
         return f"本回合累计达到 {facts['count']} 杀"
-    if event.type in {"death", "death_thrown_away"}:
+    if event.type in {"death", "death_after_kill", "death_thrown_away"}:
         survival = facts["survival_seconds"]
         survival_label = "未知" if survival is None else f"{survival:.3f} 秒"
         equip_value = facts["equip_value"]
         equip_label = "未知" if equip_value is None else str(equip_value)
+        last_kill = facts["seconds_since_last_kill"]
+        last_kill_label = "无" if last_kill is None else f"{last_kill:.3f} 秒前"
+        situation = facts["score_situation"] or "未知"
+        losses = facts["team_consecutive_round_losses"]
+        losses_label = "未知" if losses is None else str(losses)
         return (
             f"存活 {survival_label}，本回合 {facts['round_kills']} 杀，"
-            f"装备值 {equip_label}"
+            f"距上次击杀 {last_kill_label}，装备值 {equip_label}，"
+            f"态势 {situation}，本方连败 {losses_label}"
         )
     method = facts["method"] or "未知"
     score_ct = facts["score_ct"] if facts["score_ct"] is not None else "未知"
     score_t = facts["score_t"] if facts["score_t"] is not None else "未知"
-    return f"方式 {method}，比分 CT {score_ct} : {score_t} T"
+    situation = facts["score_situation"] or "未知"
+    losses = facts["team_consecutive_round_losses"]
+    losses_label = "未知" if losses is None else str(losses)
+    return (
+        f"方式 {method}，比分 CT {score_ct} : {score_t} T，态势 {situation}，"
+        f"本方连败 {losses_label}"
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:

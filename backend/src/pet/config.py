@@ -50,6 +50,7 @@ class EventsConfig(BaseModel):
 
     thrown_away_max_survival_seconds: float = Field(default=15.0, ge=1, le=120)
     thrown_away_min_equip_value: int = Field(default=3000, ge=0, le=20000)
+    death_after_kill_max_seconds: float = Field(default=8.0, ge=1, le=60)
 
 
 class PolicyConfig(BaseModel):
@@ -187,6 +188,7 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
         "events": (
             "thrown_away_max_survival_seconds",
             "thrown_away_min_equip_value",
+            "death_after_kill_max_seconds",
         ),
         "policy": (
             "cooldown_seconds",

@@ -98,6 +98,8 @@ class GameSnapshot(BaseModel):
     match_score: int | None = None
     score_ct: int | None = None
     score_t: int | None = None
+    ct_consecutive_round_losses: int | None = None
+    t_consecutive_round_losses: int | None = None
     round_wins: tuple[RoundWin, ...] | None = None
     active_weapon: str | None = None
 
@@ -145,6 +147,12 @@ def parse_snapshot(payload: object, *, received_at: float | None = None) -> Game
         match_score=_read(payload, ("player", "match_stats", "score"), int),
         score_ct=_read(payload, ("map", "team_ct", "score"), int),
         score_t=_read(payload, ("map", "team_t", "score"), int),
+        ct_consecutive_round_losses=_read(
+            payload, ("map", "team_ct", "consecutive_round_losses"), int
+        ),
+        t_consecutive_round_losses=_read(
+            payload, ("map", "team_t", "consecutive_round_losses"), int
+        ),
         round_wins=_read_round_wins(payload),
         active_weapon=_read_active_weapon(payload),
     )
