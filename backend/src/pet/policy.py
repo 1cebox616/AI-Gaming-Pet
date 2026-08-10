@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from pet.config import EventsConfig, PolicyConfig
-from pet.events import EventDetector, EventType, GameEvent
-from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot
-from pet.session import GameSessionTracker, GameState
+from pet.config import PolicyConfig
+from pet.events import EventType, GameEvent
+from pet.gsi import GameSnapshot
+from pet.session import GameState
 
 DecisionReason = Literal[
     "selected",
@@ -36,26 +34,6 @@ _STATIC_PRIORITIES: dict[EventType, int] = {
     "multi_kill": 0,
 }
 _MULTI_KILL_PRIORITIES = {2: 50, 3: 80, 4: 90, 5: 100}
-_EVENT_LABELS: dict[EventType, str] = {
-    "kill": "普通击杀",
-    "kill_headshot": "爆头击杀",
-    "multi_kill": "多杀",
-    "death": "死亡",
-    "death_after_kill": "击杀后被补枪",
-    "death_thrown_away": "白给",
-    "round_win": "回合胜利",
-    "round_loss": "回合失败",
-}
-_REASON_LABELS: dict[DecisionReason, str] = {
-    "selected": "开口",
-    "teammate_event": "队友事件",
-    "muted": "自动说话关闭",
-    "alive_threshold": "交火中未达门槛",
-    "round_limit": "每回合上限",
-    "cooldown": "冷却未过",
-    "minimum_gap": "最小间隔未过",
-    "higher_priority": "已有更高优先级事件",
-}
 
 
 class PolicyDecision(BaseModel):
@@ -67,7 +45,8 @@ class PolicyDecision(BaseModel):
     selected: bool
     priority: int
     reason_code: DecisionReason
-    reason: str
+    elapsed_seconds: float | None = None
+    limit: float | int | None = None
 
 
 class PolicyBatchDecision(BaseModel):
@@ -77,15 +56,6 @@ class PolicyBatchDecision(BaseModel):
 
     selected_event: GameEvent | None
     decisions: tuple[PolicyDecision, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class PolicyReplayResult:
-    """Policy decisions and aggregate recording metadata from one replay."""
-
-    decisions: tuple[PolicyDecision, ...]
-    started_at: float
-    snapshot_count: int
 
 
 class SpeechPolicy:
@@ -109,6 +79,14 @@ class SpeechPolicy:
             and snapshot.health is not None
         ):
             self._self_health = snapshot.health
+
+    def reset(self) -> None:
+        """Discard every per-match health, cooldown, and quota value."""
+        self._self_steamid = None
+        self._self_health = None
+        self._last_selected_at = None
+        self._counted_round_number = None
+        self._lines_this_round = 0
 
     def decide(
         self,
@@ -159,7 +137,6 @@ class SpeechPolicy:
                         selected=True,
                         priority=candidate_priority,
                         reason_code="selected",
-                        reason=f"优先级 {candidate_priority}",
                     )
                 else:
                     decisions_by_id[event.id] = PolicyDecision(
@@ -167,7 +144,6 @@ class SpeechPolicy:
                         selected=False,
                         priority=candidate_priority,
                         reason_code="higher_priority",
-                        reason="已有更高优先级事件",
                     )
             self._last_selected_at = now
             self._lines_this_round += 1
@@ -187,14 +163,9 @@ class SpeechPolicy:
         muted: bool,
     ) -> PolicyDecision | None:
         if not event.subject_is_self:
-            return _rejected(
-                event,
-                priority,
-                "teammate_event",
-                "队友事件，本里程碑不解说",
-            )
+            return _rejected(event, priority, "teammate_event")
         if muted:
-            return _rejected(event, priority, "muted", "自动说话已关闭")
+            return _rejected(event, priority, "muted")
         if (
             game.state == "playing"
             and self._self_health is not None
@@ -205,15 +176,14 @@ class SpeechPolicy:
                 event,
                 priority,
                 "alive_threshold",
-                f"交火中，优先级 {priority} 未达门槛 "
-                f"{self._config.alive_priority_threshold}",
+                limit=self._config.alive_priority_threshold,
             )
         if self._lines_this_round >= self._config.max_lines_per_round:
             return _rejected(
                 event,
                 priority,
                 "round_limit",
-                f"本回合发言已达上限 {self._config.max_lines_per_round}",
+                limit=self._config.max_lines_per_round,
             )
         if self._last_selected_at is not None:
             elapsed = max(0.0, now - self._last_selected_at)
@@ -224,16 +194,16 @@ class SpeechPolicy:
                             event,
                             priority,
                             "minimum_gap",
-                            f"距上次发言 {elapsed:.3f} 秒，最小间隔 "
-                            f"{self._config.minimum_gap_seconds:g} 秒未过",
+                            elapsed_seconds=elapsed,
+                            limit=self._config.minimum_gap_seconds,
                         )
                     return None
                 return _rejected(
                     event,
                     priority,
                     "cooldown",
-                    f"距上次发言 {elapsed:.3f} 秒，冷却 "
-                    f"{self._config.cooldown_seconds:g} 秒未过",
+                    elapsed_seconds=elapsed,
+                    limit=self._config.cooldown_seconds,
                 )
         return None
 
@@ -248,88 +218,19 @@ def event_priority(event: GameEvent) -> int:
     return _STATIC_PRIORITIES[event.type]
 
 
-def replay_policy(
-    snapshots: Sequence[GameSnapshot],
-    events_config: EventsConfig,
-    policy_config: PolicyConfig,
-    *,
-    muted: bool = False,
-) -> PolicyReplayResult:
-    """Replay snapshots through event detection, session state, and policy."""
-    detector = EventDetector(events_config)
-    session = GameSessionTracker(GSI_SILENCE_SECONDS)
-    policy = SpeechPolicy(policy_config)
-    decisions: list[PolicyDecision] = []
-    for snapshot in snapshots:
-        game = session.observe(snapshot)
-        policy.observe_snapshot(snapshot)
-        events = detector.observe(snapshot)
-        batch = policy.decide(events, game, now=snapshot.ts, muted=muted)
-        decisions.extend(batch.decisions)
-    return PolicyReplayResult(
-        decisions=tuple(decisions),
-        started_at=snapshots[0].ts if snapshots else 0.0,
-        snapshot_count=len(snapshots),
-    )
-
-
-def format_policy_replay(result: PolicyReplayResult) -> str:
-    """Format every policy disposition and aggregate reason counts in Chinese."""
-    lines = ["发言策略决策时间线："]
-    if not result.decisions:
-        lines.append("（未检测到事件）")
-    for decision in result.decisions:
-        event = decision.event
-        relative = event.ts - result.started_at
-        round_label = (
-            f"第 {event.round_number} 回合"
-            if event.round_number is not None
-            else "回合未知"
-        )
-        action = "开口" if decision.selected else "丢弃"
-        event_label = _EVENT_LABELS[event.type]
-        if event.type == "multi_kill":
-            event_label = f"{event.facts.get('count', '?')} 杀"
-        lines.append(
-            f"+{relative:8.3f}s | {round_label} | {event_label:<8} | "
-            f"{action} | {decision.reason}"
-        )
-
-    selected_count = sum(decision.selected for decision in result.decisions)
-    rejected_counts = Counter(
-        decision.reason_code for decision in result.decisions if not decision.selected
-    )
-    lines.extend(
-        (
-            "",
-            "策略汇总：",
-            f"- 检测到事件：{len(result.decisions)}",
-            f"- 实际开口：{selected_count}",
-        )
-    )
-    if rejected_counts:
-        reason_summary = "、".join(
-            f"{_REASON_LABELS[reason]} {rejected_counts[reason]}"
-            for reason in _REASON_LABELS
-            if reason != "selected" and rejected_counts[reason]
-        )
-        lines.append(f"- 丢弃原因：{reason_summary}")
-    else:
-        lines.append("- 丢弃原因：无")
-    lines.append(f"- 处理快照：{result.snapshot_count}")
-    return "\n".join(lines)
-
-
 def _rejected(
     event: GameEvent,
     priority: int,
     reason_code: DecisionReason,
-    reason: str,
+    *,
+    elapsed_seconds: float | None = None,
+    limit: float | int | None = None,
 ) -> PolicyDecision:
     return PolicyDecision(
         event=event,
         selected=False,
         priority=priority,
         reason_code=reason_code,
-        reason=reason,
+        elapsed_seconds=elapsed_seconds,
+        limit=limit,
     )

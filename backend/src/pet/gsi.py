@@ -79,23 +79,12 @@ class GameSnapshot(BaseModel):
     round_number: int | None = None
     round_phase: str | None = None
     round_win_team: str | None = None
-    bomb: str | None = None
     team: str | None = None
     health: int | None = None
-    armor: int | None = None
-    helmet: bool | None = None
-    flashed: int | None = None
-    smoked: int | None = None
-    burning: int | None = None
-    money: int | None = None
     equip_value: int | None = None
     round_kills: int | None = None
     round_killhs: int | None = None
-    match_kills: int | None = None
-    match_assists: int | None = None
     match_deaths: int | None = None
-    match_mvps: int | None = None
-    match_score: int | None = None
     score_ct: int | None = None
     score_t: int | None = None
     ct_consecutive_round_losses: int | None = None
@@ -128,23 +117,12 @@ def parse_snapshot(payload: object, *, received_at: float | None = None) -> Game
         round_number=_read(payload, ("map", "round"), int),
         round_phase=_read(payload, ("round", "phase"), str),
         round_win_team=_read(payload, ("round", "win_team"), str),
-        bomb=_read(payload, ("round", "bomb"), str),
         team=_read(payload, ("player", "team"), str),
         health=_read(payload, ("player", "state", "health"), int),
-        armor=_read(payload, ("player", "state", "armor"), int),
-        helmet=_read(payload, ("player", "state", "helmet"), bool),
-        flashed=_read(payload, ("player", "state", "flashed"), int),
-        smoked=_read(payload, ("player", "state", "smoked"), int),
-        burning=_read(payload, ("player", "state", "burning"), int),
-        money=_read(payload, ("player", "state", "money"), int),
         equip_value=_read(payload, ("player", "state", "equip_value"), int),
         round_kills=_read(payload, ("player", "state", "round_kills"), int),
         round_killhs=_read(payload, ("player", "state", "round_killhs"), int),
-        match_kills=_read(payload, ("player", "match_stats", "kills"), int),
-        match_assists=_read(payload, ("player", "match_stats", "assists"), int),
         match_deaths=_read(payload, ("player", "match_stats", "deaths"), int),
-        match_mvps=_read(payload, ("player", "match_stats", "mvps"), int),
-        match_score=_read(payload, ("player", "match_stats", "score"), int),
         score_ct=_read(payload, ("map", "team_ct", "score"), int),
         score_t=_read(payload, ("map", "team_t", "score"), int),
         ct_consecutive_round_losses=_read(
@@ -156,6 +134,15 @@ def parse_snapshot(payload: object, *, received_at: float | None = None) -> Game
         round_wins=_read_round_wins(payload),
         active_weapon=_read_active_weapon(payload),
     )
+
+
+def human_round_number(snapshot: GameSnapshot) -> int | None:
+    """Return the one human-readable round described by a snapshot."""
+    if snapshot.round_number is None:
+        return None
+    if snapshot.round_phase == "over" or snapshot.round_win_team is not None:
+        return snapshot.round_number
+    return snapshot.round_number + 1
 
 
 def _read(
@@ -404,14 +391,13 @@ class GsiService:
             else snapshot.player_steamid == snapshot.provider_steamid
         )
         logger.info(
-            "CS2 GSI activity=%s mode=%s round=%s round_phase=%s health=%s money=%s "
+            "CS2 GSI activity=%s mode=%s round=%s round_phase=%s health=%s "
             "round_kills=%s player_is_provider=%s",
             snapshot.activity,
             snapshot.map_mode,
             snapshot.round_number,
             snapshot.round_phase,
             snapshot.health,
-            snapshot.money,
             snapshot.round_kills,
             same_identity,
         )

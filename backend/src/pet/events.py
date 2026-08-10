@@ -1,21 +1,15 @@
-"""Detect CS2 game events from ordered GSI snapshots and replay recordings."""
+"""Detect CS2 game events from ordered GSI snapshots."""
 
 from __future__ import annotations
 
-import argparse
-from collections import Counter
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-import json
-from pathlib import Path
-import sys
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from pet.config import EventsConfig, load_config
-from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, RoundWin, parse_snapshot
-from pet.session import GameSessionTracker
+from pet.config import EventsConfig
+from pet.gsi import GameSnapshot, RoundWin, human_round_number
+from pet.session import GameState
 
 EventType = Literal[
     "kill",
@@ -40,16 +34,6 @@ EVENT_TYPES: tuple[EventType, ...] = (
 )
 MULTI_KILL_THRESHOLDS = (2, 3, 4, 5)
 LARGE_SCORE_GAP = 4
-_EVENT_LABELS: dict[EventType, str] = {
-    "kill": "击杀",
-    "kill_headshot": "爆头击杀",
-    "multi_kill": "多杀",
-    "death": "死亡",
-    "death_after_kill": "击杀后被补枪",
-    "death_thrown_away": "白给",
-    "round_win": "回合胜利",
-    "round_loss": "回合失利",
-}
 _EMITTING_STATES = {"playing", "spectating", "round_over"}
 
 
@@ -74,21 +58,10 @@ class _SubjectBaseline:
     last_kill_round_number: int | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ReplayResult:
-    """Events and aggregate counts produced by one recording replay."""
-
-    events: tuple[GameEvent, ...]
-    started_at: float
-    snapshot_count: int
-    rounds_covered: int
-
-
 class EventDetector:
     """Compare snapshots while keeping independent baselines for each subject."""
 
     def __init__(self, config: EventsConfig) -> None:
-        self._session = GameSessionTracker(GSI_SILENCE_SECONDS)
         self._config = config
         self._subjects: dict[str | None, _SubjectBaseline] = {}
         self._has_observed_snapshot = False
@@ -100,9 +73,21 @@ class EventDetector:
         self._reported_results: set[tuple[int | None, str]] = set()
         self._result_map_name: str | None = None
 
-    def observe(self, snapshot: GameSnapshot) -> tuple[GameEvent, ...]:
+    def reset(self) -> None:
+        """Discard every per-match baseline while keeping event IDs process-unique."""
+        self._subjects.clear()
+        self._has_observed_snapshot = False
+        self._self_steamid = None
+        self._self_team = None
+        self._last_round_phase = None
+        self._live_started_at = None
+        self._reported_results.clear()
+        self._result_map_name = None
+
+    def observe(
+        self, snapshot: GameSnapshot, game: GameState
+    ) -> tuple[GameEvent, ...]:
         """Consume one ordered snapshot and return newly inferred events."""
-        game = self._session.observe(snapshot)
         self._update_match_context(snapshot, game.state)
         self._update_round_clock(snapshot, game.state)
 
@@ -115,10 +100,13 @@ class EventDetector:
             if result is not None:
                 events.append(result)
 
-        if baseline is None:
-            self._subjects[snapshot.player_steamid] = _SubjectBaseline(snapshot=snapshot)
-        else:
-            baseline.snapshot = snapshot
+        if game.state in _EMITTING_STATES or game.state == "warmup":
+            if baseline is None:
+                self._subjects[snapshot.player_steamid] = _SubjectBaseline(
+                    snapshot=snapshot
+                )
+            else:
+                baseline.snapshot = snapshot
         self._has_observed_snapshot = True
         return tuple(events)
 
@@ -171,7 +159,7 @@ class EventDetector:
             current.player_steamid is not None
             and current.player_steamid == self_steamid
         )
-        round_number = _human_round_number(current)
+        round_number = human_round_number(current)
         events: list[GameEvent] = []
 
         round_boundary = (
@@ -318,7 +306,7 @@ class EventDetector:
             snapshot=snapshot,
             subject_steamid=snapshot.provider_steamid or self._self_steamid,
             subject_is_self=True,
-            round_number=_human_round_number(snapshot),
+            round_number=human_round_number(snapshot),
             facts={
                 "method": _round_win_method(snapshot),
                 "score_ct": snapshot.score_ct,
@@ -347,14 +335,6 @@ class EventDetector:
             round_number=round_number,
             facts=facts,
         )
-
-
-def _human_round_number(snapshot: GameSnapshot) -> int | None:
-    if snapshot.round_number is None:
-        return None
-    if snapshot.round_phase == "over" or snapshot.round_win_team is not None:
-        return snapshot.round_number
-    return snapshot.round_number + 1
 
 
 def _is_death(previous: GameSnapshot, current: GameSnapshot) -> bool:
@@ -442,144 +422,3 @@ def _round_win_method(snapshot: GameSnapshot) -> str | None:
             return exact
     latest: RoundWin = max(snapshot.round_wins, key=lambda win: win.round)
     return latest.method
-
-
-def replay_recording(path: Path, config: EventsConfig) -> ReplayResult:
-    """Replay one raw JSONL recording in timestamp order."""
-    snapshots = _load_recording(path)
-    detector = EventDetector(config)
-    events: list[GameEvent] = []
-    covered_rounds: set[tuple[str | None, int]] = set()
-    for snapshot in snapshots:
-        events.extend(detector.observe(snapshot))
-        if snapshot.map_phase == "live" and snapshot.round_number is not None:
-            round_number = _human_round_number(snapshot)
-            if round_number is not None:
-                covered_rounds.add((snapshot.map_name, round_number))
-    return ReplayResult(
-        events=tuple(events),
-        started_at=snapshots[0].ts if snapshots else 0.0,
-        snapshot_count=len(snapshots),
-        rounds_covered=len(covered_rounds),
-    )
-
-
-def _load_recording(path: Path) -> tuple[GameSnapshot, ...]:
-    rows: list[tuple[float, int, object]] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
-            continue
-        decoded: object = json.loads(line)
-        if not isinstance(decoded, Mapping):
-            raise ValueError(f"recording line {line_number} must be a JSON object")
-        ts = decoded.get("ts")
-        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
-            raise ValueError(f"recording line {line_number} has no numeric ts")
-        rows.append((float(ts), line_number, decoded.get("payload")))
-    rows.sort(key=lambda row: (row[0], row[1]))
-    return tuple(parse_snapshot(payload, received_at=ts) for ts, _, payload in rows)
-
-
-def format_replay(result: ReplayResult, *, started_at: float) -> str:
-    """Format replay events and aggregates as a readable Chinese timeline."""
-    lines: list[str] = ["事件时间线："]
-    if not result.events:
-        lines.append("（未检测到事件）")
-    for event in result.events:
-        relative = event.ts - started_at
-        round_label = (
-            f"第 {event.round_number} 回合"
-            if event.round_number is not None
-            else "回合未知"
-        )
-        subject = "本人" if event.subject_is_self else "队友"
-        identity = event.subject_steamid or "未知主体"
-        lines.append(
-            f"+{relative:8.3f}s | {round_label} | {subject} {identity} | "
-            f"{_EVENT_LABELS[event.type]} | {_format_facts(event)}"
-        )
-
-    counts = Counter(event.type for event in result.events)
-    lines.append("")
-    lines.append("汇总：")
-    for event_type in EVENT_TYPES:
-        lines.append(f"- {_EVENT_LABELS[event_type]}：{counts[event_type]}")
-    lines.append(f"- 覆盖回合：{result.rounds_covered}")
-    lines.append(f"- 处理快照：{result.snapshot_count}")
-    return "\n".join(lines)
-
-
-def _format_facts(event: GameEvent) -> str:
-    facts = event.facts
-    if event.type in {"kill", "kill_headshot"}:
-        weapon = facts["weapon"] or "未知"
-        return (
-            f"本回合第 {facts['round_kill_index']} 杀，"
-            f"本次差值 +{facts['delta']}，武器 {weapon}"
-        )
-    if event.type == "multi_kill":
-        return f"本回合累计达到 {facts['count']} 杀"
-    if event.type in {"death", "death_after_kill", "death_thrown_away"}:
-        survival = facts["survival_seconds"]
-        survival_label = "未知" if survival is None else f"{survival:.3f} 秒"
-        equip_value = facts["equip_value"]
-        equip_label = "未知" if equip_value is None else str(equip_value)
-        last_kill = facts["seconds_since_last_kill"]
-        last_kill_label = "无" if last_kill is None else f"{last_kill:.3f} 秒前"
-        situation = facts["score_situation"] or "未知"
-        losses = facts["team_consecutive_round_losses"]
-        losses_label = "未知" if losses is None else str(losses)
-        return (
-            f"存活 {survival_label}，本回合 {facts['round_kills']} 杀，"
-            f"距上次击杀 {last_kill_label}，装备值 {equip_label}，"
-            f"态势 {situation}，本方连败 {losses_label}"
-        )
-    method = facts["method"] or "未知"
-    score_ct = facts["score_ct"] if facts["score_ct"] is not None else "未知"
-    score_t = facts["score_t"] if facts["score_t"] is not None else "未知"
-    situation = facts["score_situation"] or "未知"
-    losses = facts["team_consecutive_round_losses"]
-    losses_label = "未知" if losses is None else str(losses)
-    return (
-        f"方式 {method}，比分 CT {score_ct} : {score_t} T，态势 {situation}，"
-        f"本方连败 {losses_label}"
-    )
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="回放 CS2 GSI 录制并打印事件时间线")
-    parser.add_argument("--replay", type=Path, required=True, help="GSI JSONL 录制文件")
-    parser.add_argument(
-        "--with-policy",
-        action="store_true",
-        help="展示发言策略决定、丢弃原因与实际模板话术",
-    )
-    return parser
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    """Run the recording replay CLI."""
-    args = _build_parser().parse_args(argv)
-    configuration = load_config()
-    if args.with_policy:
-        from pet.commentary import format_commentary_replay, replay_commentary
-
-        snapshots = _load_recording(args.replay)
-        commentary_result = replay_commentary(
-            snapshots,
-            configuration.events,
-            configuration.policy,
-            personality_style=configuration.personality.style,
-        )
-        print(format_commentary_replay(commentary_result))
-        return 0
-
-    result = replay_recording(args.replay, configuration.events)
-    print(format_replay(result, started_at=result.started_at))
-    return 0
-
-
-if __name__ == "__main__":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-    raise SystemExit(main())

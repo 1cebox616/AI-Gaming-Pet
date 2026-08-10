@@ -9,7 +9,8 @@ import pytest
 from pet.config import EventsConfig, PolicyConfig
 from pet.events import EventDetector
 from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, parse_snapshot
-from pet.policy import PolicyDecision, SpeechPolicy, replay_policy
+from pet.policy import PolicyDecision, SpeechPolicy
+from pet.replay import format_decision_reason, replay_policy
 from pet.session import GameSessionTracker
 
 EVENT_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
@@ -96,7 +97,7 @@ def _cooldown_override_decisions(
     for index, snapshot in enumerate(snapshots):
         game = tracker.observe(snapshot)
         policy.observe_snapshot(snapshot)
-        events = detector.observe(snapshot)
+        events = detector.observe(snapshot, game)
         now = last_now if index == len(snapshots) - 1 and last_now is not None else snapshot.ts
         decisions.extend(policy.decide(events, game, now=now, muted=False).decisions)
     return tuple(decisions)
@@ -119,10 +120,10 @@ def test_alive_combat_drops_normal_kills_but_allows_three_kill(
     assert normal_kills
     assert all(decision.selected is False for decision in normal_kills)
     assert all(decision.reason_code == "alive_threshold" for decision in normal_kills)
-    assert normal_kills[0].reason == "交火中，优先级 20 未达门槛 75"
+    assert format_decision_reason(normal_kills[0]) == "交火中，优先级 20 未达门槛 75"
     assert three_kill.selected is True
     assert three_kill.priority == 80
-    assert three_kill.reason == "优先级 80"
+    assert format_decision_reason(three_kill) == "优先级 80"
 
 
 def test_death_after_kill_is_not_blocked_by_alive_combat_threshold(
@@ -143,7 +144,7 @@ def test_death_after_kill_is_not_blocked_by_alive_combat_threshold(
     assert snapshots[-1].health == 0
     assert death.selected is True
     assert death.priority == 50
-    assert death.reason == "优先级 50"
+    assert format_decision_reason(death) == "优先级 50"
     assert all(decision.reason_code != "alive_threshold" for decision in decisions)
 
 
@@ -158,7 +159,8 @@ def test_teammate_events_are_dropped_with_milestone_reason(
     assert all(decision.selected is False for decision in decisions)
     assert all(decision.reason_code == "teammate_event" for decision in decisions)
     assert all(
-        decision.reason == "队友事件，本里程碑不解说" for decision in decisions
+        format_decision_reason(decision) == "队友事件，本里程碑不解说"
+        for decision in decisions
     )
 
 
@@ -174,7 +176,10 @@ def test_muted_switch_drops_every_game_event(
     assert decisions
     assert all(decision.selected is False for decision in decisions)
     assert all(decision.reason_code == "muted" for decision in decisions)
-    assert all(decision.reason == "自动说话已关闭" for decision in decisions)
+    assert all(
+        format_decision_reason(decision) == "自动说话已关闭"
+        for decision in decisions
+    )
 
 
 def test_cooldown_drops_early_batch_then_allows_later_event(
@@ -197,7 +202,8 @@ def test_cooldown_drops_early_batch_then_allows_later_event(
     assert [decision.event.type for decision in selected] == ["multi_kill", "round_win"]
     assert cooldown_rejections
     assert all(
-        decision.reason == "距上次发言 12.791 秒，冷却 20 秒未过"
+        format_decision_reason(decision)
+        == "距上次发言 12.791 秒，冷却 20 秒未过"
         for decision in cooldown_rejections
     )
 
@@ -224,7 +230,8 @@ def test_round_limit_drops_after_cap_and_resets_on_round_change(
     ]
     assert limit_rejections
     assert all(
-        decision.reason == "本回合发言已达上限 1" for decision in limit_rejections
+        format_decision_reason(decision) == "本回合发言已达上限 1"
+        for decision in limit_rejections
     )
 
 
@@ -244,7 +251,10 @@ def test_same_batch_selects_highest_priority_and_marks_every_other_event(
     assert selected[0].priority == 80
     assert rejected
     assert all(decision.reason_code == "higher_priority" for decision in rejected)
-    assert all(decision.reason == "已有更高优先级事件" for decision in rejected)
+    assert all(
+        format_decision_reason(decision) == "已有更高优先级事件"
+        for decision in rejected
+    )
 
 
 def test_alive_threshold_config_changes_same_real_batch(
@@ -355,7 +365,10 @@ def test_high_priority_event_is_dropped_inside_minimum_gap(
 
     assert three_kill.selected is False
     assert three_kill.reason_code == "minimum_gap"
-    assert three_kill.reason == "距上次发言 1.000 秒，最小间隔 2 秒未过"
+    assert (
+        format_decision_reason(three_kill)
+        == "距上次发言 1.000 秒，最小间隔 2 秒未过"
+    )
 
 
 def test_round_limit_still_blocks_high_priority_cooldown_override(

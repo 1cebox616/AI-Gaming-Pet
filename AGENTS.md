@@ -1,441 +1,295 @@
 # AGENTS.md
-最后更新：M2-T7 验收通过（M2-T8 待做）
+最后更新：M2 里程碑审计完成（M2-T9 加固待做）
 
 ## 项目概况
+
 目标：一个常驻 Windows 桌面的 AI 电子宠物，在用户玩 CS2 时实时观战、解说、吐槽。
 
-技术栈（M1-T1 已锁定的实际版本）：
-- 后端：Python 3.12.x（>=3.12,<3.13）+ FastAPI 0.141.1 + uvicorn 0.52.1 + pydantic 2.13.4
-  + websockets 17.0.1（本地服务，仅绑定 127.0.0.1:8737）
-- 前端：Tauri 2.11.5（Rust crate）/ 2.11.1（JS API）/ 2.11.4（CLI）
-  + TypeScript 7.0.2 + Vite 8.2.1 + Prettier 3.9.6，不使用任何 UI 框架
-- 构建环境：Node.js 24.19.0、npm 11.17.0、Rust 1.97.1（MSVC）、setuptools 80.9.0
-- 语言/视觉模型：阿里云百炼 通义千问 Qwen3-VL 系列，走 OpenAI 兼容协议（尚未接入）
-- 语音：Windows 系统自带 OneCore 语音（当前选用 Microsoft Yaoyao zh-CN），
-  经标准库 subprocess 调用 PowerShell 访问 Windows Runtime 合成 WAV，
-  标准库 winsound 播放。零模型、零第三方依赖、严禁占用 GPU。
-  音质是已知的妥协：换取体积 42.8MB、启动 0.85 秒、常驻内存 53MB、出声延迟 0.373 秒
-- 截图：Windows Graphics Capture（WGC）（尚未接入）
-- 打包：PyInstaller（后端）+ Tauri bundler（外壳）（尚未启用，bundle.active 当前为 false）
+技术栈：
+- 后端：Python 3.12.x（>=3.12,<3.13）+ FastAPI 0.141.1 + uvicorn 0.52.1
+  + pydantic 2.13.4 + websockets 17.0.1。仅绑定 127.0.0.1:8737
+- 前端：Tauri 2.11.5 + TypeScript 7.0.2 + Vite 8.2.1 + Prettier 3.9.6，不使用 UI 框架
+- 构建环境：Node.js 24.x、npm 11.x、Rust 1.97.x（MSVC）
+- 语音：Windows OneCore 系统语音（当前 Microsoft Yaoyao zh-CN），
+  经 subprocess 调用 PowerShell 访问 Windows Runtime 合成 WAV，
+  再用 ctypes 直调 WinMM waveOut 播放（可从任意线程立即中断）。
+  零模型、零第三方依赖、严禁占用 GPU
+- 语言/视觉模型：阿里云百炼 通义千问 Qwen3-VL 系列，走 OpenAI 兼容协议（M3 接入）
+- 截图：Windows Graphics Capture（尚未接入，M5）
+- 打包：PyInstaller + Tauri bundler（尚未启用，bundle.active = false）
 
-目录结构：（后续任务按需新增，禁止预先创建空模块或占位文件）
-- /backend —— Python 后端工程
+目录结构：
 - /backend/src/pet —— 后端源码包
-    main.py 组装应用与端点 / bridge.py WebSocket 通道与定时广播 /
-    lines.py 待机话术与 Utterance / speech.py 系统语音 / config.py 配置读取 /
-    gsi.py CS2 数据接收与 GameSnapshot / network.py 共享端口常量 /
-    session.py 会话状态与主体识别 / events.py 事件检测与录制回放 /
-    policy.py 发言策略（优先级、场合门槛、冷却、回合上限）
-- /docs —— 项目文档，由架构师与产品负责人维护，coding agent 不得修改内容：
-    gsi-capabilities.md          CS2 数据接口能给什么、不能给什么
-    中文CS社群常见梗和语录.md    产品负责人整理的社群黑话与梗，
-                                 既是 M2 语料的改写依据，也是 M3 提示词的样例池
-- /backend/config.toml —— 默认配置（随代码提交）
-- /backend/config.local.toml —— 可选的本地覆盖（已被 git 忽略，不存在也能运行）
-- /backend/tests —— 后端测试
-- /frontend —— Vite + TypeScript 前端
-- /frontend/src-tauri —— Tauri 桌面外壳（Rust）
-- /frontend/src-tauri/capabilities —— Tauri v2 权限声明（权限默认全关，需逐项授予）
+    main.py                  组装应用、端点、生命周期
+    network.py               共享端口常量
+    config.py                配置读取与分段校验
+    gsi.py                   CS2 数据接收、GameSnapshot 解析、录制、写入 CS2 配置
+    session.py               会话状态与数据主体识别
+    events.py                事件检测；另含录制回放工具与 CLI（待拆分）
+    policy.py                发言策略：优先级、场合、冷却、每回合上限
+    commentary.py            事件到话术的映射、填空、去重、地图过滤
+    commentary_templates.py  语料数据
+    lines.py                 待机话术与 Utterance
+    speech.py                系统语音合成与播放
+    bridge.py                WebSocket 通道、定时广播、运行时开关
+- /backend/tests             后端测试与 fixtures
+- /backend/config.toml       默认配置（随代码提交）
+- /backend/config.local.toml 可选本地覆盖（已忽略）
+- /backend/recordings/       GSI 原始录制（已忽略）
+- /frontend                  Vite + TypeScript 前端
+- /frontend/src-tauri        Tauri 桌面外壳（Rust）
+- /frontend/src-tauri/capabilities  Tauri v2 权限声明（默认全关，需逐项授予）
+- /docs                      项目文档，由架构师与产品负责人维护，
+                             coding agent 不得修改内容：
+    gsi-capabilities.md               CS2 数据接口能给什么、不能给什么
+    中文CS社群常见梗和语录.md          社群黑话与梗，语料改写依据 + M3 提示词样例池
 
 常用命令（Windows PowerShell）：
 - 后端安装：cd backend && python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
 - 后端运行：.venv\Scripts\python -m pet.main
 - 后端测试：.venv\Scripts\python -m pytest
+- 录制回放：.venv\Scripts\python -m pet.events --replay <文件> [--with-policy]
+- 安装 CS2 接入文件：.venv\Scripts\python -m pet.gsi --install
 - 前端安装：cd frontend && npm.cmd install
 - 前端开发运行：npm.cmd run tauri dev（需先启动后端）
-- 前端类型检查与构建：npm.cmd run build
-- 前端格式化：npm.cmd run format
-- 前端格式检查：npm.cmd run format:check
+- 前端构建与格式检查：npm.cmd run build / npm.cmd run format:check
 
-核心契约（全项目共享，改动前必须先与架构师确认）：
+约定：
+- Windows PowerShell 中前端命令一律使用 npm.cmd。python 必须可从 PowerShell 直接调用，
+  否则用 py -3.12 或完整路径
+- 后端与前端目前由人手动分别启动，M4 之前不做自动拉起
 
-Utterance 数据模型（backend/src/pet/lines.py）：
-    id: str
-    text: str
-    emotion: Literal["neutral","happy","angry","surprised","speechless"]
+## 核心契约
 
-WebSocket 通道 ws://127.0.0.1:8737/ws
-  后端 → 前端：{"type":"utterance","id":"...","text":"...","emotion":"..."}
-  前端 → 后端：{"type":"request_idle_line"}
-  连接建立时后端主动推送一条 utterance 作为问候。
-  无法识别的消息类型与非法 JSON：记录日志并忽略，不断开连接。
+改动前必须先与架构师确认。以下定义与代码实现必须逐字段一致。
 
-约定一：Windows PowerShell 中前端命令一律使用 npm.cmd。直接使用 npm 会被
-PowerShell 的脚本执行策略拦截。不要通过修改系统执行策略来绕开这一点。
-约定二：后端与前端目前由人手动分别启动，不存在自动拉起后端的逻辑。
+GameSnapshot（gsi.py）—— CS2 某一瞬间的状态，全部字段可为 None：
+    ts, player_steamid, provider_steamid, activity,
+    map_mode, map_name, map_phase, round_number, round_phase, round_win_team,
+    round_wins（每回合获胜方式历史）, bomb,
+    team, health, armor, helmet, flashed, smoked, burning,
+    money, equip_value, round_kills, round_killhs,
+    match_kills, match_assists, match_deaths, match_mvps, match_score,
+    score_ct, score_t, ct_consecutive_round_losses, t_consecutive_round_losses,
+    active_weapon
 
-## 当前状态
-当前里程碑：M2 —— 宠物看得懂 CS2 了（还没接大模型）
-
-首发游戏模式：**CS2 休闲模式**。选它是因为它有完整的回合结构
-（回合开始、买枪、死亡观战、回合胜负），六类事件都能覆盖；
-死斗没有回合，覆盖不全。节奏也更慢，发言压力小。
-
-我如何亲眼验证（M2 完成时）：打开 CS2 休闲模式打一局 →
-宠物自动进入观战状态并报出模式 →
-击杀、爆头、连杀、死亡、白给、回合胜负发生时它用模板句反应 →
-交火中不啰嗦，死亡后和回合间隙才多说
-
-M1 收尾任务（在 M2-T1 之前完成）：
-- M1-T10 契约与安全加固（已完成）：Utterance 非空约束、配置禁止未知字段、
-  WebSocket Origin 白名单、关键测试脱离生产函数、删除死代码、Rust 单元测试
-- M1-T11 正式构建下的资源占用测量（已完成，结论见下）
-- M1-T12 降低呼吸动画的合成开销（已完成）
-
-M1-T11 实测结论（release 构建，16 逻辑核，空闲 60 秒，前端进程树）：
-- 原样：37.81% 单核 / 541.6 MiB 工作集 / 351.0 MiB 私有内存 / 7 进程
-- 关闭呼吸动画：1.98% 单核 / 406.3 MiB
-- 关闭 20 毫秒光标轮询：30.25% 单核
-- 两项均关闭：0.21% 单核 / 408.3 MiB
-- 归因：呼吸动画约占 30–36% 单核（WebView2 GPU 进程 28.9%→0.05%，
-  渲染进程 7.19%→0.05%）；光标轮询约占 1.6–1.8% 单核
-
-M1-T12 优化后实测：
-- 前端原样：4.19% 单核（较优化前下降 88.9%）
-- WebView2 GPU 进程 1.69%，渲染进程 0.55%
-- 窗口隐藏时：1.12% 单核（优化前隐藏反而是 51.95%，属于此前未被发现的问题）
-- 手段：呼吸动画从 SVG 内部分组移到包裹用的 HTML 元素，
-  并改为每 125 毫秒（8Hz）由脚本更新一次变换，缓动曲线与原 CSS ease-in-out 等价
-- 注意：单纯做合成层提升反而更差（53.59% 单核），真正起作用的是降低更新频率
-- 后端可忽略：0.05% 单核 / 51 MiB
-- 正式构建可执行文件 8.42 MiB，release 编译约 85 秒
-- 未测：游戏全屏运行时的表现，需产品负责人补测
-
-核心契约补充（M2-T2 起）：
-
-GameState（backend/src/pet/session.py），随 state 消息下发：
+GameState（session.py）—— 随 state 消息下发：
     state: offline / menu / warmup / playing / spectating / round_over / match_over
     mode, map, round, score_ct, score_t
     subject_steamid   当前这份数据描述的是谁
     subject_is_self   该主体是否为本机玩家
 
-WebSocket state 消息扩展为：
-    {"type":"state","speech_enabled":bool,"muted":bool,
-     "game":{"state":...,"mode":...,"map":...,"round":...,
-             "score_ct":...,"score_t":...,
-             "subject_steamid":...,"subject_is_self":...}}
-game 字段任何时候都必须存在，无法获知的子字段为 null。
-
-GameEvent（backend/src/pet/events.py），事件检测的输出：
-    id: str
+GameEvent（events.py）—— 事件检测的输出：
+    id, ts, subject_steamid, subject_is_self, round_number, facts
     type: kill / kill_headshot / multi_kill /
-          death / death_thrown_away / round_win / round_loss
-    ts: float
-    subject_steamid: str | None    这个事件属于谁
-    subject_is_self: bool          是否属于本机玩家
-    round_number: int | None       人类可读回合号
-    facts: dict                    结构化事实，供生成话术
+          death / death_after_kill / death_thrown_away /
+          round_win / round_loss
 
-原则：events.py 只做事实判断，不含任何优先级、权重或"值不值得说"的信息。
-"该不该说"完全由发言策略（M2-T4）决定。调整宠物的话痨程度时不得改动事件检测。
+Utterance（lines.py）：
+    id: str（非空）, text: str（非空）,
+    emotion: neutral / happy / angry / surprised / speechless
+
+WebSocket ws://127.0.0.1:8737/ws：
+    后端 → 前端：
+      {"type":"utterance","id":...,"text":...,"emotion":...}
+      {"type":"state","speech_enabled":bool,"muted":bool,
+       "game":{"state":...,"mode":...,"map":...,"round":...,
+               "score_ct":...,"score_t":...,
+               "subject_steamid":...,"subject_is_self":...}}
+    前端 → 后端：
+      {"type":"request_idle_line"}
+      {"type":"set_speech_enabled","value":bool}
+      {"type":"set_muted","value":bool}
+    规则：连接建立时先发 state 再发问候；开关变化后向所有连接广播 state；
+    game 字段任何时候都必须存在，无法获知的子字段为 null；
+    无法识别的消息类型与非法 JSON 只记 WARNING，不断开连接；
+    Origin 存在但不在白名单则拒绝，Origin 缺失则允许
+
+HTTP POST /gsi —— 接收 CS2 推送。无鉴权（仅绑定本机）。
+    任何非法输入都必须返回成功，绝不能让游戏端收到错误或超时。
 
 配置文件段落（backend/config.toml）：
-    [speech] enabled, voice_name
-    [idle]   enabled, min_interval_seconds, max_interval_seconds
-    [gsi]    record
-    [events] thrown_away_max_survival_seconds, thrown_away_min_equip_value
-    [policy] cooldown_seconds, max_lines_per_round, alive_priority_threshold
+    [speech]      enabled, voice_name
+    [idle]        enabled, min_interval_seconds, max_interval_seconds
+    [gsi]         record
+    [events]      thrown_away_max_survival_seconds, thrown_away_min_equip_value,
+                  death_after_kill_max_seconds
+    [policy]      cooldown_seconds, max_lines_per_round, alive_priority_threshold,
+                  cooldown_override_priority, minimum_gap_seconds
+    [personality] style（brother / caster）
 
-发言策略（backend/src/pet/policy.py）：
-- 优先级由本模块独占定义，events.py 中不得出现任何优先级信息
-  5杀100 / 4杀90 / 3杀80 / 回合胜负70 / 白给60 / 2杀50 / 死亡45 / 爆头30 / 击杀20
-- 过滤顺序：非本人事件 → 闭嘴开关 → 交火期门槛 → 每回合上限 → 冷却
-- 同一批只选优先级最高的一个，其余全部丢弃，不排队不补说
-- 【易错点】"本人是否存活"必须依据最近一次本人快照的血量，
-  不能用会话状态判断。玩家死亡那一帧会话状态仍为 playing，
-  用状态判断会让死亡事件被交火门槛挡掉、宠物永远不提你死了。
-  调用顺序上，观察血量必须早于做决定
+回合号规则（必须只有一处实现，两处曾分叉过）：
+    round_phase 为 "over"，或 round_win_team 有值 → 该快照描述刚结束的回合，
+                                                    回合号 = map.round
+    其余阶段 → 描述进行中的回合，回合号 = map.round + 1
 
-M2 任务序列：
-- M2-T1 GSI 接入、快照解析、配置文件自动安装、原始数据录制、README 重写（已完成）
-- M2-T2 会话状态识别、主体识别、菜单顶部状态显示（已完成）
-- M2-T3 事件检测器与录制回放工具（已完成，含 M2-T3-FIX）
-- M2-T4 发言策略与决策回放（已完成）
-- M2-T5 模板话术接通全链路、待机播报在局内暂停（代码已完成，话术待重写）
-- M2-T6 发言频率调整 + 性格系统与两套语料重写（已完成，产品负责人已手改部分语料）
-- M2-T7 地图过滤机制、杀完被补的正反馈、局势 facts、语料检查收紧（已完成）
-- M2-T8 按梗文档全面改写语料（待做，纯内容任务）
-- M2-T9 会话状态变化事件（开关游戏、进热身、开局）与相应话术（待做）
-- M2-T2 会话状态识别（未开游戏 / 大厅 / 局内 / 观战 + 模式名）
-- M2-T3 六类事件检测器（基于 T1 录制的真实对局数据做测试）
-- M2-T4 发言策略（冷却、每回合上限、交火中少说、死亡后多说）
-- M2-T5 模板话术库接通全链路，并重写待机话术
+分层职责（M2-T9 将收敛到位）：
+    gsi         只接收与解析，不判断"发生了什么"
+    session     只判会话状态与主体，不做事件检测
+    events      只做事实判断，不含任何优先级或"值不值得说"的信息
+    policy      只做"该不该说"，不生成宠物话术
+    commentary  只做"说什么"，不改变策略结论
+    commentary_templates  只有数据，没有逻辑
 
-M2-T1 的 GSI 实测事实（休闲模式，119 条真实样本，后续任务据此设计）：
-- 推送频率：状态有变化时中位间隔 0.314 秒（约 3 Hz），静置时约 30 秒一次心跳
-- 【关键】死亡观战队友时，player 段整体切换为被观战者的数据
-  （steamid、health、round_kills、active_weapon 全部跟随队友）。
-  因此任何涉及 player 字段的判断，都必须先比对 player_steamid 与 provider_steamid。
-  observer_slot 字段可作为二重保险。
-- round_totaldmg 在全部 119 条样本中始终为 None。
-  尚未确认是"永不提供"还是"仅在伤害为 0 时省略"，M2-T2 需从已录数据中查证。
-  这影响"白给"事件的判据设计。
-- round_win_team 在回合结束后持续可见约 6.7 秒，足够检测
-- 热身阶段：map_phase = "warmup"，round_phase = None
-- 主菜单：map 段整体缺失
-- GSI 还提供 previously / added 增量段（游戏自己给出变化前值），
-  可作为自行比对快照的交叉验证手段；主判据仍用自行比对，以便应对后端重启与丢包
+## 当前状态
 
-M2-T2 补充查证（均以原始 JSONL 中字符串出现次数为准，绕过解析器）：
-- round_totaldmg：出现 0 次，CS2 休闲模式确定不提供。
-  「白给」判据改为：死亡 + 本回合零击杀 + 存活时间短 + 装备价值高，存活时间自行计时
-- map_round_wins：有效且有用，可得每回合获胜方式
-  （已实测 t_win_elimination / ct_win_defuse / t_win_bomb）
-- phase_countdowns：85 条样本出现 0 次，已从配置移除，回合内计时必须自行实现
-- bomb 数据组：出现 0 次，已移除；炸弹状态来自 round.bomb
-- allplayers_*：死亡观战期间同样出现 0 次，已移除。
-  因此只能评论"当前正在观看的那一名队友"，无法评论全队
-- 【易错点】map.round 的含义随回合阶段变化，规则如下（events.py 中已收敛为单一实现）：
-    round_phase 为 "over"，或 round_win_team 有值 → map.round 就是刚结束的回合号
-    其余阶段 → 当前回合号 = map.round + 1
-  两者混用会让回合胜负事件的回合号整体大一，M2-T3 曾踩过这个坑
-
-M2-T5 实测反馈（产品负责人实际打过休闲局后给出，优先级高于此前的先验判断）：
-
-1. 取消交火期禁言。原设计在玩家存活且回合进行中时把发言门槛设为 75，
-   理由是 CS2 里脚步声就是命。实测结论是：及时的情绪反馈本身就是这个宠物的卖点，
-   嫌吵可以用现成的静音开关。因此 alive_priority_threshold 默认改为 0。
-   配置项保留，需要时可调回。
-   连带后果：门槛取消后，"贪心策略"问题变为真实问题
-   （较早的低优先级事件占用名额，让 0.2 秒后的高优先级事件被冷却挡掉），
-   必须同时实现"高优先级可打断冷却"。
-
-2. 局内发言频率提高约 20%，待机播报降低到 3 到 5 分钟一次。
-   注意：取消门槛本身带来的增幅远超 20%，两者叠加后实际增幅可能达数倍，
-   需实测后再调。
-
-3. 【GSI 硬限制】回合胜负事件无法得知具体是谁拆的包、谁引爆的。
-   GSI 只提供"哪一方以何种方式获胜"。
-   因此回合胜负类话术必须使用集体口吻（咱们、这波、我们这边），
-   绝不能使用暗示是玩家本人所为的措辞。
-   个人事件（击杀、死亡、白给、多杀）则确定属于本人，应明确使用第二人称。
-
-M2-T7 落地结论：
-- 语料条目支持可选的 applicable_maps 标注，大小写不敏感；不标注即通用；
-  当前地图未知时只用通用条目
-- 生产语料中已清除全部地图名与点位称呼（共改写 20 条）
-- 新事件 death_after_kill：本回合有击杀 且 距最近击杀不超过
-  events.death_after_kill_max_seconds（默认 8 秒）。
-  判定顺序为 death_after_kill → death_thrown_away → death，三者互斥。
-  理由：本回合杀过人就不算白给
-- 优先级 death_after_kill = 50（高于普通死亡 45，低于白给 60）
-- consecutive_round_losses 在真实 payload 中确实存在（新固件中出现 10 次），
-  不是第二个 round_totaldmg
-- 比分态势阈值 LARGE_SCORE_GAP = 4，差 4 分及以上为大比分领先/落后
-
-M2-T6 实测反馈（第二轮，同样优先于先验判断）：
-
-1. 【已发现的 bug】语料中出现了与当前地图无关的点位引用
-   （例如实际打的不是 Dust2，宠物却说"在 Dust2 大坑"）。
-   处理方式分两层：
-   - 地图名：GSI 提供 map_name，可按地图过滤。语料条目支持可选的"适用地图"标注，
-     不填即为通用
-   - 点位称呼（A1、超市、大坑、B洞等）：GSI 不提供玩家位置，一律禁止出现在语料中
-
-2. 【规则修正】此前要求"个人事件每条话术必须包含'你'"是错的。
-   中文口语大量省略主语，强制加"你"会逼出别扭的句子。
-   产品负责人手改语料时几乎删光了"你"，改后明显更自然
-   （例："你双杀了！" → "来一个杀一个，来两个杀一双"）。
-   真正需要的是否定约束：回合胜负类不得暗示是玩家本人所为。
-   个人事件不再强制人称。
-
-3. 【语料检查原则】审美规则不应由测试管，只保留事实规则。保留三条：
-   - 回合胜负类不得出现暗示玩家本人执行的措辞（GSI 不给执行者）
-   - 不得出现未经谐音替代的脏字（未来要分享给他人）
-   - 不得出现地图名或点位称呼，除非该条目明确标注了适用地图
-   其余长度、条数、选手名、句式等检查全部删除，交由产品负责人手改把关。
-
-4. 新增判断维度（见 docs/gsi-capabilities.md 的 C-2 节）：
-   - 可做：比分态势、队伍连败轮数、自身经济、本回合击杀数
-   - 【做不到】场上存活人数与残局（1vN）。allplayers_* 仅观察者可用，
-     无可靠替代。存在不精确近似但误报代价高于收益，不采用
-
-5. 新事件：击杀后短时间内被补枪。在 CS 中杀人后暴露位置被反杀是常见情况，
-   不应给负反馈。判据：死亡 + 本回合击杀数 ≥ 1 + 最后一次击杀距死亡时间很短。
-
-M2-T5 遗留：话术风格不合格
-产品负责人评价现有模板"人机感强"。诊断出六个具体问题：
-每句都带教学建议尾巴、句式过于完整整齐、完全没有 CS 圈黑话、
-过度共情（像心理咨询）、没有夸张比喻、没有专有名词。
-现有人设实际上是"教练兼心理咨询师"，而不是"陪你打游戏的朋友"。
-
-重要认知：大模型的默认输出风格与现有模板是同一个味道。
-要得到有人味的话术，必须在提示词里提供大量对味样例。
-因此现在把模板写对味不是白做，而是 M3 的必需品——
-这批话术将直接成为大模型的风格样例池。
-M3 真正独有的价值是：不重复、结合上下文、以及处理有时效性的梗
-（模板阶段应避开强时效性的梗）。
-
-M2-T6 计划：把话术表按性格分组，落地阶段 2 就承诺过的两个性格模板
-（兄弟型 / 解说型），配置项切换。到 M3 时性格即为
-不同的提示词与样例池，架构不需要改动。
-
-关于"建议"的三档划分（产品负责人修正了此前一刀切的禁止）：
-- 永远禁止：没有信息量的空洞建议（稳住、别急、注意心态、深呼吸）
-- M2 不做：具体战术建议。模板给不出足够密度的内容，
-  且错误的战术建议比没有建议更糟
-- 后续里程碑：按 地图 × 阵营 × 回合阶段 组织的道具与站位建议，
-  只在开局与买枪等非交火时机给出。
-  参考产品负责人给的质量标准：
-  「Nuke 进攻方想快速抢 B 通，可以第一时间架 trophy 影子位」
-  「Anubis 匪家丢中门烟 + 双键跳台火 combo，可快速清跳台」
-  【风险提示】这件事未必能靠大模型自动解决。通用模型的 CS2 战术知识
-  很可能浅且过时，达不到上述精度。真要做很可能需要人工编写战术库，
-  大模型只负责用性格把它说出来。立项前需单独评估。
-
-M2 新增风险：
-- R7 找不到 CS2 配置目录（Steam 库可能在其他盘、可能有多个库）
-- R8 已解除：GSI 在休闲模式下的字段表现已实测，见上
-- R9 每次朗读新建 PowerShell 进程的技术债，很可能在 M2-T5 触发
+当前里程碑：M2 已完成全部任务，里程碑审计已完成，等待 M2-T9 加固后结案。
 
 已实现：
-- 前后端工程骨架与工具链，前端窗口能显示后端返回的健康状态（M1-T1）
-- 透明无边框置顶悬浮窗：可拖动、Ctrl+Alt+P 全局显隐、系统托盘显隐与退出、
-  不占任务栏、按显示器缩放正确定位于主显示器右下角（M1-T2）
-- 代码绘制的宠物形象：五种表情、呼吸动效、托盘手动换表情、
-  后端离线时自动变淡并放慢呼吸（M1-T3）
-- 文字气泡：打字机逐字显示、自动换行、超长截断、停留后淡出、
-  新句立即替换旧句；前端引入 Prettier 统一格式（M1-T4）
-- 前后端常驻 WebSocket 通道：后端持有话术表并推送 Utterance，
-  前端渲染文字与表情；断线自动重连并让宠物变淡，恢复后自动复原（M1-T5）
-- 中文语音：推送 utterance 时同步朗读，新句立即打断旧句；
-  无音频设备或无中文语音时降级为无声但服务不中断；
-  后端日志已配置为输出 pet 各模块 INFO 及以上（M1-T6 / M1-T6-B）
-- 配置文件与定时播报：config.toml 默认值 + config.local.toml 可选覆盖；
-  宠物按随机区间自动开口，无客户端连接时不播报，
-  手动触发后计时重置；广播失败的连接会被剔除（M1-T7）
-- 功能菜单：六项两分隔线在 Rust 中只定义一处，托盘右键与右键宠物共用
-  同一个 Menu 实例；含运行时「语音」与「自动说话」两个勾选开关，
-  后端为权威状态，断开时两项禁用并取消勾选（M1-T8 / M1-T9）
-- 交互区域收敛与点击穿透：只有宠物实际绘制出来的图形响应鼠标；
-  交互矩形由前端采样呼吸包络后上报，Rust 每 20 毫秒轮询光标切换穿透，
-  拖动期间强制保持可交互（M1-T8-FIX / M1-T9-A）
-- 语音播放改用 ctypes 直调 WinMM waveOut，可从任意线程立即中断；
-  实测播放 1 秒后停止，1.012 秒返回（M1-T9-FIX）
+- M1：桌面宠物完整形态。透明无边框置顶悬浮窗，可拖动、Ctrl+Alt+P 显隐、
+  系统托盘与右键宠物共用六项功能菜单（含语音与自动说话两个运行时开关）；
+  代码绘制的宠物，五种表情、8Hz 呼吸动画；文字气泡（打字机、换行、截断、淡出）；
+  本地系统语音，可随时中断；前后端常驻 WebSocket；配置文件与随机间隔待机播报；
+  交互区域收敛到宠物本体，其余区域点击穿透
+- M2：宠物看得懂 CS2。接入官方 GSI 数据接口并自动安装配置文件；
+  原始数据录制与离线回放工具；会话状态与数据主体识别；
+  八类事件检测（击杀、爆头、多杀、死亡、击杀后被补、白给、回合胜负）；
+  发言策略（优先级、场合、冷却、每回合上限、高优先级可打断冷却）；
+  双性格模板话术；游戏进行中暂停待机播报；菜单顶部显示游戏状态
 
-M1 的九个任务已全部验收通过。里程碑级整体审计尚未执行。
-
-已确认可行（实测结论，后续任务据此推进）：
-- Tauri 2.11.5 支持 data-tauri-drag-region="deep"，点击子元素可拖动窗口
-- 透明置顶悬浮窗在真实 CS2 全屏之上可正常显示
-
-备选升级路径（现在不做，仅记录）：
-- 语音音质可升级为 ONNX 运行时的 Kokoro 中文模型（同模型同音色，
-  预估体积 200-400MB、内存 400-700MB）。
-  触发条件：使用中觉得系统语音难以忍受，或 M4 之后有余力。
-
-已确定的未来设计方向（现在不实现，仅记录，避免以后重复讨论）：
-- 待机话术不再使用固定列表。方案为：用不涉及内容的本地信号
-  （当前前台进程名、鼠标键盘空闲时长、当前时间、今日游戏时长、上一局战绩）
-  作为上下文，让大模型批量生成一批话术，本地随机取用，用完再生成。
-  明确排除：待机时截屏交给视觉模型。理由是隐私——待机意味着用户在处理
-  与游戏无关的事，截屏会拍到邮件、聊天、账单等内容，且本项目未来要分享给他人。
-  这与需求阶段假设 A5「只捕捉指定游戏窗口」一致。
-  实施时机：M3 接入大模型之后。
-
-已知的设计取舍（有意为之，不是缺陷）：
-- 发言策略是贪心的：优先级只在同一批事件内仲裁，跨批次先到先得。
-  该问题已在实测中出现（普通击杀抢走名额，0.2 秒后的回合胜利被冷却挡掉），
-  且取消交火门槛后会更频繁。M2-T6 实现"高优先级可打断冷却"予以解决。
-
-已接受的成本（有实测数字，不再重复讨论）：
-- 前端静态占用约 408 MiB 工作集 / 225 MiB 私有内存 / 7 个 WebView2 进程。
-  这是 WebView2 多进程模型的固定成本，微调 CSS 或 TypeScript 无法改变。
-  真要显著降低需放弃 WebView 改用原生渲染，而那会使 M6 的外观自定义与
-  Live2D 目标基本不可行。该成本在阶段 2 选择 Tauri 时即已一并接受。
-  参考量级：同类桌面应用普遍在 300–600 MB 区间。
-
-已决定不做（记录理由，避免以后重复讨论）：
-- 逐像素贴合宠物轮廓的点击遮罩。交互矩形收紧后（面积减少 65%）
-  产品负责人已认可贴合度，网格遮罩的复杂度不值得那几十像素。
-  若将来换成 Live2D 等细长形象导致方框与轮廓差距重新变大，再重新评估。
-- 开关状态持久化。两个运行时开关重启后回到 config.toml 的值，这是有意的取舍。
-
-未实现（后续里程碑，粗颗粒）：
-- M2 接入 CS2 官方数据接口，用模板句反应 6 类事件
-- M3 接入通义千问，真实吐槽 + 双性格 + 局内记忆 + 花费显示
+未实现：
+- M2-T9 里程碑加固（见技术债前五条），M2 结案的前置条件
+- M3 接入通义千问，实时生成话术替代模板，双性格，成本控制与显示
 - M4 打包分发，朋友可安装
-- M5 读屏幕击杀提示（全场首杀、被同一人连杀、掉线卡顿）
+- M5 读屏补充 GSI 拿不到的事实（谁杀了你、场上剩几人）
 - M6 外观自定义与心情系统
 - M7 跨局长期记忆
 - M8 语音对话输入
 - M9 AI 玩杀戮尖塔
 - M10 AI 玩文明 6
 
+## 关键设计决策（仍在生效，不要重新讨论）
+
+分工原则：**确定性的事实用代码算，需要品味的表达用大模型生成。**
+- 事件判定留在 events.py，不交给大模型。理由：击杀数 1→2 是可直接算出的事实；
+  交给模型会带来 1-3 秒延迟、每秒三次推送的天价成本、以及漏判与编造；
+  且已踩过的六个坑（冷启动、回合归零、跨多杀差值、热身、观战身份、结算重复）
+  都要塞进提示词，模型仍会时不时搞错
+- M3 之后仍完全保留：events.py、policy.py、facts 结构、梗文档
+- policy.py 在 M3 的价值变大：它挡掉约九成事件，等于把模型调用砍掉九成，
+  从"防吵"变成"防烧钱"
+- 视觉（M5）的角色是补充观察，不是替代事件判定。
+  且应走 OCR 裁剪区域 + 模板匹配的廉价路线，不是把整张图丢给视觉模型。
+  选型时认准 ONNX 轻量运行时，不要重蹈 M1 语音的覆辙（PyTorch 拖进 1.2GB 依赖）
+
+不做交火期禁言：原设计在玩家存活且回合进行中把门槛设为 75，理由是脚步声就是命。
+产品负责人实测后推翻：及时的情绪反馈本身就是卖点，嫌吵可以用静音开关。
+alive_priority_threshold 默认为 0，配置项保留。
+
+不做残局与存活人数判断：GSI 不提供 allplayers_*（观战期间实测同样为 0 次）。
+存在不精确近似但误报代价高于收益。
+
+不做逐像素贴合宠物轮廓的点击遮罩：交互矩形收紧后面积已减少 65%，
+产品负责人认可贴合度。
+
+不做开关状态持久化：两个运行时开关重启后回到 config.toml 的值，这是有意的取舍。
+
+语料相关：
+- 语料的最终身份是 M3 提示词中的风格样例池，不是逐条使用的输出
+- 不强制人称。中文口语大量省略主语，强制加"你"会逼出别扭句子。
+  唯一的人称约束是否定的：回合胜负类不得暗示是玩家本人执行的
+  （GSI 不提供获胜的具体执行者）
+- 审美规则不由测试管，只保留三条事实类检查：
+  回合胜负不冒认、无未替代脏字、无地图名与点位
+- 点位称呼一律禁止：GSI 不提供玩家位置，说了就是瞎猜。
+  地图名可用，但条目必须标注 applicable_maps
+- 「建议」分三档：永远禁止空洞建议（稳住、别急、注意心态）；
+  M2 不做具体战术建议；后续里程碑可做按 地图 × 阵营 × 回合阶段 的道具站位建议，
+  质量标准参考「Nuke 进攻方想快速抢 B 通，可以第一时间架 trophy 影子位」。
+  风险提示：通用大模型的 CS2 战术知识可能浅且过时，真要做很可能需要人工战术库
+
+已接受的成本：
+- 前端静态占用约 408 MiB 工作集 / 7 个 WebView2 进程。这是 WebView2 多进程模型的
+  固定成本。真要降低需放弃 WebView 改原生渲染，那会使 M6 的外观自定义与
+  Live2D 目标不可行。该成本在阶段 2 选择 Tauri 时已一并接受
+
+## 关键实测数据
+
+前端（release 构建，16 逻辑核，空闲 60 秒）：
+- 原样 4.19% 单核 / 窗口隐藏时 1.12% 单核
+- 呼吸动画从 SVG 内部分组移到外层 HTML 元素，并改为 8Hz 脚本更新，
+  较优化前下降 88.9%。注意：单纯做 will-change 合成层提升反而更差（53.59%）
+
+后端：启动最坏 0.85 秒；稳定运行 50 MiB 工作集 / 37 MiB 私有内存；
+30 分钟无泄漏；/gsi 端点中位 0.56ms、P95 0.70ms。
+
+语音：20 字中文出声延迟最坏 0.42 秒；播放中调用停止，1.01 秒内返回。
+
+GSI 实测事实（休闲模式，详见 docs/gsi-capabilities.md）：
+- 推送频率：有变化时中位 0.314 秒（约 3 Hz），静置时约 30 秒心跳
+- 死亡观战队友时 player 段整体切换为被观战者，必须比对两个 steamid
+- round_totaldmg 不提供；phase_countdowns、bomb 组、allplayers_* 均不可用
+- map_round_wins 可用，提供每回合获胜方式
+- previously / added 增量段的存在是"接收链路健康"的信号
+
 ## 约束
-禁止修改：
-- /AGENTS.md（由架构师维护，coding agent 一律不得改动）
-- .gitignore 中与密钥相关的条目
-- 任何未在当前任务规格中点名的文件
+
+禁止修改（coding agent 一律不得改动内容，但需在提交中带上）：
+- /AGENTS.md
+- /docs 下全部文件
 
 编码规范：
-- Python 全量类型注解；跨模块传递的数据必须是 dataclass 或 pydantic 模型，禁止裸 dict
-- 后端服务只绑定 127.0.0.1，禁止监听 0.0.0.0
-- 端口 8737 在前后端各自只允许有一处常量定义，禁止字面量散落
-- Tauri v2 权限默认全部关闭。前端每新增一处调用 Tauri API 的能力，
-  必须在 frontend/src-tauri/capabilities/default.json 中显式授予，
-  且只授予最小必要权限，不得整包开启
-- 涉及窗口尺寸与位置的计算一律以逻辑像素（DIP）为准，
-  按 Monitor::scale_factor() 换算成物理像素，禁止硬编码任何像素补偿常量
-- 前端代码由 Prettier 统一格式化，提交前必须通过 npm.cmd run format:check；
-  Rust 代码必须通过 cargo fmt --check
-- 前端每个视觉组件（宠物、气泡等）封装为独立模块，只暴露必要函数，
-  其他代码不得直接访问其内部 DOM
-- 密钥只从配置文件或环境变量读取，禁止出现在源码、测试或提交历史中
-- 禁止裸 except 后静默吞异常；捕获必须记录且有明确处理路径
-- 新增依赖前必须核对 AGENTS.md 技术栈一节；若实现方案偏离已记载的技术栈，
-  必须在完成报告中显式标出偏离项与理由，不得默认为无偏差
-- 每个任务完成后必须 commit 并 push 到远程仓库 main 分支
-- 提交信息以任务 ID 开头，例如：M1-T1: 建立前后端工程骨架
+- Python 全量类型注解；跨模块数据必须是 dataclass 或 pydantic 模型，禁止裸 dict
+- 后端只绑定 127.0.0.1
+- 端口 8737 在前后端各自只允许有一处常量定义
+- 密钥只从配置文件或环境变量读取，禁止出现在源码、测试或提交历史
+- 禁止裸 except 后静默吞异常
+- Tauri v2 权限默认全关，新增能力必须在 capabilities/default.json 显式授予最小权限
+- 窗口尺寸与位置一律以逻辑像素（DIP）为准，按 scale_factor 换算，
+  禁止硬编码任何像素补偿常量
+- 前端由 Prettier 统一格式化；Rust 必须通过 cargo fmt --check
+- 前端视觉组件封装为独立模块，其他代码不得直接访问其内部 DOM
+- 实现方案偏离本文件记载的技术栈或分层职责时，必须在完成报告中显式标出
+- 每个任务完成后必须 commit 并 push；提交信息以任务 ID 开头
 
-技术债：
-- 呼吸动画的更新频率为 8Hz。产品负责人已确认肉眼无感。
-  若将来引入更复杂的动画（M6 外观自定义、Live2D），需重新评估这个频率，
-  并注意：在透明置顶窗口下，will-change 合成层提升反而会显著增加开销。
-- 项目自身没有 LICENSE，pyproject.toml 也未声明 license 元数据。
-  依赖许可证已由里程碑审计全量核实，无 GPL/AGPL/非商用项。
-  偿还时机：M4 打包前确定项目许可并生成第三方许可清单。
-- 前端与 Rust 的自动化测试覆盖仍然很薄：Rust 有 3 个纯函数测试，
-  前端无任何测试。协议解析、菜单状态、气泡截断等逻辑目前只靠人工验收。
-  偿还时机：暂不处理；若 M2 出现前端逻辑回归再引入最小测试手段。
-- frontend/src/pet.ts 原本只负责宠物渲染，现在同时承担了窗口拖动的发起逻辑。
-  将来把宠物换成 Live2D 或画师素材时，容易遗漏把拖动一并迁移。
-  偿还时机：M6 更换宠物外观时，把拖动发起移出渲染模块。
-- 后端测试套件单次运行约 36 秒，主要来自定时广播测试的真实等待
-  （配置校验强制 min_interval_seconds ≥ 10）。
-  偿还时机：当测试套件超过约 60 秒时，为测试提供绕过下限的注入方式。
-- backend/src/pet/speech.py 通过 powershell.exe -ExecutionPolicy Bypass
-  -EncodedCommand 调用系统语音。该命令组合是 PowerShell 恶意脚本的典型特征，
-  杀毒软件与企业安全软件可能误报或拦截。
-  偿还时机：M4 打包前必须验证在他人机器上不被安全软件拦截，
-  必要时改用 Python 侧的 WinRT 绑定或常驻 PowerShell 进程。
-- 【M2 极可能触发】backend/src/pet/speech.py 每次朗读都新建一个 PowerShell 进程
-  用于合成（播放已改为进程内 WinMM，不再额外开进程）。
-  当前每半分钟一句无影响，但 M2 接入 CS2 后击杀、爆头、回合结束会密集触发。
-  偿还时机：M2 实测发言频率后立即评估，改为常驻 PowerShell 进程或原生绑定。
-- frontend/src/backend-bridge.ts 的 lastUtteranceId 去重逻辑并非规格要求，
-  属于为不存在的问题所写的防御代码。暂不处理，观察是否产生副作用。
-- frontend/src-tauri/src/main.rs 启动时先 show() 再定位窗口
-  （因为隐藏状态下量不到稳定的外框尺寸），理论上存在瞬时位置跳变。
-  M1-T3 与 M1-T4 两次审计以 1ms 轮询均未观察到跳位，暂不处理。
-  偿还时机：若实际使用中观察到跳位，或下次变更窗口尺寸时。
-- backend/requirements.txt 未区分运行依赖与测试依赖（pytest 等混入）。
-  偿还时机：M4 打包任务，届时需产出一份纯运行依赖清单。
-- backend/src/pet/main.py 的跨域白名单只覆盖开发模式来源
-  （http://127.0.0.1:1420、http://localhost:1420、tauri://localhost）。
-  偿还时机：M4 打包任务，必须复核并补上正式打包后的实际前端来源，
-  否则安装版会持续显示"连接失败"。
+技术债（前五条为 M2 结案与 M3 开工的前置条件）：
+1. SpeechPolicy 的冷却、回合计数、本人血量只在构造时初始化，跨对局不重置。
+   M3 中该层直接控制模型调用与费用，必须先建立明确的对局生命周期
+2. EventDetector 的 _subjects 基线在 menu / warmup / match_over 均不清空。
+   旧基线会与新局统计做差产生假事件，且字典会长期累积
+3. 回合号有两套实现且已分叉：session.py 对除 warmup 外所有状态 +1，
+   events.py 对 over 或有胜方时用原值。同一时刻 GameState.round 与
+   GameEvent.round_number 相差 1，且 session 测试断言了错误值
+4. 没有"无消费者不生成"的成本闸门：无论是否有 WebSocket 客户端，
+   都会先完成检测、策略、生成。M3 换成模型后会在无人看的情况下持续付费
+5. 分层职责尚未达到本文件的约定：events.py 含 CLI 与格式化，
+   policy.py 含中文诊断文本与无调用者的回放函数，
+   commentary.py 编排检测与策略且内嵌中文片段，templates.py 含地图匹配逻辑
+6. 根级未知配置段被静默接受且无告警。M3 会新增模型与密钥配置，拼错会造成意外费用
+7. Steam appmanifest 的 installdir 未做路径归属校验，被篡改的 manifest
+   可使程序在预期目录之外覆盖同名配置文件。偿还时机：M4 打包前
+8. 后端测试套件约 62 秒，其中约 58 秒是定时广播测试的真实等待。
+   已越过既定的 60 秒阈值，应为这些测试注入时钟
+9. GameSnapshot 中 bomb、armor、helmet、flashed、smoked、burning、
+   match_kills、match_assists、match_mvps、match_score 解析后无任何消费者；
+   money 只用于日志。偿还时机：M3 前删除或明确写出消费者
+10. 三条语料事实检查是有限黑名单，只能拦截已枚举的词，不能证明完整语义规则
+11. speech.py 用 powershell.exe -ExecutionPolicy Bypass -EncodedCommand 调用系统语音，
+    该组合是恶意脚本的典型特征，杀毒软件可能拦截。偿还时机：M4 打包前必须验证
+12. speech.py 每次朗读新建一个 PowerShell 进程用于合成。
+    M2 发言频率提高后需实测评估是否改为常驻进程
+13. requirements.txt 未区分运行依赖与测试依赖，测试链约占 13.9 MiB。偿还时机：M4
+14. main.py 的跨域白名单只覆盖开发来源，打包后的实际前端来源尚未确认。
+    偿还时机：M4 打包前必须复核，否则安装版会持续显示"连接失败"
+15. 项目自身没有 LICENSE，pyproject.toml 也未声明 license。
+    依赖许可证已全量核实，无 GPL/AGPL/非商用项。偿还时机：M4 打包前
+16. pet.ts 同时承担宠物渲染与窗口拖动的发起逻辑。偿还时机：M6 更换外观时
+17. 前端与 Rust 自动化测试覆盖很薄（Rust 仅 3 个纯函数测试，前端无测试）。
+    暂不处理，若出现前端逻辑回归再引入最小测试手段
+18. 启动时先 show() 再定位窗口，理论上存在瞬时跳位。两次审计以 1ms 轮询均未观察到
+19. backend-bridge.ts 的 lastUtteranceId 去重并非规格要求，属防御性代码。观察中
+20. README 内容已明显过期，仍称宠物不会根据游戏事件发言
 
 暂不做：
 - 读取游戏内存、注入游戏进程、任何规避反作弊的手段（永久禁止）
 - 让 AI 操控 CS2 或任何竞技网游（永久禁止，等同作弊）
 - macOS / Linux 支持
 - 账号系统、云端存储、自动更新
-- 让语音或视觉推理占用 GPU（会导致游戏掉帧）
+- 让语音或视觉推理占用 GPU
 - 预先创建空模块、空目录、占位文件
-- 自动拉起后端进程（M4 之前前后端手动分别启动）
 
 ## 工程原则
+
 1. 不留向后兼容：过时代码直接删，不加兼容层、不写 fallback。
    （例外：已有真实数据的存储结构变更须先确认，不得静默丢数据。）
 2. 选满足当前需求的最简实现。不做预防性抽象，不加没人用的配置层。

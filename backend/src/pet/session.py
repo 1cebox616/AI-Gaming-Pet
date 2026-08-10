@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from pet.gsi import GameSnapshot
+from pet.gsi import GameSnapshot, human_round_number
 
 GameSessionState = Literal[
     "offline",
@@ -66,6 +66,27 @@ class GameSessionTracker:
         return self._game
 
 
+class MatchLifecycleTracker:
+    """Identify boundaries where per-match detector and policy state must reset."""
+
+    def __init__(self) -> None:
+        self._previous_state: GameSessionState = "offline"
+
+    def observe(self, game: GameState) -> bool:
+        """Return whether this transition starts a fresh match lifecycle."""
+        previous = self._previous_state
+        current = game.state
+        self._previous_state = current
+        entered_idle_boundary = (
+            current in {"offline", "menu"} and current != previous
+        )
+        entered_warmup = current == "warmup" and previous != "warmup"
+        resumed_after_match_over = (
+            previous == "match_over"
+            and current not in {"offline", "menu", "match_over", "warmup"}
+        )
+        return entered_idle_boundary or entered_warmup or resumed_after_match_over
+
 def _interpret_snapshot(snapshot: GameSnapshot) -> GameState | None:
     has_map = any(
         value is not None
@@ -104,16 +125,11 @@ def _interpret_snapshot(snapshot: GameSnapshot) -> GameState | None:
     else:
         state = "playing"
 
-    round_number = (
-        snapshot.round_number + 1
-        if snapshot.round_number is not None and state != "warmup"
-        else None
-    )
     return GameState(
         state=state,
         mode=snapshot.map_mode,
         map=snapshot.map_name,
-        round=round_number,
+        round=human_round_number(snapshot),
         score_ct=snapshot.score_ct,
         score_t=snapshot.score_t,
         subject_steamid=subject_steamid,

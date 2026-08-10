@@ -285,6 +285,10 @@ class PetBridge:
         """Return the authoritative automatic-speech switch state."""
         return self._muted
 
+    def has_consumers(self) -> bool:
+        """Return whether at least one desktop pet can consume generated speech."""
+        return bool(self._connections)
+
     async def _broadcast_utterance(
         self,
         utterance: Utterance,

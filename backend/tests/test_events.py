@@ -7,8 +7,10 @@ from typing import Any
 import pytest
 
 from pet.config import EventsConfig, load_config
-from pet.events import EventDetector, GameEvent, format_replay, replay_recording
-from pet.gsi import GameSnapshot, parse_snapshot
+from pet.events import EventDetector, GameEvent
+from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, parse_snapshot
+from pet.replay import format_replay, replay_recording
+from pet.session import GameSessionTracker
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 T7_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_t7_samples.json"
@@ -54,7 +56,12 @@ def _detect(
     snapshots: tuple[GameSnapshot, ...], config: EventsConfig | None = None
 ) -> tuple[GameEvent, ...]:
     detector = EventDetector(config or EventsConfig())
-    return tuple(event for snapshot in snapshots for event in detector.observe(snapshot))
+    tracker = GameSessionTracker(GSI_SILENCE_SECONDS)
+    return tuple(
+        event
+        for snapshot in snapshots
+        for event in detector.observe(snapshot, tracker.observe(snapshot))
+    )
 
 
 def test_pitfall_cold_start_existing_stats_only_establishes_baseline(
@@ -62,17 +69,21 @@ def test_pitfall_cold_start_existing_stats_only_establishes_baseline(
 ) -> None:
     snapshots = _snapshots(event_samples, "cold_start_existing_stats")
     detector = EventDetector(EventsConfig())
+    tracker = GameSessionTracker(GSI_SILENCE_SECONDS)
 
     assert snapshots[0].round_kills == 3
-    assert detector.observe(snapshots[0]) == ()
+    assert detector.observe(snapshots[0], tracker.observe(snapshots[0])) == ()
 
 
 def test_pitfall_cold_start_round_result_only_establishes_baseline(
     event_samples: dict[str, Any],
 ) -> None:
     result_snapshot = _snapshots(event_samples, "round_win_dedup")[1]
+    tracker = GameSessionTracker(GSI_SILENCE_SECONDS)
 
-    assert EventDetector(EventsConfig()).observe(result_snapshot) == ()
+    assert EventDetector(EventsConfig()).observe(
+        result_snapshot, tracker.observe(result_snapshot)
+    ) == ()
 
 
 def test_pitfall_round_reset_does_not_create_negative_or_death_events(
@@ -166,6 +177,24 @@ def test_first_round_result_has_finished_round_number_and_is_deduplicated(
         "score_situation": "领先",
         "team_consecutive_round_losses": None,
     }
+
+
+def test_real_settlement_snapshot_uses_same_round_in_session_and_event(
+    event_samples: dict[str, Any],
+) -> None:
+    snapshots = _snapshots(event_samples, "round_win_dedup")
+    tracker = GameSessionTracker(GSI_SILENCE_SECONDS)
+    detector = EventDetector(EventsConfig())
+    game = None
+    events: list[GameEvent] = []
+    for snapshot in snapshots:
+        game = tracker.observe(snapshot)
+        events.extend(detector.observe(snapshot, game))
+
+    assert game is not None
+    assert game.state == "round_over"
+    assert [event.type for event in events] == ["round_win"]
+    assert game.round == events[0].round_number == 1
 
 
 def test_second_round_loss_has_finished_round_number_and_uses_self_team(

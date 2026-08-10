@@ -108,6 +108,7 @@ def load_config(
     default_data = _read_toml(default_path, required=True)
     local_data = _read_toml(local_path, required=False)
     merged_data = _merge_sections(default_data, local_data)
+    _warn_for_unknown_sections(merged_data)
     _warn_for_missing_fields(merged_data)
 
     speech = _validate_section("speech", SpeechConfig, merged_data.get("speech", {}))
@@ -139,6 +140,16 @@ def load_config(
         )
 
     return configuration
+
+
+def _warn_for_unknown_sections(configuration_data: Mapping[str, Any]) -> None:
+    """Expose misspelled root tables without discarding valid known tables."""
+    known_sections = set(PetConfig.model_fields)
+    for section_name in sorted(set(configuration_data) - known_sections):
+        logger.warning(
+            "unknown backend configuration top-level section %s; ignoring it",
+            section_name,
+        )
 
 
 def _validate_section(

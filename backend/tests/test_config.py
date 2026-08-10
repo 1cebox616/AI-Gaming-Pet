@@ -190,6 +190,31 @@ def test_unknown_field_falls_back_only_its_section_and_logs_field_name(
     assert "configuration section idle" not in caplog.text
 
 
+def test_unknown_top_level_section_warns_without_discarding_known_values(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[speech]\nenabled = false\nvoice_name = \"\"\n\n"
+        "[policy]\ncooldown_seconds = 11\nmax_lines_per_round = 7\n"
+        "alive_priority_threshold = 25\ncooldown_override_priority = 80\n"
+        "minimum_gap_seconds = 3\n\n"
+        "[unknown_top]\nvalue = 42\n",
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="pet.config")
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.speech.enabled is False
+    assert configuration.policy.cooldown_seconds == 11
+    assert configuration.policy.max_lines_per_round == 7
+    assert "unknown backend configuration top-level section unknown_top" in caplog.text
+    assert "configuration section speech" not in caplog.text
+    assert "configuration section policy" not in caplog.text
+
+
 def test_reversed_idle_interval_is_swapped(tmp_path: Path) -> None:
     """A valid but reversed interval remains usable in the intended range."""
     default_path = tmp_path / "config.toml"

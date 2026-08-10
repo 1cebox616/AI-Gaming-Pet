@@ -15,16 +15,13 @@ import pytest
 from pet.bridge import PetBridge
 from pet.commentary import (
     CommentaryGenerator,
-    GameCommentaryEngine,
     commentary_category,
-    format_commentary_replay,
-    replay_commentary,
+    templates_for_map,
 )
 from pet.commentary_templates import (
     COMMENTARY_TEMPLATES,
     CommentaryCategory,
     CommentaryTemplate,
-    templates_for_map,
 )
 from pet.config import (
     EventsConfig,
@@ -34,7 +31,7 @@ from pet.config import (
     PolicyConfig,
     SpeechConfig,
 )
-from pet.events import EventType, GameEvent
+from pet.events import EventDetector, EventType, GameEvent
 from pet.gsi import (
     GSI_SILENCE_SECONDS,
     GameSnapshot,
@@ -42,7 +39,10 @@ from pet.gsi import (
     GsiService,
     parse_snapshot,
 )
-from pet.lines import IDLE_UTTERANCES_BY_PERSONALITY
+from pet.lines import IDLE_UTTERANCES_BY_PERSONALITY, Utterance
+from pet.main import GameSnapshotProcessor
+from pet.policy import SpeechPolicy
+from pet.replay import format_commentary_replay, replay_commentary
 from pet.session import GameSessionTracker
 from pet.speech import SpeechService
 
@@ -343,22 +343,37 @@ def test_fixed_seed_makes_real_recording_replay_identical(
     assert outputs["brother"] != outputs["caster"]
 
 
-def _create_real_gsi_commentary_app() -> FastAPI:
+class _CountingCommentaryGenerator(CommentaryGenerator):
+    """Exercise the real generator while exposing how often generation ran."""
+
+    def __init__(self, rng: random.Random) -> None:
+        super().__init__(rng)
+        self.call_count = 0
+
+    def generate(
+        self, event: GameEvent, *, map_name: str | None = None
+    ) -> Utterance:
+        self.call_count += 1
+        return super().generate(event, map_name=map_name)
+
+
+def _create_real_gsi_commentary_app(
+    *, policy_config: PolicyConfig | None = None
+) -> tuple[FastAPI, _CountingCommentaryGenerator]:
     speech_service = SpeechService(SpeechConfig(enabled=False))
     bridge = PetBridge(speech_service, IdleConfig(enabled=True))
     session = GameSessionTracker(GSI_SILENCE_SECONDS)
-    engine = GameCommentaryEngine(
-        EventsConfig(),
-        PolicyConfig(),
-        CommentaryGenerator(random.Random(31)),
+    generator = _CountingCommentaryGenerator(random.Random(31))
+    processor = GameSnapshotProcessor(
+        bridge,
+        session,
+        EventDetector(EventsConfig()),
+        SpeechPolicy(policy_config or PolicyConfig()),
+        generator,
     )
 
     async def observe(snapshot: GameSnapshot) -> None:
-        game = session.observe(snapshot)
-        commentary = engine.observe(snapshot, game, muted=bridge.is_muted())
-        await bridge.update_game(game)
-        if commentary.utterance is not None:
-            await bridge.broadcast_commentary(commentary.utterance)
+        await processor.observe(snapshot)
 
     gsi_service = GsiService(GsiConfig(record=False), snapshot_listener=observe)
 
@@ -382,15 +397,16 @@ def _create_real_gsi_commentary_app() -> FastAPI:
     async def receive_gsi(request: Request) -> GsiAck:
         return await gsi_service.receive(request)
 
-    return app
+    return app, generator
 
 
 def test_real_gsi_payloads_reach_existing_websocket_utterance_chain(
     event_samples: dict[str, Any],
 ) -> None:
     samples = event_samples["ordinary_death_with_trade_kill"]["samples"]
+    app, _ = _create_real_gsi_commentary_app()
 
-    with TestClient(_create_real_gsi_commentary_app()) as client:
+    with TestClient(app) as client:
         with client.websocket_connect("/ws") as websocket:
             websocket.receive_json()
             websocket.receive_json()
@@ -414,3 +430,34 @@ def test_real_gsi_payloads_reach_existing_websocket_utterance_chain(
         "surprised",
         "speechless",
     }
+
+
+def test_no_consumer_advances_real_facts_without_generation_or_policy_quota(
+    event_samples: dict[str, Any],
+) -> None:
+    no_client_samples = event_samples["multi_kill_after_dropped_push"]["samples"]
+    connected_sample = event_samples["cold_start_existing_stats"]["samples"][0]
+    app, generator = _create_real_gsi_commentary_app(
+        policy_config=PolicyConfig(
+            cooldown_seconds=0,
+            max_lines_per_round=1,
+            alive_priority_threshold=0,
+        )
+    )
+
+    with TestClient(app) as client:
+        for sample in no_client_samples:
+            response = client.post("/gsi", json=sample["payload"])
+            assert response.status_code == 200
+        assert generator.call_count == 0
+
+        with client.websocket_connect("/ws") as websocket:
+            websocket.receive_json()
+            websocket.receive_json()
+            response = client.post("/gsi", json=connected_sample["payload"])
+            assert response.status_code == 200
+            utterance = websocket.receive_json()
+
+    assert generator.call_count == 1
+    assert utterance["type"] == "utterance"
+    assert utterance["id"].startswith("game-event-")

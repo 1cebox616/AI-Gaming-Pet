@@ -41,33 +41,32 @@ class CommentaryTemplate:
 
 T = CommentaryTemplate
 
+KILL_DETAIL_FORMAT = "本回合第 {kill_index} 杀，"
+SURVIVAL_DETAIL_FORMAT = "存活了 {seconds} 秒，"
+EQUIP_DETAIL_FORMAT = "还带着 {equip_value} 的装备，"
+SCORE_DETAIL_FORMAT = "比分来到 {score_ct}:{score_t}，"
 
-def templates_for_map(
-    templates: tuple[CommentaryTemplate, ...], map_name: str | None
-) -> tuple[CommentaryTemplate, ...]:
-    """Return generic lines plus lines explicitly scoped to the active map."""
-    normalized_current_map = _normalize_map_name(map_name)
-    return tuple(
-        template
-        for template in templates
-        if template.applicable_maps is None
-        or (
-            normalized_current_map is not None
-            and any(
-                _normalize_map_name(scoped_map) == normalized_current_map
-                for scoped_map in template.applicable_maps
-            )
-        )
-    )
+WIN_METHOD_LABELS: dict[str, str] = {
+    "elimination": "灭队",
+    "bomb": "炸弹引爆",
+    "defuse": "炸弹拆除",
+    "time": "时间耗尽",
+    "ct_win_elimination": "灭队",
+    "t_win_elimination": "灭队",
+    "ct_win_bomb": "炸弹引爆",
+    "t_win_bomb": "炸弹引爆",
+    "ct_win_defuse": "炸弹拆除",
+    "t_win_defuse": "炸弹拆除",
+    "ct_win_time": "时间耗尽",
+    "t_win_time": "时间耗尽",
+}
 
-
-def _normalize_map_name(map_name: str | None) -> str | None:
-    if not isinstance(map_name, str):
-        return None
-    normalized = map_name.strip().casefold()
-    if normalized.startswith("de_"):
-        normalized = normalized.removeprefix("de_")
-    return normalized or None
+METHOD_CATEGORY_BY_LABEL: dict[str, Literal["elimination", "bomb", "defuse", "time"]] = {
+    "灭队": "elimination",
+    "炸弹引爆": "bomb",
+    "炸弹拆除": "defuse",
+    "时间耗尽": "time",
+}
 
 COMMENTARY_TEMPLATES: dict[
     PersonalityStyle,

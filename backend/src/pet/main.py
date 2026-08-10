@@ -14,8 +14,9 @@ from pydantic import BaseModel
 import uvicorn
 
 from pet.bridge import PetBridge
-from pet.commentary import GameCommentaryEngine
+from pet.commentary import CommentaryGenerator
 from pet.config import load_config
+from pet.events import EventDetector
 from pet.gsi import (
     GSI_SILENCE_SECONDS,
     GameSnapshot,
@@ -24,7 +25,8 @@ from pet.gsi import (
     ensure_gsi_config,
 )
 from pet.network import HOST, PORT
-from pet.session import GameSessionTracker
+from pet.policy import SpeechPolicy
+from pet.session import GameSessionTracker, MatchLifecycleTracker
 from pet.speech import SpeechService
 
 PACKAGE_NAME = "pet"
@@ -69,29 +71,79 @@ pet_bridge = PetBridge(
     personality_style=configuration.personality.style,
 )
 game_session_tracker = GameSessionTracker(offline_timeout_seconds=GSI_SILENCE_SECONDS)
-game_commentary_engine = GameCommentaryEngine(
-    configuration.events,
-    configuration.policy,
-    personality_style=configuration.personality.style,
+
+
+class GameSnapshotProcessor:
+    """Orchestrate the production fact-to-delivery chain for live snapshots."""
+
+    def __init__(
+        self,
+        bridge: PetBridge,
+        session: GameSessionTracker,
+        detector: EventDetector,
+        policy: SpeechPolicy,
+        generator: CommentaryGenerator,
+    ) -> None:
+        self._bridge = bridge
+        self._session = session
+        self._lifecycle = MatchLifecycleTracker()
+        self._detector = detector
+        self._policy = policy
+        self._generator = generator
+
+    async def observe(self, snapshot: GameSnapshot) -> None:
+        """Advance facts always, then spend policy quota only for live consumers."""
+        game = self._session.observe(snapshot)
+        if self._lifecycle.observe(game):
+            self._detector.reset()
+            self._policy.reset()
+
+        self._policy.observe_snapshot(snapshot)
+        events = self._detector.observe(snapshot, game)
+        await self._bridge.update_game(game)
+        if not self._bridge.has_consumers():
+            return
+
+        policy_batch = self._policy.decide(
+            events,
+            game,
+            now=snapshot.ts,
+            muted=self._bridge.is_muted(),
+        )
+        if policy_batch.selected_event is None:
+            return
+        utterance = self._generator.generate(
+            policy_batch.selected_event,
+            map_name=snapshot.map_name,
+        )
+        await self._bridge.broadcast_commentary(utterance)
+
+    async def mark_offline(self, *, now: float) -> None:
+        """Reset per-match state when GSI silence transitions the session offline."""
+        game = self._session.current(now=now)
+        if self._lifecycle.observe(game):
+            self._detector.reset()
+            self._policy.reset()
+        await self._bridge.update_game(game)
+
+
+game_snapshot_processor = GameSnapshotProcessor(
+    pet_bridge,
+    game_session_tracker,
+    EventDetector(configuration.events),
+    SpeechPolicy(configuration.policy),
+    CommentaryGenerator(personality_style=configuration.personality.style),
 )
 
 
 async def observe_gsi_snapshot(snapshot: GameSnapshot) -> None:
     """Interpret one GSI snapshot and synchronize connected desktop clients."""
-    game = game_session_tracker.observe(snapshot)
-    commentary = game_commentary_engine.observe(
-        snapshot,
-        game,
-        muted=pet_bridge.is_muted(),
-    )
-    await pet_bridge.update_game(game)
-    if commentary.utterance is not None:
-        await pet_bridge.broadcast_commentary(commentary.utterance)
+    await game_snapshot_processor.observe(snapshot)
 
 
 async def mark_gsi_offline() -> None:
     """Publish offline after the GSI heartbeat silence window expires."""
-    await pet_bridge.update_game(game_session_tracker.current(now=time.time()))
+    await game_snapshot_processor.mark_offline(now=time.time())
 
 
 gsi_service = GsiService(

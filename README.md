@@ -1,6 +1,6 @@
 # AI Gaming Pet
 
-AI Gaming Pet 是一个常驻 Windows 11 桌面的 CS2 电子宠物。当前开发版本已经具备透明置顶窗口、代码绘制的宠物与表情、文字气泡、系统中文语音、自动待机话术，以及 CS2 官方 Game State Integration（GSI）数据接收和原始数据录制。现阶段只接收、解析和保存游戏状态，不会根据游戏事件发言；事件识别与模板反应将在后续 M2 任务中接入。
+AI Gaming Pet 是一个常驻 Windows 11 桌面的 CS2 电子宠物。当前开发版本已经具备透明置顶窗口、代码绘制的宠物与表情、文字气泡、系统中文语音、自动待机话术，并已接通 CS2 官方 Game State Integration（GSI）。它能识别主菜单、热身、对局、观战和回合结算状态，检测击杀、爆头、多杀、死亡、击杀后被补枪、白给与回合胜负，再按冷却、每回合上限和场合策略选择事件，用双性格模板话术通过既有气泡、表情与语音链路作出反应。
 
 项目仍处于开发期，前后端需要分别手动启动，尚未提供正式安装包。
 
@@ -80,6 +80,23 @@ record = true
 ```
 
 每次后端启动会在 `backend/recordings/` 新建一个带时间戳的 JSONL 文件，每行包含本地接收时间和一条原始 payload。录制文件可能包含 Steam ID 等游戏状态，请勿提交或分享未脱敏的文件。
+
+## 录制回放
+
+独立回放工具复用线上同一套事件检测、发言策略与模板生成实现。只查看事实事件时间线：
+
+```powershell
+cd backend
+.venv\Scripts\python -m pet.replay --replay recordings\gsi-YYYYMMDD-HHMMSS.jsonl
+```
+
+同时预览每个策略决定、丢弃原因以及最终话术与表情：
+
+```powershell
+.venv\Scripts\python -m pet.replay --replay recordings\gsi-YYYYMMDD-HHMMSS.jsonl --with-policy
+```
+
+回放使用固定随机种子，因此同一份录制与配置的输出可重复。正常运行时话术选择仍使用非固定随机源。
 
 ## 验证
 

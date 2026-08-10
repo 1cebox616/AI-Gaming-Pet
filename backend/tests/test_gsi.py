@@ -71,23 +71,12 @@ def test_complete_recorded_payload_maps_every_snapshot_group() -> None:
         "round_number": 5,
         "round_phase": "freezetime",
         "round_win_team": None,
-        "bomb": None,
         "team": "CT",
         "health": 100,
-        "armor": 100,
-        "helmet": True,
-        "flashed": 0,
-        "smoked": 0,
-        "burning": 0,
-        "money": 3400,
         "equip_value": 1600,
         "round_kills": 0,
         "round_killhs": 0,
-        "match_kills": 0,
-        "match_assists": 0,
         "match_deaths": 0,
-        "match_mvps": 0,
-        "match_score": 0,
         "score_ct": 2,
         "score_t": 3,
         "ct_consecutive_round_losses": None,
@@ -120,7 +109,7 @@ def test_recorded_payload_without_map_keeps_player_fields() -> None:
     assert snapshot.round_number is None
     assert snapshot.score_ct is None
     assert snapshot.health == 100
-    assert snapshot.match_kills == 0
+    assert snapshot.match_deaths == 0
 
 
 def test_recorded_payload_without_player_keeps_map_fields() -> None:
@@ -141,7 +130,6 @@ def test_type_errors_are_isolated_and_warn_once(caplog: pytest.LogCaptureFixture
     payload["map"]["round"] = "six"  # type: ignore[index]
     payload["map"]["team_ct"] = []  # type: ignore[index]
     payload["player"]["state"]["health"] = "full"  # type: ignore[index]
-    payload["player"]["state"]["helmet"] = 1  # type: ignore[index]
     caplog.set_level(logging.WARNING, logger="pet.gsi")
 
     first = parse_snapshot(payload, received_at=2.0)
@@ -151,7 +139,6 @@ def test_type_errors_are_isolated_and_warn_once(caplog: pytest.LogCaptureFixture
     assert first.map_mode is None
     assert first.round_number is None
     assert first.health is None
-    assert first.helmet is None
     assert first.score_ct is None
     assert caplog.text.count("map.mode has type int") == 1
     assert caplog.text.count("player.state.health has type str") == 1
@@ -184,7 +171,7 @@ def test_recorded_spectator_payload_preserves_both_identities() -> None:
     assert snapshot.player_steamid == "76561198000000999"
     assert snapshot.health == 22
     assert snapshot.round_kills == 3
-    assert snapshot.match_kills == 6
+    assert snapshot.match_deaths == 1
     assert snapshot.active_weapon == "weapon_ak47"
 
 
