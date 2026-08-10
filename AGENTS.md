@@ -1,5 +1,5 @@
 # AGENTS.md
-最后更新：M3-T1 已验收，M3-T2 下发
+最后更新：M3-T2 已验收，M3-T2.5 下发
 
 ## 项目概况
 
@@ -88,8 +88,10 @@ GameSnapshot（gsi.py）—— CS2 某一瞬间的状态，除 ts 外全部字�
       score_ct, score_t, ct_consecutive_round_losses, t_consecutive_round_losses
 
     本人状态
-      team, health, armor, helmet, money, equip_value,
-      flashed, smoked, burning（均为 0–255 强度值）,
+      team, health, armor, helmet, money, equip_value, has_defusekit,
+      flashed（实测为 0/1 开关量，不是强度值）,
+      smoked（实测确为 0–255 强度值）,
+      burning（两次录制约 330 条样本中从未非零，未经验证）,
       round_kills, round_killhs, active_weapon, weapons
 
     全场统计
@@ -104,12 +106,23 @@ WeaponSlot（gsi.py）—— player_weapons 中的一把武器：
     （state 为 active / holstered 等，用于判断哪把是手持）
 
 RoundSituation（situation.py）—— 单张快照表达不了的本回合累计量：
-    flash_count, burn_count, total_damage_taken,
-    lowest_health, health_before_death, weapon_switch_count, bought_equipment
+    flash_count, flashed_seconds_total, longest_flash_seconds,
+    smoked_seconds_total, max_smoke_intensity, burn_count,
+    total_damage_taken, lowest_health_while_alive, health_before_death,
+    primary_weapons_used, bought_equipment,
+    bomb_planted_at_ts, seconds_since_bomb_planted
 
-    规则：只在数据主体是本人时累计（subject_is_self 为真），
+    规则一：只在数据主体是本人时累计（subject_is_self 为真），
     否则死亡观战期间队友的状态会污染统计。
-    回合边界与对局边界都必须重置。
+    规则二：回合边界与对局边界都必须重置。
+    规则三：观战期间 observe() 返回的是死亡那一回合的旧数据，
+    消费者必须比对 round_number 才能使用，不得直接当作本回合状态。
+    规则四：**比分、金钱、装备价值一律不复制进本结构。**
+    组装富卡时直接从 GameSnapshot 取，避免出现两份可能分叉的比分与经济。
+    本结构只放"单张快照表达不了的东西"。
+
+    时长类字段一律用相邻快照的 ts 差计算，**不得用 payload 条数换算**：
+    GSI 是"有变化就推、最小间隔 0.1 秒、静止时 30 秒心跳"，不是固定频率。
 
 GameState（session.py）—— 随 state 消息下发：
     state: offline / menu / warmup / playing / spectating / round_over / match_over
@@ -206,17 +219,20 @@ M3 目标：宠物在 CS2 里说的每一句话都由大模型当场生成，
   发言策略（优先级、场合、冷却、每回合上限、高优先级可打断冷却）；
   双性格模板话术共 201 条；游戏进行中暂停待机播报；菜单顶部显示游戏状态；
   对局生命周期收敛（跨对局重置事实与策略、无消费者不生成、回合号单一实现）
+- M3-T2：数据层扩容。恢复十个曾因无消费者而删除的字段，新增武器列表、
+  炸弹状态、拆弹器；新增 situation.py 维护本回合累计事实；
+  新增从真实录制自动生成的数据清单 CLI（表一原始字段、表二推导事实）
 - M3-T1：离线话术评测台。业务无关的 OpenRouter 客户端（非流式、绝不重试、
   密钥只走环境变量）；用真实录制跑通「事实 → 提示词 → 模型 → Markdown 报告」；
   报告随代码提交，作为提示词变更效果的回溯记录
 
 未实现（M3 任务序列，滚动细化）：
-- M3-T2 数据层扩容（简单推导，依赖 ≤2 个数据类型）+ 自动生成的数据清单，
-  交产品负责人批准后方可进入 T2.5。已下发
-- M3-T2.5 复杂推导（依赖 3–5 个数据类型）
+- M3-T2.5 数据清单脱敏、四项推导修正、时长类事实、炸弹与带包状态、移除失效探针。已下发
 - M3-T3 富卡组装 + 评测台升级（锁定上游服务商、系统提示词外置为可编辑文件、
   单变体运行）。与 M3-T1 的已提交报告做前后对照，不再做双变体盲测
-- M3-T4 新触发时机（回合开始评论、里程碑类、危险状态类）+ policy 扩展
+- M3-T4 新增四个事件（bomb_planted / bomb_defused / round_started / low_health
+  / heavy_damage，后两者需互相去重）+ 改造后的 player_flashed（判据为被闪时长）
+  + policy 扩展。**事件与策略必须同批改，不得先落地事件再补策略**
 - M3-T5 事实闸门 + 地图战术知识接入
 - M3-T6 线上接入（异步、超时回退模板、密钥配置）+ 模型与服务商横向选型
 - M3-T7 花费显示
@@ -281,6 +297,21 @@ M3 已拍板的产品决策：
   需要回响时从中挑出真实条目塞进富卡。"什么值得记"直接复用 policy.py
   已有的优先级排序，不另起一套
 
+**强度拿不到时用时长代替。** `flashed` 实测只有 0/1，读不出"半白/全白"。
+但满白闪光持续约 3–5 秒、擦边的不到 1 秒，**时长就是强度的可靠代理**。
+因此所有"程度"类表达一律基于时长而非强度值。`smoked` 两者都有，两者都用。
+
+**未观测到的字段不得据以建功能。** `burning` 在两次录制约 330 条样本中始终为 0。
+在亲眼见到非零值之前，不做任何燃烧相关的事件或话术。
+同理，`player_smoked` 不做成事件——进烟多半是自己扔的，信息量接近零且会反复触发，
+留在 situation 当状态即可。
+
+**地图知识"生成一次存盘"还是"每局重生成"的分歧暂不解决。**
+产品负责人认为每局重生成带来的随机性是活人感的一部分；
+架构师认为地图事实不该每局重掷骰子，变化应来自运行时措辞。
+两种方案在开发阶段行为一致（都要存盘以评估提示词），
+因此推迟到 release 前、手上有真实地图话术样本时再定。
+
 阈值处理：situation.py 的判定阈值（残血、穷局、弹将尽）在 M3-T2 一律用模块常量，
 不做配置项。等 M3-T3 的富卡报告出来后，由产品负责人指出哪些需要可调再加。
 
@@ -343,7 +374,19 @@ M2 实测复核：话密度本身没有问题，问题在触发点单调（集�
 GSI 实测事实（休闲模式，详见 docs/gsi-capabilities.md）：
 - 推送频率：有变化时中位 0.314 秒（约 3 Hz），静置时约 30 秒心跳
 - 死亡观战队友时 player 段整体切换为被观战者，必须比对两个 steamid
-- round_totaldmg 不提供；phase_countdowns、allplayers_*、player_position 均不可用
+- round_totaldmg 不提供；allplayers_*、player_position 不可用
+- **phase_countdowns 与顶层 bomb 两个数据组已用探针实测确认无内容**
+  （加进配置文件后重新录制，各出现 0 次），M3-T2.5 将其从配置文件移除。
+  回合内计时必须自行实现
+- **炸弹状态可用**：`round.bomb` 实测 34 次，取值 `planted` / `defused`。
+  用 `round` 组，不要请求 `bomb` 组
+- **flashed 实测为 0/1 开关量**，两次录制约 330 条样本最大值均为 1。
+  文档曾误载为 0–255，已更正
+- **smoked 实测确为 0–255**，观测到最大值 255
+- **burning 从未观测到非零值**（约 330 条样本）
+- **weapon_c4 会稳定出现在 player_weapons 中**，因此"当前带包"可判定
+- **休闲模式默认发放拆弹器**，`defusekit` 在休闲局恒为 true、无区分度；
+  竞技模式下的区分度待确认
 - map_round_wins 可用，提供每回合获胜方式
 - **CS2 配置中已请求 player_weapons 与 player_match_stats 两组数据，
   游戏一直在推送，M3-T2 之前从未解析。恢复这些字段不需要重装配置或重新录制**
@@ -372,6 +415,12 @@ GSI 实测事实（休闲模式，详见 docs/gsi-capabilities.md）：
 - 密钥只从配置文件或环境变量读取，禁止出现在源码、测试或提交历史
 - 大模型型号 ID 与上游服务商名一律作为参数传入，禁止在源码中写死默认值。
   各家型号迭代很快（已观察到有模型公布了下架日期），写死会导致某天突然全线报错
+- **任何提交进仓库的产物（报告、清单、fixtures、日志样例）都不得包含
+  真实玩家身份**：`player.name`、`player.steamid`、`provider.steamid` 及其在
+  `previously` / `added` 下的对应项，取值一律替换为占位符。
+  仓库是公开的，同局陌生人的昵称与 SteamID 对照表不该被发布。
+  注意 `player.weapons.*.name`、`map.name`、`provider.name` 是武器名、地图名、
+  程序名，**不属于身份信息，不得误脱敏**
 - 禁止裸 except 后静默吞异常
 - 涉及网络调用的自动化测试一律不得真实联网，必须注入假客户端
 - 任何读取 player 段的逻辑必须先确认数据主体是本人（subject_is_self），
@@ -422,6 +471,9 @@ GSI 实测事实（休闲模式，详见 docs/gsi-capabilities.md）：
 - 截图作为待机话术的上下文来源（隐私原因，永久禁止）
 - 玩家位置相关的一切功能（数据层面不可得）
 - 手雷伤害归因（数据层面不可得）
+- 一切基于 burning 字段的功能（该字段至今未观测到非零值）
+- 把进烟（smoked）做成发言事件（信息量低且会反复触发）
+- 请求 phase_countdowns 与顶层 bomb 数据组（已实测确认无内容）
 
 ## 工程原则
 
