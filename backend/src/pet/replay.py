@@ -39,6 +39,21 @@ from pet.situation import (
 
 REPLAY_RANDOM_SEED = 20260809
 
+# Public inventory reports must never expose a real player's display name or
+# SteamID. Match complete paths so weapon, map, and provider program names keep
+# their diagnostic value.
+_REDACTED_RAW_PATHS: frozenset[str] = frozenset(
+    {
+        "player.name",
+        "player.steamid",
+        "provider.steamid",
+        "previously.player.name",
+        "previously.player.steamid",
+        "added.player.name",
+        "added.player.steamid",
+    }
+)
+
 _PARSED_RAW_PATHS: frozenset[str] = frozenset(
     {
         "map.mode",
@@ -400,7 +415,7 @@ def generate_data_inventory(
         stats = raw_stats[path_name]
         lines.append(
             f"| `{_escape_markdown(path_name)}` | {stats.occurrences} | "
-            f"{_escape_markdown(_summarize_raw_values(stats.values))} | "
+            f"{_escape_markdown(_summarize_raw_values(path_name, stats.values))} | "
             f"{'是' if _is_parsed_raw_path(path_name) else '否'} |"
         )
 
@@ -519,9 +534,11 @@ def _is_parsed_raw_path(path: str) -> bool:
     )
 
 
-def _summarize_raw_values(values: Sequence[object]) -> str:
+def _summarize_raw_values(path: str, values: Sequence[object]) -> str:
     if not values:
         return "—"
+    if path in _REDACTED_RAW_PATHS:
+        return "<已脱敏>"
     if all(isinstance(value, Mapping) for value in values):
         return "对象（字段见子项）"
     if all(

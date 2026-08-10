@@ -13,7 +13,10 @@ def test_inventory_counts_raw_paths_ranges_and_all_derivations(tmp_path: Path) -
         {
             "ts": 10.0,
             "payload": {
-                "provider": {"steamid": "76561198000000001"},
+                "provider": {
+                    "name": "Counter-Strike: Global Offensive",
+                    "steamid": "76561198000000001",
+                },
                 "map": {
                     "mode": "casual",
                     "name": "de_anubis",
@@ -24,6 +27,7 @@ def test_inventory_counts_raw_paths_ranges_and_all_derivations(tmp_path: Path) -
                 },
                 "round": {"phase": "live"},
                 "player": {
+                    "name": "真实玩家甲",
                     "steamid": "76561198000000001",
                     "activity": "playing",
                     "team": "CT",
@@ -60,7 +64,10 @@ def test_inventory_counts_raw_paths_ranges_and_all_derivations(tmp_path: Path) -
         {
             "ts": 11.0,
             "payload": {
-                "provider": {"steamid": "76561198000000001"},
+                "provider": {
+                    "name": "Counter-Strike: Global Offensive",
+                    "steamid": "76561198000000001",
+                },
                 "map": {
                     "mode": "casual",
                     "name": "de_anubis",
@@ -71,6 +78,7 @@ def test_inventory_counts_raw_paths_ranges_and_all_derivations(tmp_path: Path) -
                 },
                 "round": {"phase": "live", "bomb": "planted"},
                 "player": {
+                    "name": "真实玩家乙",
                     "steamid": "76561198000000001",
                     "activity": "playing",
                     "team": "CT",
@@ -96,6 +104,18 @@ def test_inventory_counts_raw_paths_ranges_and_all_derivations(tmp_path: Path) -
                         }
                     },
                 },
+                "previously": {
+                    "player": {
+                        "name": "旧玩家",
+                        "steamid": "76561198000000002",
+                    }
+                },
+                "added": {
+                    "player": {
+                        "name": "新玩家",
+                        "steamid": "76561198000000003",
+                    }
+                },
             },
         },
     )
@@ -117,6 +137,41 @@ def test_inventory_counts_raw_paths_ranges_and_all_derivations(tmp_path: Path) -
     assert "| `round.bomb` | 1 | \"planted\" | 是 |" in report
     assert "| `bomb` | 0 | — | 否 |" in report
     assert "| `phase_countdowns` | 0 | — | 否 |" in report
+    for identity_path in (
+        "player.name",
+        "player.steamid",
+        "provider.steamid",
+        "previously.player.name",
+        "previously.player.steamid",
+        "added.player.name",
+        "added.player.steamid",
+    ):
+        assert f"| `{identity_path}` |" in report
+        assert f"| `{identity_path}` | 1 | <已脱敏> |" in report or (
+            identity_path in {"player.name", "player.steamid", "provider.steamid"}
+            and f"| `{identity_path}` | 2 | <已脱敏> |" in report
+        )
+    weapon_name_row = next(
+        line for line in report.splitlines() if line.startswith("| `player.weapons.*.name` |")
+    )
+    assert '"weapon_deagle"' in weapon_name_row
+    assert '"weapon_knife"' in weapon_name_row
+    assert "<已脱敏>" not in weapon_name_row
+    assert "| `map.name` | 2 | \"de_anubis\" | 是 |" in report
+    assert (
+        '| `provider.name` | 2 | "Counter-Strike: Global Offensive" | 否 |'
+        in report
+    )
+    for private_value in (
+        "76561198000000001",
+        "76561198000000002",
+        "76561198000000003",
+        "真实玩家甲",
+        "真实玩家乙",
+        "旧玩家",
+        "新玩家",
+    ):
+        assert private_value not in report
     for fact_name in (
         "flash_count",
         "burn_count",
