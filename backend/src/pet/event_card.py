@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import re
 from typing import Any
 
 from pet.commentary_templates import WIN_METHOD_LABELS
@@ -51,10 +52,6 @@ _ZERO_SIGNAL_EVENT_FACTS = {
     "count",
     "round_kills",
 }
-# Three state changes inside four seconds reliably identify a high-signal window
-# without assigning any tactical meaning to what happened there.
-DENSE_TIMELINE_MIN_ENTRIES = 3
-DENSE_TIMELINE_MAX_SPAN_SECONDS = 4.0
 
 
 def render_event_card(
@@ -99,21 +96,26 @@ def _match_sections(
     round_number = human_round_number(snapshot)
     if round_number is not None:
         sections.append(f"【回合】第{round_number}回合")
-    if snapshot.score_ct is not None and snapshot.score_t is not None:
-        sections.append(f"【比分】CT {snapshot.score_ct} : {snapshot.score_t} T")
-    if round_situation.self_team in {"CT", "T"}:
-        sections.append(f"【我方】{round_situation.self_team}")
+    self_team = event.facts.get("self_team")
+    self_score = event.facts.get("self_score")
+    opponent_score = event.facts.get("opponent_score")
     score_situation = event.facts.get("score_situation")
-    if isinstance(score_situation, str) and score_situation:
-        sections.append(f"【局势】{score_situation}")
-    if round_situation.self_team in {"CT", "T"}:
-        losses = (
-            snapshot.ct_consecutive_round_losses
-            if round_situation.self_team == "CT"
-            else snapshot.t_consecutive_round_losses
+    if (
+        self_team in {"CT", "T"}
+        and isinstance(self_score, int)
+        and isinstance(opponent_score, int)
+    ):
+        situation_suffix = (
+            f"（{score_situation}）"
+            if isinstance(score_situation, str) and score_situation
+            else ""
         )
-        if losses is not None and losses > 0:
-            sections.append(f"【连败】{losses}轮")
+        sections.append(
+            f"【比分】我方{self_team} {self_score}:{opponent_score}{situation_suffix}"
+        )
+    losses = event.facts.get("team_consecutive_round_losses")
+    if isinstance(losses, int) and losses > 0:
+        sections.append(f"【连败】{losses}轮")
     return sections
 
 
@@ -136,9 +138,9 @@ def _player_facts(
     if armor is not None:
         facts.append(armor)
     if snapshot.money is not None:
-        facts.append(f"{snapshot.money}块")
+        facts.append(f"余额{snapshot.money}")
     if snapshot.equip_value is not None:
-        facts.append(f"装备{snapshot.equip_value}")
+        facts.append(f"装备价值{snapshot.equip_value}")
     weapon = held_weapon(snapshot)
     if weapon is not None:
         facts.append(_held_weapon_fact(weapon))
@@ -213,36 +215,8 @@ def _timeline_section(entries: tuple[TimelineEntry, ...]) -> str | None:
         if observed_live
         else "【本回合】（未观测到开打时刻，秒数从回合起点算起）"
     ]
-    index = 0
-    while index < len(entries):
-        dense_end = _dense_segment_end(entries, index)
-        if dense_end is None:
-            lines.append(_timeline_line(entries[index], indent="  "))
-            index += 1
-            continue
-        group = entries[index:dense_end]
-        lines.append(
-            "  ── 密集："
-            f"{_seconds(group[0].seconds)}s–{_seconds(group[-1].seconds)}s "
-            f"内连续 {len(group)} 件事 ──"
-        )
-        lines.extend(_timeline_line(entry, indent="    ") for entry in group)
-        index = dense_end
+    lines.extend(_timeline_line(entry, indent="  ") for entry in entries)
     return "\n".join(lines)
-
-
-def _dense_segment_end(
-    entries: tuple[TimelineEntry, ...], start: int
-) -> int | None:
-    end = start
-    while (
-        end + 1 < len(entries)
-        and entries[end + 1].seconds - entries[start].seconds
-        <= DENSE_TIMELINE_MAX_SPAN_SECONDS + 1e-9
-    ):
-        end += 1
-    count = end - start + 1
-    return end + 1 if count >= DENSE_TIMELINE_MIN_ENTRIES else None
 
 
 def _timeline_line(entry: TimelineEntry, *, indent: str) -> str:
@@ -252,38 +226,50 @@ def _timeline_line(entry: TimelineEntry, *, indent: str) -> str:
 def _timeline_entry_text(entry: TimelineEntry) -> str:
     detail = entry.detail
     if entry.kind == "bought":
-        return "买了装备"
+        return "玩家购买装备（仅检测到金额与价值变化）"
     if entry.kind == "round_live":
         return "正式开打"
     if entry.kind == "flash_start":
-        return "被闪"
+        return "玩家被闪"
     if entry.kind == "flash_end":
         if detail is not None and detail.startswith("未结束 "):
-            return "闪光" + detail
-        return "闪光结束" + (f" {detail}" if detail else "")
+            return "玩家受闪光影响" + detail
+        return "玩家闪光影响结束" + (f" {detail}" if detail else "")
     if entry.kind == "smoke_start":
-        return "进烟"
+        return "玩家进烟"
     if entry.kind == "smoke_end":
         if detail is not None and detail.startswith("未结束 "):
-            return "仍在烟中 " + detail.removeprefix("未结束 ")
-        return "出烟" + (f" {detail}" if detail else "")
+            return "玩家仍在烟中 " + detail.removeprefix("未结束 ")
+        return "玩家出烟" + (f" {detail}" if detail else "")
     if entry.kind == "kill":
-        return "击杀" + (f" {detail}" if detail else "")
+        return _timeline_kill_text(detail)
     if entry.kind == "damage":
-        return detail or "受到伤害"
+        return "玩家" + (detail or "受到伤害")
     if entry.kind == "primary_weapon":
-        return "主武器" + (f" {detail}" if detail else "")
+        return "玩家主武器" + (f" {detail}" if detail else "")
     if entry.kind in {"ammo_low", "reload", "grenade_used", "grenade_pickup"}:
-        return detail or "状态变化"
+        return "玩家" + (detail or "状态变化")
     if entry.kind == "bomb":
         return "炸弹" + (detail or "状态变化")
     if entry.kind == "bomb_pickup":
-        return "拿到包"
+        return "玩家拿到包"
     if entry.kind == "bomb_drop":
-        return "丢了包"
+        return "玩家丢了包"
     if entry.kind == "assist":
-        return "助攻"
-    return "阵亡"
+        return "玩家助攻"
+    return "玩家阵亡"
+
+
+def _timeline_kill_text(detail: str | None) -> str:
+    if not detail:
+        return "玩家完成击杀"
+    marker = re.search(r"(?:^| )(?=(?:爆头|\d+个爆头|增加\d+杀|弹匣仅剩\d+发))", detail)
+    if marker is None:
+        return f"玩家使用{detail}完成击杀"
+    weapon = detail[: marker.start()].strip()
+    attributes = detail[marker.start() :].strip()
+    action = f"玩家使用{weapon}完成击杀" if weapon else "玩家完成击杀"
+    return action + (f" {attributes}" if attributes else "")
 
 
 def _seconds(value: Any) -> str:

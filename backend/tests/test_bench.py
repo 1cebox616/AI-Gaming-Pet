@@ -9,19 +9,28 @@ from typing import Any
 import pytest
 
 from pet.bench import (
+    AnalysisBenchResult,
+    AnalysisScoreFile,
     BenchResult,
+    CaseScore,
+    FieldScore,
     calculate_length_statistics,
     check_output,
     commentary_length_statistics,
+    load_analysis_scores,
     main,
     render_latency_report,
     render_report,
+    render_scored_analysis_report,
+    render_stream_analysis_report,
     run_bench,
     run_latency_experiment,
+    run_stream_analysis,
+    write_analysis_score_template,
     write_report,
 )
 from pet.commentary_templates import COMMENTARY_TEMPLATES
-from pet.llm import LlmError, LlmResult, LlmUsage
+from pet.llm import LlmAnalysisResult, LlmError, LlmResult, LlmUsage
 from pet.prompt import load_system_prompt
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
@@ -57,6 +66,62 @@ class FakeLlmClient:
                 cost_usd=0.001 * call_number,
             ),
             latency_seconds=0.1 * call_number,
+            model=f"{model}-actual",
+            provider="test-provider",
+        )
+
+
+class FakeAnalysisClient:
+    """Deterministic streamed-analysis client used without a network."""
+
+    def __init__(
+        self,
+        *,
+        fail: bool = False,
+        event_text: str = "爆头击杀",
+        scene_text: str = "掉血后紧接着完成击杀。当前比分仍然落后。",
+    ) -> None:
+        self.fail = fail
+        self.event_text = event_text
+        self.scene_text = scene_text
+        self.calls: list[tuple[str | None, str, str, int, float, float, float]] = []
+
+    def analyze_stream(
+        self,
+        *,
+        model: str,
+        provider: str | None = None,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+        event_timeout_seconds: float,
+        full_timeout_seconds: float,
+    ) -> LlmAnalysisResult:
+        self.calls.append(
+            (
+                provider,
+                system_prompt,
+                user_prompt,
+                max_tokens,
+                temperature,
+                event_timeout_seconds,
+                full_timeout_seconds,
+            )
+        )
+        if self.fail:
+            raise LlmError(
+                "injected stream failure",
+                latency_seconds=0.25,
+                partial_event_text="回合胜利",
+                event_latency_seconds=0.15,
+            )
+        return LlmAnalysisResult(
+            event_text=self.event_text,
+            scene_text=self.scene_text,
+            usage=LlmUsage(prompt_tokens=200, completion_tokens=30, cost_usd=0.002),
+            event_latency_seconds=0.4,
+            latency_seconds=0.8,
             model=f"{model}-actual",
             provider="test-provider",
         )
@@ -98,8 +163,8 @@ def prompts_directory(tmp_path: Path) -> Path:
 def test_external_prompt_joins_reading_then_personality_and_replaces_limit() -> None:
     prompt = load_system_prompt("brother", max_chars=19)
 
-    assert prompt.startswith("你在看一份 CS2 对局的实时事实卡")
-    assert prompt.index("## 这张卡怎么读") < prompt.index("你是观战朋友打 CS2")
+    assert prompt.startswith("你会收到一份 CS2 的 GSI 事件卡")
+    assert prompt.index("## 卡片结构") < prompt.index("你是观战朋友打 CS2")
     assert "最多包含 19 个汉字" in prompt
     assert "没有提供的信息不要推断，更不要编造" in prompt
     assert "{max_chars}" not in prompt
@@ -341,3 +406,240 @@ def test_failed_call_is_recorded_without_a_second_attempt(
     assert result.events[0].attempt.result is None
     assert "injected failure" in (result.events[0].attempt.error or "")
     assert "未锁定（延迟数字不可比）" in render_report(result)
+
+
+def test_stream_analysis_uses_strict_protocol_settings_and_split_metrics(
+    real_recording: Path,
+    prompts_directory: Path,
+) -> None:
+    client = FakeAnalysisClient()
+
+    result = run_stream_analysis(
+        (real_recording,),
+        model="vendor/model-under-test",
+        provider="provider-under-test",
+        client=client,
+        max_events=20,
+        event_timeout_seconds=3.0,
+        full_timeout_seconds=6.0,
+        prompts_directory=prompts_directory,
+    )
+    report = render_stream_analysis_report(result)
+
+    assert isinstance(result, AnalysisBenchResult)
+    assert result.selected_event_count == 1
+    assert len(result.events) == 1
+    assert len(client.calls) == 1
+    provider, prompt, card, max_tokens, temperature, event_timeout, full_timeout = (
+        client.calls[0]
+    )
+    assert provider == "provider-under-test"
+    assert prompt == "共享读卡指南\n\n只复述事实，不限制字数"
+    assert card == result.events[0].event_card
+    assert max_tokens == 128
+    assert temperature == pytest.approx(0.2)
+    assert event_timeout == pytest.approx(3.0)
+    assert full_timeout == pytest.approx(6.0)
+    assert "事件：爆头击杀" in report
+    assert "场面：掉血后紧接着完成击杀" in report
+    assert "事件延迟：P50 0.400s" in report
+    assert "完整延迟：P50 0.800s" in report
+    assert "提示词 SHA-256" in report
+    assert "事件卡集合 SHA-256" in report
+    assert "否定总结 ✓" in report
+    assert "越界措辞 ✓" in report
+
+
+def test_stream_analysis_flags_known_unsupported_inference_phrases(
+    real_recording: Path,
+    prompts_directory: Path,
+) -> None:
+    result = run_stream_analysis(
+        (real_recording,),
+        model="vendor/model-under-test",
+        provider="provider-under-test",
+        client=FakeAnalysisClient(
+            event_text="灭队导致回合失败",
+            scene_text="我方连续击杀三人。玩家换回AK47后被击中。",
+        ),
+        max_events=20,
+        event_timeout_seconds=3.0,
+        full_timeout_seconds=6.0,
+        prompts_directory=prompts_directory,
+    )
+
+    checks = result.events[0].attempt.checks
+    assert checks is not None
+    assert "导致" in checks.unsupported_inference_terms
+    assert "换回" in checks.unsupported_inference_terms
+    assert "被击中" in checks.unsupported_inference_terms
+    assert any(term.startswith("我方连续击杀") for term in checks.unsupported_inference_terms)
+    assert "越界措辞 ✗" in render_stream_analysis_report(result)
+
+
+def test_stream_analysis_failure_is_recorded_once(
+    real_recording: Path,
+    prompts_directory: Path,
+) -> None:
+    client = FakeAnalysisClient(fail=True)
+
+    result = run_stream_analysis(
+        (real_recording,),
+        model="vendor/model-under-test",
+        provider="provider-under-test",
+        client=client,
+        max_events=20,
+        event_timeout_seconds=3.0,
+        full_timeout_seconds=6.0,
+        prompts_directory=prompts_directory,
+    )
+
+    assert len(client.calls) == 1
+    assert result.events[0].attempt.result is None
+    assert "injected stream failure" in (result.events[0].attempt.error or "")
+    assert result.events[0].attempt.partial_event_text == "回合胜利"
+    report = render_stream_analysis_report(result)
+    assert "已收到事件：回合胜利" in report
+    assert "按时收到事件行：1" in report
+    assert "事件延迟：P50 0.150s" in report
+
+
+def test_stream_analysis_requires_a_locked_provider(
+    real_recording: Path,
+    prompts_directory: Path,
+) -> None:
+    client = FakeAnalysisClient()
+
+    with pytest.raises(ValueError, match="requires a locked provider"):
+        run_stream_analysis(
+            (real_recording,),
+            model="vendor/model-under-test",
+            provider=None,
+            client=client,
+            max_events=20,
+            event_timeout_seconds=3.0,
+            full_timeout_seconds=6.0,
+            prompts_directory=prompts_directory,
+        )
+
+    assert client.calls == []
+
+
+def test_human_score_template_round_trips_and_reports_both_thresholds(
+    real_recording: Path,
+    prompts_directory: Path,
+    tmp_path: Path,
+) -> None:
+    result = run_stream_analysis(
+        (real_recording,),
+        model="vendor/model-under-test",
+        provider="provider-under-test",
+        client=FakeAnalysisClient(),
+        max_events=20,
+        event_timeout_seconds=3.0,
+        full_timeout_seconds=6.0,
+        prompts_directory=prompts_directory,
+    )
+    template_path = tmp_path / "scores.json"
+    write_analysis_score_template(result, template_path)
+    template = load_analysis_scores(template_path)
+    assert template.cases[0].event.errors == ("未评分",)
+
+    case_id = result.events[0].case_id
+    passing = AnalysisScoreFile(
+        cases=(
+            CaseScore(
+                case_id=case_id,
+                event=FieldScore(
+                    whole_correct=True,
+                    correct_atoms=2,
+                    total_atoms=2,
+                ),
+                scene=FieldScore(
+                    whole_correct=True,
+                    correct_atoms=4,
+                    total_atoms=4,
+                ),
+            ),
+        )
+    )
+    report = render_stream_analysis_report(result, passing)
+
+    assert "事件：整句 100.0% ✓；原子事实 100.0%（2/2） ✓" in report
+    assert "场面：整句 100.0% ✓；原子事实 100.0%（4/4） ✓" in report
+
+    with pytest.raises(ValueError, match="correct_atoms 不能超过 total_atoms"):
+        FieldScore(
+            whole_correct=False,
+            correct_atoms=2,
+            total_atoms=1,
+        )
+
+
+def test_existing_analysis_report_can_be_scored_without_rerunning_model(
+    real_recording: Path,
+    prompts_directory: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = run_stream_analysis(
+        (real_recording,),
+        model="vendor/model-under-test",
+        provider="provider-under-test",
+        client=FakeAnalysisClient(),
+        max_events=20,
+        event_timeout_seconds=3.0,
+        full_timeout_seconds=6.0,
+        prompts_directory=prompts_directory,
+    )
+    original_report = render_stream_analysis_report(result)
+    report_path = tmp_path / "analysis.md"
+    report_path.write_text(original_report, encoding="utf-8")
+    case_id = result.events[0].case_id
+    score_path = tmp_path / "scores.json"
+    score_path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {
+                        "case_id": case_id,
+                        "event": {
+                            "whole_correct": True,
+                            "correct_atoms": 2,
+                            "total_atoms": 2,
+                        },
+                        "scene": {
+                            "whole_correct": False,
+                            "correct_atoms": 3,
+                            "total_atoms": 4,
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path = tmp_path / "scored.md"
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    exit_code = main(
+        [
+            "--score-report",
+            str(report_path),
+            "--scores",
+            str(score_path),
+            "--out",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    scored = output_path.read_text(encoding="utf-8")
+    assert scored.startswith(original_report.rstrip("\n"))
+    assert "事件：整句 100.0% ✓；原子事实 100.0%（2/2） ✓" in scored
+    assert "场面：整句 0.0% ✗；原子事实 75.0%（3/4） ✗" in scored
+
+    loaded = load_analysis_scores(score_path)
+    with pytest.raises(ValueError, match="已经包含人工事实评分"):
+        render_scored_analysis_report(scored, loaded)

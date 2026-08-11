@@ -105,13 +105,30 @@ def test_pitfall_multi_kill_delta_emits_each_kill_and_crossed_threshold(
             "round_kill_index": 1,
             "delta": 2,
             "weapon": "weapon_m4a1_silencer",
+            "self_team": "CT",
+            "self_score": 2,
+            "opponent_score": 3,
+            "score_situation": "落后",
+            "team_consecutive_round_losses": None,
         },
         {
             "round_kill_index": 2,
             "delta": 2,
             "weapon": "weapon_m4a1_silencer",
+            "self_team": "CT",
+            "self_score": 2,
+            "opponent_score": 3,
+            "score_situation": "落后",
+            "team_consecutive_round_losses": None,
         },
-        {"count": 2},
+        {
+            "count": 2,
+            "self_team": "CT",
+            "self_score": 2,
+            "opponent_score": 3,
+            "score_situation": "落后",
+            "team_consecutive_round_losses": None,
+        },
     ]
     assert [event.id for event in events] == [
         "event-00000001",
@@ -145,8 +162,20 @@ def test_pitfall_spectating_keeps_teammate_baseline_and_marks_events_non_self(
         "round_kill_index": 3,
         "delta": 1,
         "weapon": "weapon_ak47",
+        "self_team": "CT",
+        "self_score": 2,
+        "opponent_score": 2,
+        "score_situation": "追平",
+        "team_consecutive_round_losses": None,
     }
-    assert events[1].facts == {"count": 3}
+    assert events[1].facts == {
+        "count": 3,
+        "self_team": "CT",
+        "self_score": 2,
+        "opponent_score": 2,
+        "score_situation": "追平",
+        "team_consecutive_round_losses": None,
+    }
     assert all(event.subject_steamid == "76561198000000901" for event in events)
     assert all(event.subject_is_self is False for event in events)
 
@@ -174,6 +203,9 @@ def test_first_round_result_has_finished_round_number_and_is_deduplicated(
         "method": "elimination",
         "score_ct": 0,
         "score_t": 1,
+        "self_team": "T",
+        "self_score": 1,
+        "opponent_score": 0,
         "score_situation": "领先",
         "team_consecutive_round_losses": None,
     }
@@ -210,6 +242,9 @@ def test_second_round_loss_has_finished_round_number_and_uses_self_team(
         "method": "bomb",
         "score_ct": 0,
         "score_t": 2,
+        "self_team": "CT",
+        "self_score": 0,
+        "opponent_score": 2,
         "score_situation": "落后",
         "team_consecutive_round_losses": None,
     }
@@ -225,6 +260,11 @@ def test_same_snapshot_trade_kill_is_classified_as_death_after_kill(
         "round_kill_index": 1,
         "delta": 1,
         "weapon": None,
+        "self_team": "T",
+        "self_score": 1,
+        "opponent_score": 0,
+        "score_situation": "领先",
+        "team_consecutive_round_losses": None,
     }
     assert events[1].facts["survival_seconds"] == pytest.approx(11.7535846)
     assert events[1].facts["round_kills"] == 1
@@ -246,6 +286,9 @@ def test_death_after_kill_uses_real_kill_interval_and_positive_classification(
         "round_kills": 3,
         "seconds_since_last_kill": pytest.approx(0.7124858),
         "equip_value": 4500,
+        "self_team": "CT",
+        "self_score": 2,
+        "opponent_score": 3,
         "score_situation": "落后",
         "team_consecutive_round_losses": 1,
     }

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+import json
 import os
 import time
 from typing import Any, Protocol
@@ -34,6 +35,19 @@ class LlmResult:
     provider: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class LlmAnalysisResult:
+    """A streamed event line followed by its longer factual scene description."""
+
+    event_text: str
+    scene_text: str
+    usage: LlmUsage
+    event_latency_seconds: float
+    latency_seconds: float
+    model: str
+    provider: str | None
+
+
 class LlmError(Exception):
     """One failed call, carrying enough context to appear in a report."""
 
@@ -43,10 +57,14 @@ class LlmError(Exception):
         *,
         status_code: int | None = None,
         latency_seconds: float | None = None,
+        partial_event_text: str | None = None,
+        event_latency_seconds: float | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.latency_seconds = latency_seconds
+        self.partial_event_text = partial_event_text
+        self.event_latency_seconds = event_latency_seconds
 
 
 class LlmClientProtocol(Protocol):
@@ -66,8 +84,27 @@ class LlmClientProtocol(Protocol):
         ...
 
 
+class LlmAnalysisClientProtocol(Protocol):
+    """The synchronous streamed-analysis boundary used by offline evaluation."""
+
+    def analyze_stream(
+        self,
+        *,
+        model: str,
+        provider: str | None = None,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+        event_timeout_seconds: float,
+        full_timeout_seconds: float,
+    ) -> LlmAnalysisResult:
+        """Return the first event line and complete scene without retrying."""
+        ...
+
+
 class OpenRouterClient:
-    """Minimal non-streaming client for OpenRouter chat completions."""
+    """Minimal client for non-streaming and streamed OpenRouter completions."""
 
     def __init__(
         self,
@@ -76,6 +113,7 @@ class OpenRouterClient:
         base_url: str = OPENROUTER_BASE_URL,
         timeout_seconds: float = 30.0,
         transport: httpx.BaseTransport | None = None,
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         if not api_key.strip():
             raise LlmError("OpenRouter API 密钥为空")
@@ -85,6 +123,7 @@ class OpenRouterClient:
             timeout=timeout_seconds,
             transport=transport,
         )
+        self._clock = clock
 
     @classmethod
     def from_env(
@@ -170,6 +209,160 @@ class OpenRouterClient:
             ) from error
         return result
 
+    def analyze_stream(
+        self,
+        *,
+        model: str,
+        provider: str | None = None,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+        event_timeout_seconds: float,
+        full_timeout_seconds: float,
+    ) -> LlmAnalysisResult:
+        """Stream one strict event/scene response and never retry failures."""
+        if event_timeout_seconds <= 0:
+            raise ValueError("event timeout must be positive")
+        if full_timeout_seconds < event_timeout_seconds:
+            raise ValueError("full timeout must be at least the event timeout")
+
+        started_at = self._clock()
+        request_body: dict[str, object] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+            "reasoning": {"effort": "none"},
+        }
+        if provider is not None:
+            request_body["provider"] = {
+                "only": [provider],
+                "allow_fallbacks": False,
+            }
+
+        text_parts: list[str] = []
+        event_latency: float | None = None
+        actual_model: str | None = None
+        actual_provider: str | None = None
+        usage = LlmUsage(None, None, None)
+        try:
+            with self._client.stream(
+                "POST",
+                "chat/completions",
+                json=request_body,
+                timeout=event_timeout_seconds,
+            ) as response:
+                if not response.is_success:
+                    response.read()
+                    raise LlmError(
+                        _response_error_message(response),
+                        status_code=response.status_code,
+                        latency_seconds=self._clock() - started_at,
+                    )
+                for line in response.iter_lines():
+                    elapsed = self._clock() - started_at
+                    if event_latency is None and elapsed > event_timeout_seconds:
+                        raise LlmError(
+                            "OpenRouter 事件行超时",
+                            latency_seconds=elapsed,
+                        )
+                    if elapsed > full_timeout_seconds:
+                        raise LlmError(
+                            "OpenRouter 场面描述超时",
+                            latency_seconds=elapsed,
+                            partial_event_text=_partial_event_text(text_parts),
+                            event_latency_seconds=event_latency,
+                        )
+                    if not line or line.startswith(":"):
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    data = line.removeprefix("data:").strip()
+                    if data == "[DONE]":
+                        break
+                    chunk = _parse_stream_chunk(data)
+                    chunk_model = chunk.get("model")
+                    if isinstance(chunk_model, str) and chunk_model.strip():
+                        actual_model = chunk_model
+                    chunk_provider = chunk.get("provider")
+                    if isinstance(chunk_provider, str) and chunk_provider.strip():
+                        actual_provider = chunk_provider
+                    usage_value = chunk.get("usage")
+                    if isinstance(usage_value, Mapping):
+                        usage = _parse_usage(usage_value)
+                    content = _stream_content(chunk)
+                    if content:
+                        text_parts.append(content)
+                        if event_latency is None and "\n" in "".join(text_parts):
+                            event_latency = elapsed
+        except LlmError as error:
+            if event_latency is None or error.event_latency_seconds is not None:
+                raise
+            raise LlmError(
+                str(error),
+                status_code=error.status_code,
+                latency_seconds=(
+                    error.latency_seconds
+                    if error.latency_seconds is not None
+                    else self._clock() - started_at
+                ),
+                partial_event_text=_partial_event_text(text_parts),
+                event_latency_seconds=event_latency,
+            ) from error
+        except httpx.TimeoutException as error:
+            latency = self._clock() - started_at
+            label = "事件行" if event_latency is None else "场面描述"
+            raise LlmError(
+                f"OpenRouter {label}超时：{error}",
+                latency_seconds=latency,
+                partial_event_text=(
+                    _partial_event_text(text_parts)
+                    if event_latency is not None
+                    else None
+                ),
+                event_latency_seconds=event_latency,
+            ) from error
+        except httpx.RequestError as error:
+            latency = self._clock() - started_at
+            raise LlmError(
+                f"OpenRouter 网络请求失败：{error}", latency_seconds=latency
+            ) from error
+
+        latency = self._clock() - started_at
+        if event_latency is None:
+            raise LlmError(
+                "OpenRouter 返回中缺少完整事件行",
+                latency_seconds=latency,
+            )
+        try:
+            event_text, scene_text = parse_analysis_text("".join(text_parts))
+        except LlmError as error:
+            raise LlmError(
+                str(error),
+                latency_seconds=latency,
+                partial_event_text=_partial_event_text(text_parts),
+                event_latency_seconds=event_latency,
+            ) from error
+        if actual_model is None:
+            raise LlmError(
+                "OpenRouter 流式响应缺少实际型号 ID",
+                latency_seconds=latency,
+            )
+        return LlmAnalysisResult(
+            event_text=event_text,
+            scene_text=scene_text,
+            usage=usage,
+            event_latency_seconds=event_latency,
+            latency_seconds=latency,
+            model=actual_model,
+            provider=actual_provider,
+        )
+
     def close(self) -> None:
         """Release the underlying connection pool."""
         self._client.close()
@@ -199,14 +392,76 @@ def _parse_result(payload: object, *, latency_seconds: float) -> LlmResult:
     usage = usage_value if isinstance(usage_value, Mapping) else {}
     return LlmResult(
         text=text.strip(),
-        usage=LlmUsage(
-            prompt_tokens=_optional_int(usage.get("prompt_tokens")),
-            completion_tokens=_optional_int(usage.get("completion_tokens")),
-            cost_usd=_optional_float(usage.get("cost")),
-        ),
+        usage=_parse_usage(usage),
         latency_seconds=latency_seconds,
         model=model,
         provider=provider,
+    )
+
+
+def parse_analysis_text(text: str) -> tuple[str, str]:
+    """Parse the exact two-line analysis protocol used by the streamed benchmark."""
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if len(lines) != 2:
+        raise LlmError("模型输出必须恰好包含事件与场面两行")
+    if not lines[0].startswith("事件：") or not lines[1].startswith("场面："):
+        raise LlmError("模型输出未遵守事件/场面前缀协议")
+    event_text = lines[0].removeprefix("事件：").strip()
+    scene_text = lines[1].removeprefix("场面：").strip()
+    if not event_text or not scene_text:
+        raise LlmError("模型输出的事件或场面为空")
+    return event_text, scene_text
+
+
+def _partial_event_text(text_parts: list[str]) -> str | None:
+    text = "".join(text_parts)
+    if "\n" not in text:
+        return None
+    first_line = text.splitlines()[0].strip()
+    if not first_line.startswith("事件："):
+        return None
+    event_text = first_line.removeprefix("事件：").strip()
+    return event_text or None
+
+
+def _parse_stream_chunk(data: str) -> Mapping[str, object]:
+    try:
+        payload: object = json.loads(data)
+    except ValueError as error:
+        raise LlmError(f"OpenRouter 返回了无效 SSE JSON：{error}") from error
+    if not isinstance(payload, Mapping):
+        raise LlmError("OpenRouter SSE 数据不是 JSON 对象")
+    error_value = payload.get("error")
+    if error_value is not None:
+        if isinstance(error_value, Mapping) and isinstance(
+            error_value.get("message"), str
+        ):
+            detail = error_value["message"]
+        else:
+            detail = str(error_value)
+        raise LlmError(f"OpenRouter 流式请求失败：{detail}")
+    return payload
+
+
+def _stream_content(chunk: Mapping[str, object]) -> str:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, Mapping):
+        return ""
+    delta = first.get("delta")
+    if not isinstance(delta, Mapping):
+        return ""
+    content = delta.get("content")
+    return content if isinstance(content, str) else ""
+
+
+def _parse_usage(usage: Mapping[str, object]) -> LlmUsage:
+    return LlmUsage(
+        prompt_tokens=_optional_int(usage.get("prompt_tokens")),
+        completion_tokens=_optional_int(usage.get("completion_tokens")),
+        cost_usd=_optional_float(usage.get("cost")),
     )
 
 

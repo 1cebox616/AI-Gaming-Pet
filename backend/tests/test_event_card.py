@@ -105,6 +105,9 @@ def _event(snapshot: GameSnapshot) -> GameEvent:
             "survival_seconds": 89.81234,
             "round_kills": 1,
             "equip_value": 4100,
+            "self_team": "CT",
+            "self_score": 2,
+            "opponent_score": 3,
             "score_situation": "落后",
             "team_consecutive_round_losses": 2,
             "score_ct": 2,
@@ -123,8 +126,6 @@ def test_top_labels_and_five_fact_areas_are_in_fixed_order_with_full_facts() -> 
         "【地图】",
         "【回合】",
         "【比分】",
-        "【我方】",
-        "【局势】",
         "【连败】",
         "【我】",
         "【本回合】",
@@ -138,21 +139,19 @@ def test_top_labels_and_five_fact_areas_are_in_fixed_order_with_full_facts() -> 
     assert "【游戏模式】休闲" in card
     assert "【地图】de_anubis" in card
     assert "【回合】第6回合" in card
-    assert "【比分】CT 2 : 3 T" in card
-    assert "【我方】CT" in card
-    assert "【局势】落后" in card
+    assert "【比分】我方CT 2:3（落后）" in card
     assert "【连败】2轮" in card
-    assert "已阵亡 倒地前12血 有甲 1750块 装备4100" in card
+    assert "已阵亡 倒地前12血 有甲 余额1750 装备价值4100" in card
     assert "手持M4A1-S 弹匣12/20 备弹40" in card
     assert "【本回合】（秒数从正式开打算起）" in card
-    assert "  -3.9s 买了装备" in card
+    assert "  -3.9s 玩家购买装备（仅检测到金额与价值变化）" in card
     assert "  0.0s 正式开打" in card
-    assert "  1.4s 被闪" in card
-    assert "  9.1s 扔了烟雾弹" in card
-    assert "  19.1s 弹匣仅剩1发 M4A1-S" in card
-    assert "  22.2s 击杀 M4A1-S 爆头 弹匣仅剩1发" in card
-    assert "  42.5s 出烟 持续8.2秒" in card
-    assert "  43.1s 拿到包" in card
+    assert "  1.4s 玩家被闪" in card
+    assert "  9.1s 玩家扔了烟雾弹" in card
+    assert "  19.1s 玩家弹匣仅剩1发 M4A1-S" in card
+    assert "  22.2s 玩家使用M4A1-S完成击杀 爆头 弹匣仅剩1发" in card
+    assert "  42.5s 玩家出烟 持续8.2秒" in card
+    assert "  43.1s 玩家拿到包" in card
     assert "12杀 4助攻 5死 MVP1次" in card
     assert "普通死亡 存活89.8秒 本回合1杀" in card
     assert "本回合第1杀" not in card
@@ -328,13 +327,12 @@ def test_spectating_keeps_match_round_timeline_and_self_team_but_not_player_data
     assert "【游戏模式】休闲" in card
     assert "【地图】de_anubis" in card
     assert "【回合】第6回合" in card
-    assert "【比分】CT 2 : 3 T" in card
-    assert "【我方】CT" in card
+    assert "【比分】我方CT 2:3（落后）" in card
     assert "【我】" not in card
     assert "【全场】" not in card
     assert "【本回合】" in card
     assert "【刚刚】" in card
-    assert "9999块" not in card
+    assert "余额9999" not in card
     assert "5血" not in card
     assert "99个击杀" not in card
     assert "99个爆头击杀" not in card
@@ -371,24 +369,24 @@ def test_all_eighteen_timeline_kinds_render_the_declared_text() -> None:
     )
 
     expected = (
-        "-2.0s 买了装备",
+        "-2.0s 玩家购买装备（仅检测到金额与价值变化）",
         "0.0s 正式开打",
-        "5.0s 被闪",
-        "10.0s 闪光结束 持续0.8秒",
-        "15.0s 进烟",
-        "20.0s 出烟 持续6.8秒",
-        "25.0s 击杀 AK47 爆头 弹匣仅剩1发",
-        "30.0s 掉了35血 剩65血",
-        "35.0s 主武器 AK47",
-        "40.0s 弹匣仅剩1发 AK47",
-        "45.0s 换弹 AK47",
-        "50.0s 扔了闪光弹",
-        "55.0s 捡到烟雾弹",
+        "5.0s 玩家被闪",
+        "10.0s 玩家闪光影响结束 持续0.8秒",
+        "15.0s 玩家进烟",
+        "20.0s 玩家出烟 持续6.8秒",
+        "25.0s 玩家使用AK47完成击杀 爆头 弹匣仅剩1发",
+        "30.0s 玩家掉了35血 剩65血",
+        "35.0s 玩家主武器 AK47",
+        "40.0s 玩家弹匣仅剩1发 AK47",
+        "45.0s 玩家换弹 AK47",
+        "50.0s 玩家扔了闪光弹",
+        "55.0s 玩家捡到烟雾弹",
         "60.0s 炸弹已安放",
-        "65.0s 拿到包",
-        "70.0s 丢了包",
-        "75.0s 助攻",
-        "80.0s 阵亡",
+        "65.0s 玩家拿到包",
+        "70.0s 玩家丢了包",
+        "75.0s 玩家助攻",
+        "80.0s 玩家阵亡",
     )
     assert all(text in card for text in expected)
 
@@ -408,8 +406,8 @@ def test_unclosed_flash_and_smoke_render_as_still_active_not_normal_end() -> Non
 
     card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
 
-    assert "57.4s 闪光未结束 已持续1.2秒" in card
-    assert "64.8s 仍在烟中 已持续6.8秒" in card
+    assert "57.4s 玩家受闪光影响未结束 已持续1.2秒" in card
+    assert "64.8s 玩家仍在烟中 已持续6.8秒" in card
     assert "57.4s 闪光结束" not in card
     assert "64.8s 出烟" not in card
 
@@ -425,19 +423,11 @@ def test_timeline_without_round_live_declares_fallback_origin() -> None:
     assert "【本回合】（未观测到开打时刻，秒数从回合起点算起）" in card
 
 
-@pytest.mark.parametrize(
-    ("seconds", "has_marker"),
-    (
-        ((1.0, 2.0, 5.0), True),
-        ((1.0, 2.0), False),
-        ((1.0, 2.0, 5.1), False),
-    ),
-)
-def test_dense_timeline_marker_requires_three_entries_within_four_seconds(
-    seconds: tuple[float, ...], has_marker: bool
-) -> None:
+def test_close_timeline_entries_remain_complete_without_a_dense_marker() -> None:
     snapshot = _real_snapshot()
-    entries = tuple(TimelineEntry(value, "assist", None) for value in seconds)
+    entries = tuple(
+        TimelineEntry(value, "assist", None) for value in (1.0, 2.0, 5.0)
+    )
 
     card = render_event_card(
         snapshot,
@@ -446,4 +436,25 @@ def test_dense_timeline_marker_requires_three_entries_within_four_seconds(
         _event(snapshot),
     )
 
-    assert ("── 密集：" in card) is has_marker
+    assert "密集" not in card
+    assert "  1.0s 玩家助攻\n  2.0s 玩家助攻\n  5.0s 玩家助攻" in card
+
+
+def test_timeline_kill_labels_the_players_weapon_without_victim_ambiguity() -> None:
+    snapshot = _real_snapshot()
+    entries = (
+        TimelineEntry(1.0, "kill", "Galil AR"),
+        TimelineEntry(2.0, "kill", "SSG 08 爆头 弹匣仅剩1发"),
+        TimelineEntry(3.0, "kill", "增加2杀"),
+    )
+
+    card = render_event_card(
+        snapshot,
+        _game(snapshot),
+        replace(_situation(), timeline=entries),
+        _event(snapshot),
+    )
+
+    assert "1.0s 玩家使用Galil AR完成击杀" in card
+    assert "2.0s 玩家使用SSG 08完成击杀 爆头 弹匣仅剩1发" in card
+    assert "3.0s 玩家完成击杀 增加2杀" in card

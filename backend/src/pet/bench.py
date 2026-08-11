@@ -6,23 +6,68 @@ import argparse
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
+import json
 import math
 from pathlib import Path
 import re
 import statistics
 import sys
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from pet.commentary import commentary_category
 from pet.commentary_rules import CALLOUT_TERMS, find_forbidden_raw_curses
 from pet.commentary_templates import COMMENTARY_TEMPLATES, CommentaryCategory
 from pet.config import PersonalityStyle, load_config
 from pet.events import EventType, GameEvent
-from pet.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
+from pet.llm import (
+    LlmAnalysisClientProtocol,
+    LlmAnalysisResult,
+    LlmClientProtocol,
+    LlmError,
+    LlmResult,
+    OpenRouterClient,
+)
 from pet.prompt import PROMPTS_DIRECTORY, PromptPersonality, load_system_prompt
 from pet.replay import load_recording, replay_commentary
 from pet.event_card import render_event_card
 
 TEMPERATURE = 0.9
+ANALYSIS_TEMPERATURE = 0.2
+ANALYSIS_MAX_COMPLETION_TOKENS = 128
+ANALYSIS_MAX_EVENT_CHARS = 19
+ANALYSIS_MIN_SCENE_SENTENCES = 2
+ANALYSIS_MAX_SCENE_SENTENCES = 4
+_NEGATIVE_SUMMARY_TERMS = (
+    "未阵亡",
+    "未拆除",
+    "未受伤",
+    "未换枪",
+    "未被闪",
+    "没有发生",
+    "没有出现",
+    "没有交火",
+    "没有特殊",
+    "没有值得",
+    "无特殊",
+    "无明显",
+)
+_UNSUPPORTED_INFERENCE_TERMS = (
+    "换回",
+    "另一枚",
+    "被击中",
+    "被击杀",
+    "导致",
+    "造成",
+    "因此",
+    "全员存活",
+)
+_SUBJECT_EXPANSION_PATTERN = re.compile(
+    r"我方(?:(?:在|先后?|连续|使用|用)[^。！？!?]{0,12})?"
+    r"(?:完成|击杀|掉血|阵亡|换枪|扔出|购买|捡到|被闪|进烟|出烟)"
+)
 MAX_COMPLETION_TOKENS_BY_PERSONALITY: dict[PromptPersonality, int] = {
     "brother": 96,
     "caster": 96,
@@ -36,6 +81,9 @@ TEMPLATE_PERSONALITY_BY_PROMPT: dict[PromptPersonality, PersonalityStyle] = {
 
 _PLACEHOLDER_PATTERN = re.compile(r"\{[^{}]+\}")
 _HAN_CHARACTER_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_ANALYSIS_REPORT_CASE_ID_PATTERN = re.compile(
+    r"^### \d+\. `([^`]+)`$", re.MULTILINE
+)
 
 _EVENT_LABELS: dict[EventType, str] = {
     "kill": "普通击杀",
@@ -139,6 +187,97 @@ class LatencyExperimentResult:
     requested_provider: str | None
     run_timestamp: datetime
     groups: tuple[BenchResult, BenchResult, BenchResult]
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisChecks:
+    """Protocol and static checks for one streamed two-field response."""
+
+    event_exceeds_max_chars: bool
+    scene_sentence_count: int
+    event_callout_terms: tuple[str, ...]
+    scene_callout_terms: tuple[str, ...]
+    event_raw_curses: tuple[str, ...]
+    scene_raw_curses: tuple[str, ...]
+    negative_summary_terms: tuple[str, ...]
+    unsupported_inference_terms: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisAttempt:
+    """One streamed call, including a protocol or transport failure."""
+
+    result: LlmAnalysisResult | None
+    error: str | None
+    checks: AnalysisChecks | None
+    partial_event_text: str | None = None
+    event_latency_seconds: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisBenchEvent:
+    """One stable real-recording case sent through streamed analysis."""
+
+    case_id: str
+    recording_path: Path
+    event: GameEvent
+    category: CommentaryCategory
+    event_card: str
+    attempt: AnalysisAttempt
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisBenchResult:
+    """A multi-recording streamed factual-analysis benchmark."""
+
+    recording_paths: tuple[Path, ...]
+    requested_model: str
+    requested_provider: str | None
+    system_prompt: str
+    run_timestamp: datetime
+    snapshot_count: int
+    detected_event_count: int
+    selected_event_count: int
+    truncated_event_count: int
+    event_timeout_seconds: float
+    full_timeout_seconds: float
+    events: tuple[AnalysisBenchEvent, ...]
+
+
+class FieldScore(BaseModel):
+    """Manual strict score for one output field."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    whole_correct: bool
+    correct_atoms: int = Field(ge=0)
+    total_atoms: int = Field(ge=1)
+    errors: tuple[str, ...] = ()
+    notes: str = ""
+
+    @model_validator(mode="after")
+    def correct_atoms_cannot_exceed_total(self) -> Self:
+        if self.correct_atoms > self.total_atoms:
+            raise ValueError("correct_atoms 不能超过 total_atoms")
+        return self
+
+
+class CaseScore(BaseModel):
+    """Manual event and scene scores keyed to a generated case ID."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str
+    event: FieldScore
+    scene: FieldScore
+
+
+class AnalysisScoreFile(BaseModel):
+    """Complete human judgment file for one immutable analysis report."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cases: tuple[CaseScore, ...]
 
 
 def calculate_length_statistics(texts: Sequence[str]) -> LengthStatistics:
@@ -333,6 +472,194 @@ def run_latency_experiment(
     )
 
 
+def run_stream_analysis(
+    recording_paths: Sequence[Path],
+    *,
+    model: str,
+    provider: str | None,
+    client: LlmAnalysisClientProtocol,
+    max_events: int,
+    event_timeout_seconds: float,
+    full_timeout_seconds: float,
+    prompts_directory: Path = PROMPTS_DIRECTORY,
+) -> AnalysisBenchResult:
+    """Replay several recordings and stream one strict two-field response per event."""
+    if not recording_paths:
+        raise ValueError("stream analysis requires at least one recording")
+    if not model.strip():
+        raise ValueError("stream analysis requires a non-empty model ID")
+    if provider is None or not provider.strip():
+        raise ValueError("stream analysis requires a locked provider")
+    if max_events < 1:
+        raise ValueError("max_events must be at least 1")
+    if event_timeout_seconds <= 0:
+        raise ValueError("event timeout must be positive")
+    if full_timeout_seconds < event_timeout_seconds:
+        raise ValueError("full timeout must be at least the event timeout")
+
+    system_prompt = load_system_prompt(
+        "inference",
+        max_chars=ANALYSIS_MAX_EVENT_CHARS,
+        prompts_directory=prompts_directory,
+    )
+    configuration = load_config()
+    events: list[AnalysisBenchEvent] = []
+    snapshot_count = 0
+    detected_event_count = 0
+    selected_event_count = 0
+
+    for recording_path in recording_paths:
+        snapshots = load_recording(recording_path)
+        replay = replay_commentary(
+            snapshots,
+            configuration.events,
+            configuration.policy,
+            personality_style="brother",
+        )
+        selected = tuple(
+            disposition
+            for disposition in replay.dispositions
+            if disposition.decision.selected
+        )
+        snapshot_count += len(snapshots)
+        detected_event_count += len(replay.dispositions)
+        selected_event_count += len(selected)
+        for selected_index, disposition in enumerate(selected, 1):
+            if len(events) >= max_events:
+                continue
+            event = disposition.decision.event
+            card = render_event_card(
+                disposition.snapshot,
+                disposition.game,
+                disposition.round_situation,
+                event,
+            )
+            case_id = (
+                f"{recording_path.stem}:{selected_index:03d}:{event.type}:"
+                f"r{event.round_number if event.round_number is not None else 'na'}"
+            )
+            events.append(
+                AnalysisBenchEvent(
+                    case_id=case_id,
+                    recording_path=recording_path,
+                    event=event,
+                    category=commentary_category(event),
+                    event_card=card,
+                    attempt=_attempt_stream_analysis(
+                        model=model,
+                        provider=provider,
+                        system_prompt=system_prompt,
+                        event_card=card,
+                        event_timeout_seconds=event_timeout_seconds,
+                        full_timeout_seconds=full_timeout_seconds,
+                        client=client,
+                    ),
+                )
+            )
+
+    return AnalysisBenchResult(
+        recording_paths=tuple(recording_paths),
+        requested_model=model,
+        requested_provider=provider,
+        system_prompt=system_prompt,
+        run_timestamp=datetime.now(timezone.utc),
+        snapshot_count=snapshot_count,
+        detected_event_count=detected_event_count,
+        selected_event_count=selected_event_count,
+        truncated_event_count=max(0, selected_event_count - len(events)),
+        event_timeout_seconds=event_timeout_seconds,
+        full_timeout_seconds=full_timeout_seconds,
+        events=tuple(events),
+    )
+
+
+def _attempt_stream_analysis(
+    *,
+    model: str,
+    provider: str | None,
+    system_prompt: str,
+    event_card: str,
+    event_timeout_seconds: float,
+    full_timeout_seconds: float,
+    client: LlmAnalysisClientProtocol,
+) -> AnalysisAttempt:
+    try:
+        result = client.analyze_stream(
+            model=model,
+            provider=provider,
+            system_prompt=system_prompt,
+            user_prompt=event_card,
+            max_tokens=ANALYSIS_MAX_COMPLETION_TOKENS,
+            temperature=ANALYSIS_TEMPERATURE,
+            event_timeout_seconds=event_timeout_seconds,
+            full_timeout_seconds=full_timeout_seconds,
+        )
+    except LlmError as error:
+        context = (
+            f"（{error.latency_seconds:.3f}s）"
+            if error.latency_seconds is not None
+            else ""
+        )
+        return AnalysisAttempt(
+            result=None,
+            error=f"{error}{context}",
+            checks=None,
+            partial_event_text=error.partial_event_text,
+            event_latency_seconds=error.event_latency_seconds,
+        )
+    event_checks = check_output(
+        result.event_text,
+        max_chars=ANALYSIS_MAX_EVENT_CHARS,
+    )
+    scene_checks = check_output(
+        result.scene_text,
+        max_chars=10_000,
+        enforce_length_limit=False,
+    )
+    return AnalysisAttempt(
+        result=result,
+        error=None,
+        checks=AnalysisChecks(
+            event_exceeds_max_chars=event_checks.exceeds_max_chars is True,
+            scene_sentence_count=_scene_sentence_count(result.scene_text),
+            event_callout_terms=event_checks.callout_terms,
+            scene_callout_terms=scene_checks.callout_terms,
+            event_raw_curses=event_checks.raw_curses,
+            scene_raw_curses=scene_checks.raw_curses,
+            negative_summary_terms=tuple(
+                term for term in _NEGATIVE_SUMMARY_TERMS if term in result.scene_text
+            ),
+            unsupported_inference_terms=tuple(
+                (
+                    *(
+                        term
+                        for term in _UNSUPPORTED_INFERENCE_TERMS
+                        if term in result.event_text or term in result.scene_text
+                    ),
+                    *(
+                        match.group(0)
+                        for match in _SUBJECT_EXPANSION_PATTERN.finditer(
+                            result.scene_text
+                        )
+                    ),
+                )
+            ),
+        ),
+        partial_event_text=None,
+        event_latency_seconds=None,
+    )
+
+
+def _scene_sentence_count(text: str) -> int:
+    return len(
+        tuple(
+            part
+            for part in re.split(r"[。！？!?]+", text.strip())
+            if part.strip()
+        )
+    )
+
+
 def render_report(result: BenchResult) -> str:
     """Render full cards plus model outputs, or a zero-call cards-only report."""
     attempts = tuple(
@@ -445,6 +772,284 @@ def render_report(result: BenchResult) -> str:
             )
         )
     return "\n".join(lines) + "\n"
+
+
+def render_stream_analysis_report(
+    result: AnalysisBenchResult,
+    scores: AnalysisScoreFile | None = None,
+) -> str:
+    """Render streamed event/scene outputs, split latency, and optional human scores."""
+    successful = tuple(
+        item.attempt.result
+        for item in result.events
+        if item.attempt.result is not None
+    )
+    actual_models = sorted({item.model for item in successful})
+    actual_providers = sorted(
+        {item.provider for item in successful if item.provider is not None}
+    )
+    card_digest = _sha256_text(
+        "\n\n".join(f"{item.case_id}\n{item.event_card}" for item in result.events)
+    )
+    lines = [
+        "# GSI 事件卡流式事实评测报告",
+        "",
+        "## 本次运行",
+        "",
+        "- 录制文件：" + "、".join(f"`{path}`" for path in result.recording_paths),
+        f"- 处理快照：{result.snapshot_count}",
+        f"- 检测到事件：{result.detected_event_count}",
+        f"- 策略入选事件：{result.selected_event_count}",
+        f"- 本次实际评测：{len(result.events)}",
+        f"- 因 `max_events` 截断：{result.truncated_event_count}",
+        f"- 请求型号 ID：`{result.requested_model}`",
+        "- 锁定的上游服务商："
+        + (
+            f"`{result.requested_provider}`（关闭自动回退）"
+            if result.requested_provider is not None
+            else "未锁定（延迟数字不可比）"
+        ),
+        f"- 上游实际返回型号：{_join_or_unavailable(actual_models)}",
+        f"- 实际上游：{_join_or_unavailable(actual_providers)}",
+        f"- 事件/完整截止时间：{result.event_timeout_seconds:g}s / "
+        f"{result.full_timeout_seconds:g}s",
+        f"- 温度 / 完成上限：{ANALYSIS_TEMPERATURE:g} / "
+        f"{ANALYSIS_MAX_COMPLETION_TOKENS} token",
+        f"- 提示词 SHA-256：`{_sha256_text(result.system_prompt)}`",
+        f"- 事件卡集合 SHA-256：`{card_digest}`",
+        f"- 运行时间：{result.run_timestamp.isoformat()}",
+        "",
+        "## 逐条结果",
+        "",
+    ]
+    if not result.events:
+        lines.extend(("（没有策略入选事件。）", ""))
+    for index, item in enumerate(result.events, 1):
+        lines.extend(
+            (
+                f"### {index}. `{item.case_id}`",
+                "",
+                f"- 类型：{_EVENT_LABELS[item.event.type]}（{_CATEGORY_LABELS[item.category]}）",
+                f"- 来源：`{item.recording_path}`",
+                "",
+                "GSI 事件卡：",
+                "",
+                *(f"    {line}" for line in item.event_card.splitlines()),
+                "",
+            )
+        )
+        attempt = item.attempt
+        if attempt.result is None:
+            lines.append(f"调用失败：{attempt.error}")
+            if attempt.partial_event_text is not None:
+                lines.append(f"已收到事件：{attempt.partial_event_text}")
+            if attempt.event_latency_seconds is not None:
+                lines.append(f"事件延迟：{attempt.event_latency_seconds:.3f}s")
+            lines.append("")
+            continue
+        streamed = attempt.result
+        checks = attempt.checks
+        assert checks is not None
+        sentence_ok = (
+            ANALYSIS_MIN_SCENE_SENTENCES
+            <= checks.scene_sentence_count
+            <= ANALYSIS_MAX_SCENE_SENTENCES
+        )
+        lines.extend(
+            (
+                f"事件：{streamed.event_text}",
+                f"场面：{streamed.scene_text}",
+                "",
+                "自动检查："
+                f"事件字数 {'✓' if not checks.event_exceeds_max_chars else '✗'} ｜ "
+                f"场面句数 {checks.scene_sentence_count} "
+                f"{'✓' if sentence_ok else '✗'} ｜ "
+                "点位 "
+                f"{'✓' if not checks.event_callout_terms and not checks.scene_callout_terms else '✗'} ｜ "
+                "脏字 "
+                f"{'✓' if not checks.event_raw_curses and not checks.scene_raw_curses else '✗'} ｜ "
+                "否定总结 "
+                f"{'✓' if not checks.negative_summary_terms else '✗'} ｜ "
+                "越界措辞 "
+                f"{'✓' if not checks.unsupported_inference_terms else '✗'}",
+                f"延迟：事件 {streamed.event_latency_seconds:.3f}s ｜ "
+                f"完整 {streamed.latency_seconds:.3f}s",
+                f"Token：输入 {_optional_number(streamed.usage.prompt_tokens)} ｜ "
+                f"输出 {_optional_number(streamed.usage.completion_tokens)} ｜ "
+                f"花费 {_cost_label(streamed.usage.cost_usd)} ｜ "
+                f"上游 {streamed.provider or '上游未提供'}",
+                "",
+            )
+        )
+
+    lines.extend(("## 数字汇总", ""))
+    event_latencies = tuple(
+        latency
+        for item in result.events
+        for latency in (
+            item.attempt.result.event_latency_seconds
+            if item.attempt.result is not None
+            else item.attempt.event_latency_seconds,
+        )
+        if latency is not None
+    )
+    full_latencies = tuple(item.latency_seconds for item in successful)
+    prompt_tokens = tuple(
+        item.usage.prompt_tokens
+        for item in successful
+        if item.usage.prompt_tokens is not None
+    )
+    completion_tokens = tuple(
+        item.usage.completion_tokens
+        for item in successful
+        if item.usage.completion_tokens is not None
+    )
+    costs = tuple(
+        item.usage.cost_usd for item in successful if item.usage.cost_usd is not None
+    )
+    lines.extend(
+        (
+            f"- 调用次数：{len(result.events)}",
+            f"- 成功：{len(successful)}；失败：{len(result.events) - len(successful)}",
+            f"- 按时收到事件行：{len(event_latencies)}",
+            f"- 事件延迟：{_latency_values(event_latencies)}",
+            f"- 完整延迟：{_latency_values(full_latencies)}",
+            f"- 输入 token：{_token_summary(prompt_tokens, len(successful))}",
+            f"- 输出 token：{_token_summary(completion_tokens, len(successful))}",
+            "- 总花费："
+            + (
+                f"${sum(costs):.6f}"
+                if len(costs) == len(successful) and successful
+                else "上游未完整提供"
+            ),
+        )
+    )
+    if scores is not None:
+        lines.extend(("", "## 人工事实评分", ""))
+        lines.extend(_score_summary_lines(result, scores))
+    return "\n".join(lines) + "\n"
+
+
+def load_analysis_scores(path: Path) -> AnalysisScoreFile:
+    """Load one strict human score file without accepting unknown fields."""
+    return AnalysisScoreFile.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def write_analysis_score_template(result: AnalysisBenchResult, path: Path) -> None:
+    """Write a complete, deliberately failing score sheet for human review."""
+    payload = {
+        "cases": [
+            {
+                "case_id": item.case_id,
+                "event": {
+                    "whole_correct": False,
+                    "correct_atoms": 0,
+                    "total_atoms": 1,
+                    "errors": ["未评分"],
+                    "notes": "",
+                },
+                "scene": {
+                    "whole_correct": False,
+                    "correct_atoms": 0,
+                    "total_atoms": 1,
+                    "errors": ["未评分"],
+                    "notes": "",
+                },
+            }
+            for item in result.events
+        ]
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _score_summary_lines(
+    result: AnalysisBenchResult, scores: AnalysisScoreFile
+) -> list[str]:
+    return _score_summary_lines_for_ids(
+        tuple(item.case_id for item in result.events), scores
+    )
+
+
+def _score_summary_lines_for_ids(
+    expected_ids: tuple[str, ...], scores: AnalysisScoreFile
+) -> list[str]:
+    actual_ids = tuple(item.case_id for item in scores.cases)
+    if len(set(actual_ids)) != len(actual_ids):
+        raise ValueError("评分文件包含重复 case_id")
+    if set(actual_ids) != set(expected_ids):
+        missing = sorted(set(expected_ids) - set(actual_ids))
+        extra = sorted(set(actual_ids) - set(expected_ids))
+        raise ValueError(f"评分 case_id 与报告不一致：缺少 {missing}；多出 {extra}")
+    by_id = {item.case_id: item for item in scores.cases}
+    ordered = tuple(by_id[case_id] for case_id in expected_ids)
+    if not ordered:
+        return ["- 没有可评分事件"]
+    lines: list[str] = []
+    for label, fields in (
+        ("事件", tuple(item.event for item in ordered)),
+        ("场面", tuple(item.scene for item in ordered)),
+    ):
+        whole_rate = sum(item.whole_correct for item in fields) / len(fields)
+        correct_atoms = sum(item.correct_atoms for item in fields)
+        total_atoms = sum(item.total_atoms for item in fields)
+        atom_rate = correct_atoms / total_atoms
+        lines.append(
+            f"- {label}：整句 {whole_rate:.1%} "
+            f"{'✓' if whole_rate >= 0.80 else '✗'}；"
+            f"原子事实 {atom_rate:.1%}（{correct_atoms}/{total_atoms}）"
+            f" {'✓' if atom_rate >= 0.95 else '✗'}"
+        )
+    return lines
+
+
+def render_scored_analysis_report(
+    report_text: str, scores: AnalysisScoreFile
+) -> str:
+    """Append validated human scores to an existing report without rerunning a model."""
+    if "\n## 人工事实评分\n" in report_text:
+        raise ValueError("报告已经包含人工事实评分")
+    case_ids = tuple(_ANALYSIS_REPORT_CASE_ID_PATTERN.findall(report_text))
+    if not case_ids:
+        raise ValueError("报告中没有找到流式评测 case_id")
+    summary = _score_summary_lines_for_ids(case_ids, scores)
+    return (
+        report_text.rstrip("\n")
+        + "\n\n## 人工事实评分\n\n"
+        + "\n".join(summary)
+        + "\n"
+    )
+
+
+def write_scored_analysis_report(
+    report_path: Path, scores_path: Path, output_path: Path
+) -> None:
+    """Validate and append a score file to a completed report, entirely offline."""
+    report_text = report_path.read_text(encoding="utf-8")
+    scores = load_analysis_scores(scores_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        render_scored_analysis_report(report_text, scores), encoding="utf-8"
+    )
+
+
+def write_stream_analysis_report(
+    result: AnalysisBenchResult,
+    output_path: Path,
+    scores: AnalysisScoreFile | None = None,
+) -> None:
+    """Write one immutable streamed-analysis report."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        render_stream_analysis_report(result, scores), encoding="utf-8"
+    )
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def render_latency_report(result: LatencyExperimentResult) -> str:
@@ -767,9 +1372,21 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("必须大于 0")
+    return parsed
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="离线评测 CS2 GSI 事件卡驱动的模型推断")
-    parser.add_argument("--replay", type=Path, required=True, help="GSI JSONL 录制文件")
+    parser.add_argument(
+        "--replay",
+        type=Path,
+        action="append",
+        help="GSI JSONL 录制文件；stream-analysis 模式可重复传入",
+    )
     parser.add_argument("--model", help="OpenRouter 型号 ID；cards-only 时可省略")
     parser.add_argument("--provider", help="锁定的 OpenRouter 上游服务商 slug")
     parser.add_argument("--out", type=Path, required=True, help="Markdown 报告输出路径")
@@ -800,25 +1417,106 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="按 A→B→C 串行运行延迟归因实验",
     )
+    parser.add_argument(
+        "--stream-analysis",
+        action="store_true",
+        help="流式输出事件短句与场面描述，并分别测量延迟",
+    )
+    parser.add_argument(
+        "--event-timeout-seconds",
+        type=_positive_float,
+        default=3.0,
+        help="stream-analysis 等待完整事件行的秒数上限",
+    )
+    parser.add_argument(
+        "--full-timeout-seconds",
+        type=_positive_float,
+        default=6.0,
+        help="stream-analysis 等待完整场面描述的秒数上限",
+    )
+    parser.add_argument(
+        "--scores",
+        type=Path,
+        help="人工评分 JSON；与 --score-report 一起离线追加准确率汇总",
+    )
+    parser.add_argument(
+        "--score-report",
+        type=Path,
+        help="对已完成的流式报告离线追加人工评分，不读取密钥或调用模型",
+    )
+    parser.add_argument(
+        "--score-template-out",
+        type=Path,
+        help="stream-analysis 同时写出待人工填写的评分模板",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run offline evaluation without exposing credentials in arguments."""
     args = _build_parser().parse_args(argv)
-    if args.cards_only and args.latency_experiment:
-        print("错误：--cards-only 与 --latency-experiment 不能同时使用", file=sys.stderr)
+    score_report_mode = args.score_report is not None
+    modes = sum(
+        (
+            args.cards_only,
+            args.latency_experiment,
+            args.stream_analysis,
+            score_report_mode,
+        )
+    )
+    if modes > 1:
+        print(
+            "错误：cards-only、latency-experiment、stream-analysis、score-report 互斥",
+            file=sys.stderr,
+        )
         return 2
-    if args.no_reading_guide and (args.cards_only or args.latency_experiment):
+    if args.no_reading_guide and (
+        args.cards_only or args.latency_experiment or args.stream_analysis
+    ):
         print("错误：该模式不能额外指定 --no-reading-guide", file=sys.stderr)
         return 2
-    if not args.cards_only and args.model is None:
+    if args.scores is not None and not score_report_mode:
+        print("错误：--scores 必须与 --score-report 一起使用", file=sys.stderr)
+        return 2
+    if score_report_mode and args.scores is None:
+        print("错误：--score-report 必须同时提供 --scores", file=sys.stderr)
+        return 2
+    if args.score_template_out is not None and not args.stream_analysis:
+        print("错误：--score-template-out 仅适用于 --stream-analysis", file=sys.stderr)
+        return 2
+    if not args.cards_only and not score_report_mode and args.model is None:
         print("错误：模型评测必须传入 --model", file=sys.stderr)
         return 2
+    recordings = tuple(args.replay or ())
+    if score_report_mode and recordings:
+        print("错误：--score-report 不接受 --replay，避免误触发模型调用", file=sys.stderr)
+        return 2
+    if score_report_mode and (args.model is not None or args.provider is not None):
+        print("错误：--score-report 不接受模型或服务商参数", file=sys.stderr)
+        return 2
+    if not score_report_mode and not recordings:
+        print("错误：该模式必须至少传入一个 --replay", file=sys.stderr)
+        return 2
+    if not args.stream_analysis and not score_report_mode and len(recordings) != 1:
+        print("错误：只有 --stream-analysis 可重复传入 --replay", file=sys.stderr)
+        return 2
+
+    if score_report_mode:
+        assert args.score_report is not None
+        assert args.scores is not None
+        try:
+            write_scored_analysis_report(args.score_report, args.scores, args.out)
+        except (FileNotFoundError, ValueError) as error:
+            print(f"错误：{error}", file=sys.stderr)
+            return 2
+        print(f"人工评分报告已写入：{args.out}")
+        return 0
+
+    recording = recordings[0]
 
     if args.cards_only:
         result = run_bench(
-            args.replay,
+            recording,
             model=None,
             provider=None,
             personality_style=args.personality,
@@ -837,9 +1535,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     try:
         assert args.model is not None
-        if args.latency_experiment:
+        if args.stream_analysis:
+            analysis = run_stream_analysis(
+                recordings,
+                model=args.model,
+                provider=args.provider,
+                client=client,
+                max_events=args.max_events,
+                event_timeout_seconds=args.event_timeout_seconds,
+                full_timeout_seconds=args.full_timeout_seconds,
+            )
+            write_stream_analysis_report(analysis, args.out)
+            if args.score_template_out is not None:
+                write_analysis_score_template(analysis, args.score_template_out)
+        elif args.latency_experiment:
             experiment = run_latency_experiment(
-                args.replay,
+                recording,
                 model=args.model,
                 provider=args.provider,
                 client=client,
@@ -848,7 +1559,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             write_latency_report(experiment, args.out)
         else:
             result = run_bench(
-                args.replay,
+                recording,
                 model=args.model,
                 provider=args.provider,
                 personality_style=args.personality,

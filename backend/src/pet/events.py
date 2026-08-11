@@ -272,6 +272,7 @@ class EventDetector:
                         "round_kill_index": kill_index,
                         "delta": kill_delta,
                         "weapon": current.active_weapon,
+                        **_score_situation_facts(current, current.team),
                     },
                 )
             )
@@ -285,7 +286,10 @@ class EventDetector:
                         subject_steamid=current.player_steamid,
                         subject_is_self=subject_is_self,
                         round_number=round_number,
-                        facts={"count": threshold},
+                        facts={
+                            "count": threshold,
+                            **_score_situation_facts(current, current.team),
+                        },
                     )
                 )
         return events
@@ -386,6 +390,9 @@ def _score_situation_facts(
         else:
             situation = "落后"
     return {
+        "self_team": team if team in {"CT", "T"} else None,
+        "self_score": own_score,
+        "opponent_score": opposing_score,
         "score_situation": situation,
         "team_consecutive_round_losses": losses,
     }
