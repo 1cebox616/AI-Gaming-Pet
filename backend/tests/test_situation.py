@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 import logging
+from typing import get_args
 
 import pytest
 
@@ -11,6 +12,7 @@ from pet.situation import (
     RoundSituation,
     SituationTracker,
     TimelineEntry,
+    TimelineKind,
     armor_status,
     held_weapon,
     is_carrying_bomb,
@@ -29,6 +31,7 @@ def _snapshot(
     ts: float,
     *,
     map_round: int = 0,
+    round_phase: str | None = "live",
     player_id: str = SELF_ID,
     health: int | None = 100,
     flashed: int | None = 0,
@@ -93,7 +96,7 @@ def _snapshot(
             "team_t": {"score": 0},
         },
         "round": {
-            "phase": "live",
+            **({"phase": round_phase} if round_phase is not None else {}),
             **({"bomb": bomb_state} if bomb_state is not None else {}),
         },
         "player": {
@@ -119,6 +122,25 @@ def _observe_all(snapshots: tuple[GameSnapshot, ...]) -> RoundSituation:
         current = tracker.observe(snapshot, session.observe(snapshot))
     assert current is not None
     return current
+
+
+def test_timeline_kind_contract_contains_exactly_fourteen_values() -> None:
+    assert get_args(TimelineKind) == (
+        "bought",
+        "round_live",
+        "flash_start",
+        "flash_end",
+        "smoke_start",
+        "smoke_end",
+        "kill",
+        "damage",
+        "primary_weapon",
+        "ammo_low",
+        "grenade_used",
+        "bomb",
+        "bomb_pickup",
+        "death",
+    )
 
 
 def test_flash_count_tracks_zero_or_missing_to_positive_transitions() -> None:
@@ -496,6 +518,136 @@ def test_timeline_records_state_changes_in_time_order_with_human_details() -> No
     assert result.timeline[7] == TimelineEntry(2.0, "smoke_end", "持续1.0秒")
     assert result.timeline[8] == TimelineEntry(2.0, "kill", "AWP 爆头")
     assert result.timeline[-1] == TimelineEntry(3.0, "death", None)
+
+
+def test_round_live_records_only_freezetime_to_live_transition() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, round_phase="freezetime"),
+            _snapshot(11.0, round_phase="freezetime"),
+            _snapshot(12.0, round_phase="live"),
+            _snapshot(13.0, round_phase="live"),
+        )
+    )
+
+    live_entries = tuple(
+        entry for entry in result.timeline if entry.kind == "round_live"
+    )
+    assert live_entries == (TimelineEntry(2.0, "round_live", None),)
+
+
+def test_grenade_disappearance_records_only_after_live_and_not_on_death() -> None:
+    rifle_and_grenades = (
+        ("weapon_ak47", "Rifle", "active"),
+        ("weapon_flashbang", "Grenade", "holstered"),
+        ("weapon_smokegrenade", "Grenade", "holstered"),
+    )
+    result = _observe_all(
+        (
+            _snapshot(
+                10.0,
+                round_phase="freezetime",
+                weapon_slots=rifle_and_grenades,
+            ),
+            _snapshot(
+                11.0,
+                round_phase="freezetime",
+                weapon_slots=rifle_and_grenades[:-1],
+            ),
+            _snapshot(12.0, round_phase="live", weapon_slots=rifle_and_grenades),
+            _snapshot(
+                13.0,
+                round_phase="live",
+                weapon_slots=rifle_and_grenades[:-1],
+            ),
+            _snapshot(14.0, round_phase="live", health=0, weapon_slots=()),
+        )
+    )
+
+    grenades = tuple(entry for entry in result.timeline if entry.kind == "grenade_used")
+    assert grenades == (TimelineEntry(3.0, "grenade_used", "扔了烟雾弹"),)
+
+
+def test_ammo_low_rearms_after_weapon_switch_and_reload() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, active_weapon="weapon_ak47", ammo_clip=30),
+            _snapshot(11.0, active_weapon="weapon_ak47", ammo_clip=1),
+            _snapshot(12.0, active_weapon="weapon_ak47", ammo_clip=0),
+            _snapshot(13.0, active_weapon="weapon_m4a1_silencer", ammo_clip=20),
+            _snapshot(14.0, active_weapon="weapon_m4a1_silencer", ammo_clip=1),
+            _snapshot(15.0, active_weapon="weapon_m4a1_silencer", ammo_clip=20),
+            _snapshot(16.0, active_weapon="weapon_m4a1_silencer", ammo_clip=0),
+        )
+    )
+
+    low_ammo = tuple(entry for entry in result.timeline if entry.kind == "ammo_low")
+    assert low_ammo == (
+        TimelineEntry(1.0, "ammo_low", "弹匣仅剩1发 AK47"),
+        TimelineEntry(4.0, "ammo_low", "弹匣仅剩1发 M4A1-S"),
+        TimelineEntry(6.0, "ammo_low", "弹匣打空 M4A1-S"),
+    )
+
+
+def test_kill_detail_includes_low_ammo_at_that_snapshot() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, round_kills=0, ammo_clip=10),
+            _snapshot(11.0, round_kills=1, ammo_clip=2),
+        )
+    )
+
+    kills = tuple(entry for entry in result.timeline if entry.kind == "kill")
+    assert kills == (TimelineEntry(1.0, "kill", "AK47 弹匣仅剩2发"),)
+
+
+def test_damage_detail_includes_and_merges_actual_armor_loss() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, health=100, armor=100),
+            _snapshot(11.0, health=65, armor=88),
+            _snapshot(11.5, health=50, armor=85),
+        )
+    )
+
+    damage = tuple(entry for entry in result.timeline if entry.kind == "damage")
+    assert damage == (
+        TimelineEntry(1.0, "damage", "掉了50血、15甲 剩50血、85甲"),
+    )
+
+
+def test_bomb_pickup_records_false_to_true_but_never_infers_a_drop() -> None:
+    rifle = (("weapon_ak47", "Rifle", "active"),)
+    rifle_and_bomb = rifle + (("weapon_c4", "C4", "holstered"),)
+    result = _observe_all(
+        (
+            _snapshot(10.0, weapon_slots=rifle),
+            _snapshot(11.0, weapon_slots=rifle_and_bomb),
+            _snapshot(12.0, health=0, weapon_slots=()),
+        )
+    )
+
+    bomb_entries = tuple(
+        entry for entry in result.timeline if entry.kind == "bomb_pickup"
+    )
+    assert bomb_entries == (TimelineEntry(1.0, "bomb_pickup", None),)
+
+
+def test_purchase_merge_uses_consecutive_gap_and_exact_three_seconds_is_boundary() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, money=5000, equip_value=1000),
+            _snapshot(11.0, money=4500, equip_value=1500),
+            _snapshot(13.9, money=4000, equip_value=2000),
+            _snapshot(16.9, money=3500, equip_value=2500),
+        )
+    )
+
+    purchases = tuple(entry for entry in result.timeline if entry.kind == "bought")
+    assert purchases[0] == TimelineEntry(1.0, "bought", None)
+    assert purchases[1].kind == "bought"
+    assert purchases[1].detail is None
+    assert purchases[1].seconds == pytest.approx(6.9)
 
 
 def test_damage_entries_at_least_one_second_apart_do_not_merge() -> None:

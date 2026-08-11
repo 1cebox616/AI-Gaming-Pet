@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, replace
 import logging
 import re
@@ -48,11 +49,22 @@ _WEAPON_LABELS = {
     "ssg08": "SSG 08",
     "usp_silencer": "USP-S",
 }
-_DAMAGE_DETAIL_PATTERN = re.compile(r"^掉了(\d+)血 剩(\d+)血$")
+_DAMAGE_DETAIL_PATTERN = re.compile(
+    r"^掉了(\d+)血(?:、(\d+)甲)? 剩(\d+)血(?:、(\d+)甲)?$"
+)
 _TRUNCATION_DETAIL_PATTERN = re.compile(r"^较早的(\d+)条受伤记录已省略$")
+_GRENADE_LABELS = {
+    "weapon_flashbang": "闪光弹",
+    "weapon_smokegrenade": "烟雾弹",
+    "weapon_hegrenade": "手雷",
+    "weapon_molotov": "燃烧弹",
+    "weapon_incgrenade": "燃烧弹",
+    "weapon_decoy": "诱饵弹",
+}
 
 TimelineKind = Literal[
     "bought",
+    "round_live",
     "flash_start",
     "flash_end",
     "smoke_start",
@@ -60,7 +72,10 @@ TimelineKind = Literal[
     "kill",
     "damage",
     "primary_weapon",
+    "ammo_low",
+    "grenade_used",
     "bomb",
+    "bomb_pickup",
     "death",
 ]
 
@@ -120,6 +135,17 @@ class SituationTracker:
         timeline = list(self._current.timeline)
         relative_seconds = self._relative_seconds(snapshot.ts)
 
+        if (
+            self._previous_round_phase == "freezetime"
+            and snapshot.round_phase == "live"
+        ):
+            timeline = _append_timeline(
+                timeline,
+                TimelineEntry(relative_seconds, "round_live", None),
+            )
+        if snapshot.round_phase == "live":
+            self._round_is_live = True
+
         primary_weapons_used, new_primary_weapons = self._observe_primary_weapons(
             snapshot
         )
@@ -144,9 +170,31 @@ class SituationTracker:
         )
         if bought_now:
             bought_equipment = True
+            if (
+                self._last_bought_at_seconds is None
+                or relative_seconds - self._last_bought_at_seconds >= 3.0 - 1e-9
+            ):
+                timeline = _append_timeline(
+                    timeline,
+                    TimelineEntry(relative_seconds, "bought", None),
+                )
+            self._last_bought_at_seconds = relative_seconds
+
+        for grenade_name in self._observe_grenades(snapshot):
             timeline = _append_timeline(
                 timeline,
-                TimelineEntry(relative_seconds, "bought", None),
+                TimelineEntry(
+                    relative_seconds,
+                    "grenade_used",
+                    f"扔了{_grenade_display_name(grenade_name)}",
+                ),
+            )
+
+        ammo_detail = self._observe_ammo(snapshot)
+        if ammo_detail is not None:
+            timeline = _append_timeline(
+                timeline,
+                TimelineEntry(relative_seconds, "ammo_low", ammo_detail),
             )
 
         (
@@ -225,12 +273,24 @@ class SituationTracker:
         ):
             damage_taken = self._previous_health - snapshot.health
             total_damage_taken += damage_taken
+            armor_damage: int | None = None
+            if (
+                self._previous_armor is not None
+                and snapshot.armor is not None
+                and snapshot.armor < self._previous_armor
+            ):
+                armor_damage = self._previous_armor - snapshot.armor
             timeline = _append_timeline(
                 timeline,
                 TimelineEntry(
                     relative_seconds,
                     "damage",
-                    _damage_detail(damage_taken, snapshot.health),
+                    _damage_detail(
+                        damage_taken,
+                        snapshot.health,
+                        armor_damage=armor_damage,
+                        remaining_armor=snapshot.armor,
+                    ),
                 ),
             )
 
@@ -264,6 +324,13 @@ class SituationTracker:
                     "bomb",
                     _bomb_detail(snapshot.bomb_state),
                 ),
+            )
+
+        carrying_bomb = is_carrying_bomb(snapshot)
+        if self._previous_carrying_bomb is False and carrying_bomb is True:
+            timeline = _append_timeline(
+                timeline,
+                TimelineEntry(relative_seconds, "bomb_pickup", None),
             )
 
         if (
@@ -300,6 +367,7 @@ class SituationTracker:
         )
         self._previous_burning = snapshot.burning
         self._previous_health = snapshot.health
+        self._previous_armor = snapshot.armor
         if snapshot.health is not None and snapshot.health > 0:
             self._last_nonzero_health = snapshot.health
         self._previous_money = snapshot.money
@@ -307,6 +375,9 @@ class SituationTracker:
         self._previous_round_kills = snapshot.round_kills
         self._previous_round_killhs = snapshot.round_killhs
         self._previous_bomb_state = snapshot.bomb_state
+        if carrying_bomb is not None:
+            self._previous_carrying_bomb = carrying_bomb
+        self._previous_round_phase = snapshot.round_phase
         self._last_self_ts = snapshot.ts
         return self._current
 
@@ -349,12 +420,20 @@ class SituationTracker:
         self._active_smoke_seconds = 0.0
         self._previous_burning: int | None = None
         self._previous_health: int | None = None
+        self._previous_armor: int | None = None
         self._last_nonzero_health: int | None = None
         self._previous_money: int | None = None
         self._previous_equip_value: int | None = None
         self._previous_round_kills: int | None = None
         self._previous_round_killhs: int | None = None
         self._previous_bomb_state: str | None = None
+        self._previous_carrying_bomb: bool | None = None
+        self._previous_grenades: Counter[str] | None = None
+        self._previous_held_weapon_name: str | None = None
+        self._previous_held_ammo: int | None = None
+        self._previous_round_phase: str | None = None
+        self._round_is_live = False
+        self._last_bought_at_seconds: float | None = None
         self._last_self_ts: float | None = None
         self._round_started_at: float | None = None
 
@@ -440,6 +519,47 @@ class SituationTracker:
             _warn_unknown_weapon_type_once(weapon.type)
         return tuple(names), tuple(new_names)
 
+    def _observe_grenades(self, snapshot: GameSnapshot) -> tuple[str, ...]:
+        if snapshot.weapons is None:
+            return ()
+        current = Counter(
+            weapon.name for weapon in snapshot.weapons if weapon.type == "Grenade"
+        )
+        used: list[str] = []
+        if (
+            self._round_is_live
+            and snapshot.health != 0
+            and self._previous_grenades is not None
+        ):
+            for name, count in (self._previous_grenades - current).items():
+                used.extend(name for _ in range(count))
+        self._previous_grenades = current
+        return tuple(used)
+
+    def _observe_ammo(self, snapshot: GameSnapshot) -> str | None:
+        weapon = held_weapon(snapshot)
+        if weapon is None or weapon.ammo_clip is None:
+            self._previous_held_weapon_name = None
+            self._previous_held_ammo = None
+            return None
+
+        detail: str | None = None
+        if (
+            weapon.name == self._previous_held_weapon_name
+            and self._previous_held_ammo is not None
+            and self._previous_held_ammo > LOW_AMMO_THRESHOLD
+            and weapon.ammo_clip <= LOW_AMMO_THRESHOLD
+        ):
+            label = weapon_display_name(weapon.name)
+            detail = (
+                f"弹匣打空 {label}"
+                if weapon.ammo_clip == 0
+                else f"弹匣仅剩{weapon.ammo_clip}发 {label}"
+            )
+        self._previous_held_weapon_name = weapon.name
+        self._previous_held_ammo = weapon.ammo_clip
+        return detail
+
     def _relative_seconds(self, ts: float) -> float:
         if self._round_started_at is None:
             return 0.0
@@ -478,11 +598,24 @@ def _kill_detail(
         details.append("爆头" if headshot_count == 1 else f"{headshot_count}个爆头")
     if kill_count > 1:
         details.append(f"增加{kill_count}杀")
+    if weapon is not None and weapon.ammo_clip is not None and weapon.ammo_clip <= 2:
+        details.append(f"弹匣仅剩{weapon.ammo_clip}发")
     return " ".join(details) or None
 
 
-def _damage_detail(damage: int, remaining_health: int) -> str:
-    return f"掉了{damage}血 剩{remaining_health}血"
+def _damage_detail(
+    damage: int,
+    remaining_health: int,
+    *,
+    armor_damage: int | None = None,
+    remaining_armor: int | None = None,
+) -> str:
+    lost = f"掉了{damage}血"
+    remaining = f"剩{remaining_health}血"
+    if armor_damage is not None and remaining_armor is not None:
+        lost += f"、{armor_damage}甲"
+        remaining += f"、{remaining_armor}甲"
+    return f"{lost} {remaining}"
 
 
 def _duration_detail(duration: float | None) -> str | None:
@@ -495,6 +628,10 @@ def _bomb_detail(state: str) -> str:
         "defused": "已拆除",
         "exploded": "已爆炸",
     }.get(state, state)
+
+
+def _grenade_display_name(name: str) -> str:
+    return _GRENADE_LABELS.get(name.lower(), weapon_display_name(name))
 
 
 def _append_timeline(
@@ -559,11 +696,22 @@ def _merge_damage_entries(
     if first_match is None or second_match is None:
         return None
     combined_damage = int(first_match.group(1)) + int(second_match.group(1))
-    remaining_health = int(second_match.group(2))
+    first_armor_damage = int(first_match.group(2) or 0)
+    second_armor_damage = int(second_match.group(2) or 0)
+    combined_armor_damage = first_armor_damage + second_armor_damage
+    remaining_health = int(second_match.group(3))
+    remaining_armor_text = second_match.group(4) or first_match.group(4)
     return TimelineEntry(
         seconds=first.seconds,
         kind="damage",
-        detail=_damage_detail(combined_damage, remaining_health),
+        detail=_damage_detail(
+            combined_damage,
+            remaining_health,
+            armor_damage=combined_armor_damage or None,
+            remaining_armor=(
+                int(remaining_armor_text) if remaining_armor_text is not None else None
+            ),
+        ),
     )
 
 

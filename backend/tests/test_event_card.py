@@ -1,4 +1,4 @@
-"""Situation-card rendering tests based on an existing scrubbed GSI sample."""
+"""GSI-event-card rendering tests based on an existing scrubbed GSI sample."""
 
 import json
 from pathlib import Path
@@ -8,7 +8,7 @@ from pet.events import GameEvent
 from pet.gsi import GameSnapshot, WeaponSlot, parse_snapshot
 from pet.session import GameState
 from pet.situation import RoundSituation, TimelineEntry
-from pet.situation_card import render_situation_card
+from pet.event_card import render_event_card
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 
@@ -76,11 +76,15 @@ def _situation(*, round_number: int | None = 6) -> RoundSituation:
         seconds_since_bomb_planted=8.67891,
         self_team="CT",
         timeline=(
+            TimelineEntry(10.9, "round_live", None),
             TimelineEntry(12.345, "flash_start", None),
             TimelineEntry(13.049, "flash_end", "持续0.7秒"),
-            TimelineEntry(33.149, "kill", "M4A1-S 爆头"),
+            TimelineEntry(20.0, "grenade_used", "扔了烟雾弹"),
+            TimelineEntry(30.0, "ammo_low", "弹匣仅剩1发 M4A1-S"),
+            TimelineEntry(33.149, "kill", "M4A1-S 爆头 弹匣仅剩1发"),
             TimelineEntry(45.222, "smoke_start", None),
             TimelineEntry(53.444, "smoke_end", "持续8.2秒"),
+            TimelineEntry(54.0, "bomb_pickup", None),
         ),
     )
 
@@ -98,20 +102,22 @@ def _event(snapshot: GameSnapshot) -> GameEvent:
             "round_kills": 1,
             "equip_value": 4100,
             "score_situation": "落后",
+            "team_consecutive_round_losses": 2,
+            "score_ct": 2,
+            "score_t": 3,
         },
     )
 
 
-def test_all_six_sections_are_present_in_fixed_order_with_full_facts() -> None:
+def test_all_five_sections_are_present_in_fixed_order_with_full_facts() -> None:
     snapshot = _real_snapshot().model_copy(update={"health": 0, "bomb_state": "planted"})
 
-    card = render_situation_card(snapshot, _game(snapshot), _situation(), _event(snapshot))
+    card = render_event_card(snapshot, _game(snapshot), _situation(), _event(snapshot))
 
     headings = [
         "【对局】",
         "【我】",
         "【本回合】",
-        "【本回合时间线】",
         "【全场】",
         "【刚刚】",
     ]
@@ -120,15 +126,35 @@ def test_all_six_sections_are_present_in_fixed_order_with_full_facts() -> None:
         card.index(heading) for heading in headings
     )
     assert "休闲 de_anubis 第6回合 CT 2:3 T 我在CT方 我方连败2轮" in card
-    assert "已阵亡 倒地前12血 有甲无头 1750块 装备价值4100" in card
+    assert "已阵亡 倒地前12血 有甲无头 1750块 装备4100" in card
     assert "手持M4A1-S 弹匣12/20 备弹40" in card
-    assert "用过M4A1-S、AK47" in card
-    assert "炸弹已安放 安放后8.7秒" in card
+    assert "  10.9s 正式开打" in card
     assert "  12.3s 被闪" in card
-    assert "  33.1s 击杀 M4A1-S 爆头" in card
-    assert "  53.4s 出烟 在烟中8.2秒" in card
-    assert "12杀 4助 5死 MVP1次" in card
+    assert "  20.0s 扔了烟雾弹" in card
+    assert "  30.0s 弹匣仅剩1发 M4A1-S" in card
+    assert "  33.1s 击杀 M4A1-S 爆头 弹匣仅剩1发" in card
+    assert "  53.4s 出烟 持续8.2秒" in card
+    assert "  54.0s 拿到炸弹" in card
+    assert "12杀 4助攻 5死 MVP1次" in card
     assert "普通死亡 存活89.8秒 本回合1杀" in card
+    assert card.count("【本回合】") == 1
+    for removed_summary in (
+        "【本回合时间线】",
+        "被闪累计",
+        "在烟中累计",
+        "用过",
+        "本回合买过装备",
+        "峰值",
+    ):
+        assert removed_summary not in card
+    for redundant in (
+        "CT比分",
+        "T比分",
+        "比分态势",
+        "我方连败2轮",
+        "连续增加",
+    ):
+        assert redundant not in card.split("【刚刚】", 1)[1]
 
 
 def test_missing_fields_are_omitted_without_unknown_or_zero_substitution() -> None:
@@ -145,7 +171,7 @@ def test_missing_fields_are_omitted_without_unknown_or_zero_substitution() -> No
         }
     )
 
-    card = render_situation_card(snapshot, _game(snapshot), _situation(), _event(snapshot))
+    card = render_event_card(snapshot, _game(snapshot), _situation(), _event(snapshot))
 
     assert "未知" not in card
     assert "块" not in card
@@ -189,7 +215,7 @@ def test_zero_and_no_occurrence_facts_are_omitted() -> None:
         timeline=(),
     )
 
-    card = render_situation_card(snapshot, _game(snapshot), situation, _event(snapshot))
+    card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
 
     for omitted in (
         "被闪0次",
@@ -209,14 +235,14 @@ def test_zero_and_no_occurrence_facts_are_omitted() -> None:
         "本回合未买装备",
     ):
         assert omitted not in card
-    assert "【本回合时间线】" not in card
+    assert "【本回合】" not in card
     assert "【全场】" not in card
 
 
 def test_card_contains_no_unavailable_position_enemy_or_attribution_facts() -> None:
     snapshot = _real_snapshot()
 
-    card = render_situation_card(snapshot, _game(snapshot), _situation(), _event(snapshot))
+    card = render_event_card(snapshot, _game(snapshot), _situation(), _event(snapshot))
 
     for forbidden in (
         "玩家位置",
@@ -234,12 +260,10 @@ def test_card_contains_no_unavailable_position_enemy_or_attribution_facts() -> N
 def test_seconds_use_one_decimal_and_never_expose_long_float() -> None:
     snapshot = _real_snapshot()
 
-    card = render_situation_card(snapshot, _game(snapshot), _situation(), _event(snapshot))
+    card = render_event_card(snapshot, _game(snapshot), _situation(), _event(snapshot))
 
-    assert "1.4秒" in card
     assert "0.7秒" in card
-    assert "4.2秒" in card
-    assert "8.7秒" in card
+    assert "8.2秒" in card
     assert "89.8秒" in card
     assert "1.4002890586853" not in card
 
@@ -247,7 +271,7 @@ def test_seconds_use_one_decimal_and_never_expose_long_float() -> None:
 def test_stale_round_situation_is_omitted_while_other_sections_remain() -> None:
     snapshot = _real_snapshot()
 
-    card = render_situation_card(
+    card = render_event_card(
         snapshot,
         _game(snapshot),
         _situation(round_number=5),
@@ -255,7 +279,6 @@ def test_stale_round_situation_is_omitted_while_other_sections_remain() -> None:
     )
 
     assert "【本回合】" not in card
-    assert "【本回合时间线】" not in card
     assert "【对局】" in card
     assert "【我】" in card
     assert "【全场】" in card
@@ -281,13 +304,12 @@ def test_spectating_keeps_match_round_timeline_and_self_team_but_not_player_data
         }
     )
 
-    card = render_situation_card(snapshot, game, _situation(), _event(snapshot))
+    card = render_event_card(snapshot, game, _situation(), _event(snapshot))
 
     assert "【对局】休闲 de_anubis 第6回合 CT 2:3 T 我在CT方" in card
     assert "【我】" not in card
     assert "【全场】" not in card
     assert "【本回合】" in card
-    assert "【本回合时间线】" in card
     assert "【刚刚】" in card
     assert "9999块" not in card
     assert "5血" not in card

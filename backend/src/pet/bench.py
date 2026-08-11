@@ -1,4 +1,4 @@
-"""Offline evaluation of situation-card-driven CS2 commentary."""
+"""Offline evaluation of GSI-event-card-driven CS2 commentary."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from pet.events import EventType, GameEvent
 from pet.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
 from pet.prompt import PROMPTS_DIRECTORY, PromptPersonality, load_system_prompt
 from pet.replay import load_recording, replay_commentary
-from pet.situation_card import render_situation_card
+from pet.event_card import render_event_card
 
 TEMPERATURE = 0.9
 MAX_COMPLETION_TOKENS_BY_PERSONALITY: dict[PromptPersonality, int] = {
@@ -105,7 +105,7 @@ class BenchEvent:
 
     event: GameEvent
     category: CommentaryCategory
-    situation_card: str
+    event_card: str
     template_text: str
     attempt: BenchAttempt | None
 
@@ -235,7 +235,7 @@ def run_bench(
         event = disposition.decision.event
         if disposition.utterance is None:
             raise ValueError(f"selected event {event.id} has no template utterance")
-        card = render_situation_card(
+        card = render_event_card(
             disposition.snapshot,
             disposition.game,
             disposition.round_situation,
@@ -250,7 +250,7 @@ def run_bench(
                 model=model,
                 provider=provider,
                 system_prompt=system_prompt,
-                situation_card=card,
+                event_card=card,
                 max_chars=length_statistics.p90,
                 max_tokens=MAX_COMPLETION_TOKENS_BY_PERSONALITY[personality_style],
                 enforce_length_limit=personality_style != "inference",
@@ -260,7 +260,7 @@ def run_bench(
             BenchEvent(
                 event=event,
                 category=commentary_category(event),
-                situation_card=card,
+                event_card=card,
                 template_text=disposition.utterance.text,
                 attempt=attempt,
             )
@@ -352,9 +352,9 @@ def render_report(result: BenchResult) -> str:
         else "未锁定（延迟数字不可比）"
     )
     lines = [
-        "# M3-T4 富卡推断评测报告"
+        "# GSI 事件卡推断评测报告"
         if not result.cards_only
-        else "# M3-T4 富卡审阅报告（cards-only）",
+        else "# GSI 事件卡审阅报告（cards-only）",
         "",
         "## 本次运行",
         "",
@@ -406,9 +406,9 @@ def render_report(result: BenchResult) -> str:
                 f"### 事件 {index} —— {_EVENT_LABELS[event.type]}"
                 f"（{_CATEGORY_LABELS[item.category]}），{round_label}",
                 "",
-                "喂进去的富卡：",
+                "喂进去的 GSI 事件卡：",
                 "",
-                *(f"    {line}" for line in item.situation_card.splitlines()),
+                *(f"    {line}" for line in item.event_card.splitlines()),
                 "",
             )
         )
@@ -433,7 +433,7 @@ def render_report(result: BenchResult) -> str:
         lines.extend(
             (
                 "- 模型调用次数：0（cards-only）",
-                f"- 原样输出富卡：{len(result.events)}",
+                f"- 原样输出 GSI 事件卡：{len(result.events)}",
             )
         )
     else:
@@ -522,7 +522,7 @@ def _attempt_completion(
     model: str,
     provider: str | None,
     system_prompt: str,
-    situation_card: str,
+    event_card: str,
     max_chars: int,
     max_tokens: int,
     enforce_length_limit: bool,
@@ -533,7 +533,7 @@ def _attempt_completion(
             model=model,
             provider=provider,
             system_prompt=system_prompt,
-            user_prompt=situation_card,
+            user_prompt=event_card,
             max_tokens=max_tokens,
             temperature=TEMPERATURE,
         )
@@ -768,7 +768,7 @@ def _positive_int(value: str) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="离线评测 CS2 富卡驱动的模型推断")
+    parser = argparse.ArgumentParser(description="离线评测 CS2 GSI 事件卡驱动的模型推断")
     parser.add_argument("--replay", type=Path, required=True, help="GSI JSONL 录制文件")
     parser.add_argument("--model", help="OpenRouter 型号 ID；cards-only 时可省略")
     parser.add_argument("--provider", help="锁定的 OpenRouter 上游服务商 slug")
@@ -788,7 +788,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cards-only",
         action="store_true",
-        help="只渲染富卡，不读取密钥或调用模型",
+        help="只渲染 GSI 事件卡，不读取密钥或调用模型",
     )
     parser.add_argument(
         "--no-reading-guide",
@@ -827,7 +827,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             cards_only=True,
         )
         write_report(result, args.out)
-        print(f"富卡报告已写入：{args.out}")
+        print(f"GSI 事件卡报告已写入：{args.out}")
         return 0
 
     try:

@@ -99,7 +99,7 @@ def test_external_prompt_joins_reading_then_personality_and_replaces_limit() -> 
     prompt = load_system_prompt("brother", max_chars=19)
 
     assert prompt.startswith("你在看一份 CS2 对局的实时事实卡")
-    assert prompt.index("## 事实卡的五段") < prompt.index("你是观战朋友打 CS2")
+    assert prompt.index("## 这张卡的五段") < prompt.index("你是观战朋友打 CS2")
     assert "最多包含 19 个汉字" in prompt
     assert "没有提供的信息不要推断，更不要编造" in prompt
     assert "{max_chars}" not in prompt
@@ -177,7 +177,15 @@ def test_factual_checks_can_skip_only_the_length_limit() -> None:
     assert "草" in inference.raw_curses
 
 
-def test_report_prints_exact_full_situation_card_and_single_attempt(
+def test_callout_check_does_not_confuse_m4a1_s_with_a_site() -> None:
+    weapon = check_output("先用M4A1-S击杀", max_chars=100)
+    actual_callout = check_output("守A点", max_chars=100)
+
+    assert weapon.callout_terms == ()
+    assert actual_callout.callout_terms == ("A点",)
+
+
+def test_report_prints_exact_full_event_card_and_single_attempt(
     real_recording: Path,
     prompts_directory: Path,
     tmp_path: Path,
@@ -204,7 +212,7 @@ def test_report_prints_exact_full_situation_card_and_single_attempt(
     assert provider == "provider-under-test"
     assert system_prompt.startswith("共享读卡指南\n\n外置解说提示词")
     assert max_tokens == 96
-    assert user_prompt == result.events[0].situation_card
+    assert user_prompt == result.events[0].event_card
     for card_line in user_prompt.splitlines():
         assert f"    {card_line}" in report
     assert "模板句：" in report
@@ -260,7 +268,7 @@ def test_cards_only_renders_cards_without_loading_prompt_or_calling_client(
     assert result.events[0].attempt is None
     assert "模型调用次数：0（cards-only）" in report
     assert "模型句：" not in report
-    for line in result.events[0].situation_card.splitlines():
+    for line in result.events[0].event_card.splitlines():
         assert f"    {line}" in report
 
 

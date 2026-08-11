@@ -2,7 +2,6 @@
 
 CALLOUT_TERMS: tuple[str, ...] = (
     "A点",
-    "A1",
     "B点",
     "B洞",
     "中路",
