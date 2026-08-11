@@ -491,7 +491,8 @@ def test_timeline_kill_labels_the_players_weapon_without_victim_ambiguity() -> N
         "玩家使用SSG 08完成击杀 爆头 弹匣仅剩1发"
     ) in card
     assert (
-        "3.0s〔阶段不可判断｜本回合累计4杀〕 玩家完成击杀 增加2杀"
+        "3.0s〔阶段不可判断｜本回合累计4杀｜该阶段四杀〕 "
+        "玩家完成击杀 增加2杀"
     ) in card
 
 
@@ -522,5 +523,30 @@ def test_timeline_relations_are_calculated_before_the_model_reads_the_card() -> 
         "25.7s〔前期｜本回合第2杀｜出烟后0.5秒〕 "
         "玩家使用M4A1-S完成击杀"
     ) in card
-    assert "28.5s〔前期｜本回合第3杀〕 玩家使用M4A1-S完成击杀" in card
+    assert (
+        "28.5s〔前期｜本回合第3杀｜该阶段三杀〕 "
+        "玩家使用M4A1-S完成击杀"
+    ) in card
     assert "29.0s〔前期｜本回合3杀｜击杀后很快阵亡，间隔0.5秒〕 玩家阵亡" in card
+
+
+def test_timeline_code_labels_split_stage_multi_kills_without_model_arithmetic() -> None:
+    snapshot = _real_snapshot()
+    entries = (
+        TimelineEntry(0.0, "round_live", None),
+        TimelineEntry(21.0, "kill", "AK47"),
+        TimelineEntry(45.0, "bomb", "已安放"),
+        TimelineEntry(52.0, "kill", "AK47"),
+        TimelineEntry(57.0, "kill", "AK47"),
+    )
+
+    card = render_event_card(
+        snapshot,
+        _game(snapshot),
+        replace(_situation(), self_team="CT", timeline=entries),
+        _event(snapshot),
+    )
+
+    assert "21.0s〔前期｜本回合第1杀〕" in card
+    assert "52.0s〔反攻包点｜本回合第2杀〕" in card
+    assert "57.0s〔反攻包点｜本回合第3杀｜该阶段双杀〕" in card

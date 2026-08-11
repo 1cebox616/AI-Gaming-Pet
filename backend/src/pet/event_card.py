@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
 import re
 from typing import Any
@@ -232,25 +233,22 @@ def _timeline_section(
         if observed_live
         else "【本回合】（未观测到开打时刻，秒数从回合起点算起）"
     ]
-    bomb_planted = False
+    stages = _timeline_stages(
+        entries,
+        self_team=self_team,
+        observed_live=observed_live,
+    )
+    stage_kill_totals: Counter[str] = Counter()
+    for entry, stage in zip(entries, stages):
+        if entry.kind == "kill" and stage is not None:
+            stage_kill_totals[stage] += _timeline_kill_increase(entry)
+    stage_kill_counts: Counter[str] = Counter()
     round_kills = 0
     last_kill_seconds: float | None = None
-    for index, entry in enumerate(entries):
+    for index, (entry, stage) in enumerate(zip(entries, stages)):
         annotations: list[str] = []
-        stage = (
-            round_stage_label(
-                entry.seconds,
-                bomb_planted=bomb_planted,
-                self_team=self_team,
-                observed_live=observed_live,
-            )
-            if entry.kind in _STAGE_ANNOTATED_TIMELINE_KINDS
-            else None
-        )
         if stage is not None:
             annotations.append(stage)
-        elif entry.kind in _STAGE_ANNOTATED_TIMELINE_KINDS and not observed_live:
-            annotations.append("阶段不可判断")
         if entry.kind == "kill":
             increase = _timeline_kill_increase(entry)
             round_kills += increase
@@ -259,6 +257,11 @@ def _timeline_section(
                 if increase == 1
                 else f"本回合累计{round_kills}杀"
             )
+            if stage is not None:
+                stage_kill_counts[stage] += increase
+                stage_total = stage_kill_totals[stage]
+                if stage_total >= 2 and stage_kill_counts[stage] >= stage_total:
+                    annotations.append(f"该阶段{_kill_count_label(stage_total)}")
             damage_gap = _nearest_entry_gap(
                 entries,
                 index,
@@ -286,9 +289,42 @@ def _timeline_section(
         lines.append(
             _timeline_line(entry, indent="  ", annotations=tuple(annotations))
         )
+    return "\n".join(lines)
+
+
+def _timeline_stages(
+    entries: tuple[TimelineEntry, ...],
+    *,
+    self_team: str | None,
+    observed_live: bool,
+) -> tuple[str | None, ...]:
+    stages: list[str | None] = []
+    bomb_planted = False
+    for entry in entries:
+        stage = (
+            round_stage_label(
+                entry.seconds,
+                bomb_planted=bomb_planted,
+                self_team=self_team,
+                observed_live=observed_live,
+            )
+            if entry.kind in _STAGE_ANNOTATED_TIMELINE_KINDS
+            else None
+        )
+        if (
+            stage is None
+            and entry.kind in _STAGE_ANNOTATED_TIMELINE_KINDS
+            and not observed_live
+        ):
+            stage = "阶段不可判断"
+        stages.append(stage)
         if entry.kind == "bomb" and entry.detail == "已安放":
             bomb_planted = True
-    return "\n".join(lines)
+    return tuple(stages)
+
+
+def _kill_count_label(count: int) -> str:
+    return {2: "双杀", 3: "三杀", 4: "四杀", 5: "五杀"}.get(count, f"{count}杀")
 
 
 def _timeline_line(
