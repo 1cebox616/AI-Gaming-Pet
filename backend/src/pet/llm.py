@@ -37,8 +37,9 @@ class LlmResult:
 
 @dataclass(frozen=True, slots=True)
 class LlmAnalysisResult:
-    """A streamed event line followed by its longer factual scene description."""
+    """A streamed self-audit, event line, and factual scene description."""
 
+    audit_text: str
     event_text: str
     scene_text: str
     usage: LlmUsage
@@ -98,6 +99,7 @@ class LlmAnalysisClientProtocol(Protocol):
         temperature: float,
         event_timeout_seconds: float,
         full_timeout_seconds: float,
+        seed: int | None = None,
     ) -> LlmAnalysisResult:
         """Return the first event line and complete scene without retrying."""
         ...
@@ -220,6 +222,7 @@ class OpenRouterClient:
         temperature: float,
         event_timeout_seconds: float,
         full_timeout_seconds: float,
+        seed: int | None = None,
     ) -> LlmAnalysisResult:
         """Stream one strict event/scene response and never retry failures."""
         if event_timeout_seconds <= 0:
@@ -244,6 +247,8 @@ class OpenRouterClient:
                 "only": [provider],
                 "allow_fallbacks": False,
             }
+        if seed is not None:
+            request_body["seed"] = seed
 
         text_parts: list[str] = []
         event_latency: float | None = None
@@ -298,7 +303,9 @@ class OpenRouterClient:
                     content = _stream_content(chunk)
                     if content:
                         text_parts.append(content)
-                        if event_latency is None and "\n" in "".join(text_parts):
+                        if event_latency is None and _has_complete_event_line(
+                            text_parts
+                        ):
                             event_latency = elapsed
         except LlmError as error:
             if event_latency is None or error.event_latency_seconds is not None:
@@ -340,7 +347,9 @@ class OpenRouterClient:
                 latency_seconds=latency,
             )
         try:
-            event_text, scene_text = parse_analysis_text("".join(text_parts))
+            audit_text, event_text, scene_text = parse_analysis_text(
+                "".join(text_parts)
+            )
         except LlmError as error:
             raise LlmError(
                 str(error),
@@ -354,6 +363,7 @@ class OpenRouterClient:
                 latency_seconds=latency,
             )
         return LlmAnalysisResult(
+            audit_text=audit_text,
             event_text=event_text,
             scene_text=scene_text,
             usage=usage,
@@ -399,28 +409,38 @@ def _parse_result(payload: object, *, latency_seconds: float) -> LlmResult:
     )
 
 
-def parse_analysis_text(text: str) -> tuple[str, str]:
-    """Parse the exact two-line analysis protocol used by the streamed benchmark."""
+def parse_analysis_text(text: str) -> tuple[str, str, str]:
+    """Parse the exact three-line self-audit protocol used by the benchmark."""
     lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-    if len(lines) != 2:
-        raise LlmError("模型输出必须恰好包含事件与场面两行")
-    if not lines[0].startswith("事件：") or not lines[1].startswith("场面："):
-        raise LlmError("模型输出未遵守事件/场面前缀协议")
-    event_text = lines[0].removeprefix("事件：").strip()
-    scene_text = lines[1].removeprefix("场面：").strip()
-    if not event_text or not scene_text:
-        raise LlmError("模型输出的事件或场面为空")
-    return event_text, scene_text
+    if len(lines) != 3:
+        raise LlmError("模型输出必须恰好包含核对、事件与场面三行")
+    prefixes = ("核对：", "事件：", "场面：")
+    if any(not line.startswith(prefix) for line, prefix in zip(lines, prefixes)):
+        raise LlmError("模型输出未遵守核对/事件/场面前缀协议")
+    audit_text = lines[0].removeprefix("核对：").strip()
+    event_text = lines[1].removeprefix("事件：").strip()
+    scene_text = lines[2].removeprefix("场面：").strip()
+    if not audit_text or not event_text or not scene_text:
+        raise LlmError("模型输出的核对、事件或场面为空")
+    return audit_text, event_text, scene_text
+
+
+def _has_complete_event_line(text_parts: list[str]) -> bool:
+    return any(
+        line.strip().startswith("事件：") and line.endswith(("\n", "\r"))
+        for line in "".join(text_parts).splitlines(keepends=True)
+    )
 
 
 def _partial_event_text(text_parts: list[str]) -> str | None:
     text = "".join(text_parts)
-    if "\n" not in text:
+    event_line = next(
+        (line.strip() for line in text.splitlines() if line.strip().startswith("事件：")),
+        None,
+    )
+    if event_line is None:
         return None
-    first_line = text.splitlines()[0].strip()
-    if not first_line.startswith("事件："):
-        return None
-    event_text = first_line.removeprefix("事件：").strip()
+    event_text = event_line.removeprefix("事件：").strip()
     return event_text or None
 
 

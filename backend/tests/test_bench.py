@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from pet.bench import (
+    ANALYSIS_MAX_EVENT_CHARS,
     AnalysisBenchResult,
     AnalysisScoreFile,
     BenchResult,
@@ -30,6 +31,7 @@ from pet.bench import (
     run_stream_analysis,
     write_analysis_score_template,
     write_report,
+    _score_summary_lines_for_ids,
 )
 from pet.commentary_templates import COMMENTARY_TEMPLATES
 from pet.llm import LlmAnalysisResult, LlmError, LlmResult, LlmUsage
@@ -85,13 +87,17 @@ class FakeAnalysisClient:
         self,
         *,
         fail: bool = False,
+        audit_text: str = "类型=爆头击杀；方式=无；武器=AK47",
         event_text: str = "爆头击杀",
         scene_text: str = "掉血后紧接着完成击杀。当前比分仍然落后。",
     ) -> None:
         self.fail = fail
+        self.audit_text = audit_text
         self.event_text = event_text
         self.scene_text = scene_text
-        self.calls: list[tuple[str | None, str, str, int, float, float, float]] = []
+        self.calls: list[
+            tuple[str | None, str, str, int, float, float, float, int | None]
+        ] = []
 
     def analyze_stream(
         self,
@@ -104,6 +110,7 @@ class FakeAnalysisClient:
         temperature: float,
         event_timeout_seconds: float,
         full_timeout_seconds: float,
+        seed: int | None = None,
     ) -> LlmAnalysisResult:
         self.calls.append(
             (
@@ -114,6 +121,7 @@ class FakeAnalysisClient:
                 temperature,
                 event_timeout_seconds,
                 full_timeout_seconds,
+                seed,
             )
         )
         if self.fail:
@@ -124,6 +132,7 @@ class FakeAnalysisClient:
                 event_latency_seconds=0.15,
             )
         return LlmAnalysisResult(
+            audit_text=self.audit_text,
             event_text=self.event_text,
             scene_text=self.scene_text,
             usage=LlmUsage(prompt_tokens=200, completion_tokens=30, cost_usd=0.002),
@@ -427,8 +436,9 @@ def test_stream_analysis_uses_strict_protocol_settings_and_split_metrics(
         provider="provider-under-test",
         client=client,
         max_events=20,
-        event_timeout_seconds=3.0,
-        full_timeout_seconds=6.0,
+        event_timeout_seconds=10.0,
+        full_timeout_seconds=10.0,
+        seed=43,
         prompts_directory=prompts_directory,
     )
     report = render_stream_analysis_report(result)
@@ -437,22 +447,26 @@ def test_stream_analysis_uses_strict_protocol_settings_and_split_metrics(
     assert result.selected_event_count == 1
     assert len(result.events) == 1
     assert len(client.calls) == 1
-    provider, prompt, card, max_tokens, temperature, event_timeout, full_timeout = (
+    provider, prompt, card, max_tokens, temperature, event_timeout, full_timeout, seed = (
         client.calls[0]
     )
     assert provider == "provider-under-test"
     assert prompt == "共享读卡指南\n\n只复述事实，不限制字数"
     assert card == result.events[0].event_card
     assert max_tokens == 128
-    assert temperature == pytest.approx(0.2)
-    assert event_timeout == pytest.approx(3.0)
-    assert full_timeout == pytest.approx(6.0)
+    assert temperature == pytest.approx(0.0)
+    assert ANALYSIS_MAX_EVENT_CHARS == 30
+    assert event_timeout == pytest.approx(10.0)
+    assert full_timeout == pytest.approx(10.0)
+    assert seed == 43
     assert "事件：爆头击杀" in report
+    assert "核对：类型=爆头击杀；方式=无；武器=AK47" in report
     assert "场面：掉血后紧接着完成击杀" in report
     assert "事件延迟：P50 0.400s" in report
     assert "完整延迟：P50 0.800s" in report
     assert "提示词 SHA-256" in report
     assert "事件卡集合 SHA-256" in report
+    assert "固定随机种子：43" in report
     assert "否定总结 ✓" in report
     assert "越界措辞 ✓" in report
 
@@ -581,6 +595,36 @@ def test_human_score_template_round_trips_and_reports_both_thresholds(
             correct_atoms=2,
             total_atoms=1,
         )
+
+
+def test_event_whole_accuracy_target_is_ninety_five_percent() -> None:
+    case_ids = tuple(f"case-{index}" for index in range(20))
+
+    def score_file(correct_cases: int) -> AnalysisScoreFile:
+        return AnalysisScoreFile(
+            cases=tuple(
+                CaseScore(
+                    case_id=case_id,
+                    event=FieldScore(
+                        whole_correct=index < correct_cases,
+                        correct_atoms=1,
+                        total_atoms=1,
+                    ),
+                    scene=FieldScore(
+                        whole_correct=True,
+                        correct_atoms=1,
+                        total_atoms=1,
+                    ),
+                )
+                for index, case_id in enumerate(case_ids)
+            )
+        )
+
+    passing = _score_summary_lines_for_ids(case_ids, score_file(19))
+    failing = _score_summary_lines_for_ids(case_ids, score_file(18))
+
+    assert "事件：整句 95.0% ✓" in "\n".join(passing)
+    assert "事件：整句 90.0% ✗" in "\n".join(failing)
 
 
 def test_product_event_answer_key_contains_exactly_the_28_stable_cases() -> None:

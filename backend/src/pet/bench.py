@@ -35,9 +35,12 @@ from pet.replay import load_recording, replay_commentary
 from pet.event_card import render_event_card
 
 TEMPERATURE = 0.9
-ANALYSIS_TEMPERATURE = 0.2
+ANALYSIS_TEMPERATURE = 0.0
 ANALYSIS_MAX_COMPLETION_TOKENS = 128
-ANALYSIS_MAX_EVENT_CHARS = 19
+ANALYSIS_SEED = 42
+ANALYSIS_MAX_EVENT_CHARS = 30
+ANALYSIS_WHOLE_ACCURACY_TARGET = 0.95
+ANALYSIS_ATOM_ACCURACY_TARGET = 0.95
 ANALYSIS_MIN_SCENE_SENTENCES = 2
 ANALYSIS_MAX_SCENE_SENTENCES = 4
 _NEGATIVE_SUMMARY_TERMS = (
@@ -241,6 +244,7 @@ class AnalysisBenchResult:
     truncated_event_count: int
     event_timeout_seconds: float
     full_timeout_seconds: float
+    seed: int
     events: tuple[AnalysisBenchEvent, ...]
 
 
@@ -419,6 +423,9 @@ def run_bench(
             disposition.game,
             disposition.round_situation,
             event,
+            death_after_kill_max_seconds=(
+                configuration.events.death_after_kill_max_seconds
+            ),
         )
         attempt = None
         if not cards_only:
@@ -521,9 +528,10 @@ def run_stream_analysis(
     max_events: int,
     event_timeout_seconds: float,
     full_timeout_seconds: float,
+    seed: int = ANALYSIS_SEED,
     prompts_directory: Path = PROMPTS_DIRECTORY,
 ) -> AnalysisBenchResult:
-    """Replay several recordings and stream one strict two-field response per event."""
+    """Replay recordings and stream one strict audited response per event."""
     if not recording_paths:
         raise ValueError("stream analysis requires at least one recording")
     if not model.strip():
@@ -573,6 +581,9 @@ def run_stream_analysis(
                 disposition.game,
                 disposition.round_situation,
                 event,
+                death_after_kill_max_seconds=(
+                    configuration.events.death_after_kill_max_seconds
+                ),
             )
             case_id = (
                 f"{recording_path.stem}:{selected_index:03d}:{event.type}:"
@@ -592,6 +603,7 @@ def run_stream_analysis(
                         event_card=card,
                         event_timeout_seconds=event_timeout_seconds,
                         full_timeout_seconds=full_timeout_seconds,
+                        seed=seed,
                         client=client,
                     ),
                 )
@@ -609,6 +621,7 @@ def run_stream_analysis(
         truncated_event_count=max(0, selected_event_count - len(events)),
         event_timeout_seconds=event_timeout_seconds,
         full_timeout_seconds=full_timeout_seconds,
+        seed=seed,
         events=tuple(events),
     )
 
@@ -621,6 +634,7 @@ def _attempt_stream_analysis(
     event_card: str,
     event_timeout_seconds: float,
     full_timeout_seconds: float,
+    seed: int,
     client: LlmAnalysisClientProtocol,
 ) -> AnalysisAttempt:
     try:
@@ -633,6 +647,7 @@ def _attempt_stream_analysis(
             temperature=ANALYSIS_TEMPERATURE,
             event_timeout_seconds=event_timeout_seconds,
             full_timeout_seconds=full_timeout_seconds,
+            seed=seed,
         )
     except LlmError as error:
         context = (
@@ -855,6 +870,7 @@ def render_stream_analysis_report(
         f"{result.full_timeout_seconds:g}s",
         f"- 温度 / 完成上限：{ANALYSIS_TEMPERATURE:g} / "
         f"{ANALYSIS_MAX_COMPLETION_TOKENS} token",
+        f"- 固定随机种子：{result.seed}",
         f"- 提示词 SHA-256：`{_sha256_text(result.system_prompt)}`",
         f"- 事件卡集合 SHA-256：`{card_digest}`",
         f"- 运行时间：{result.run_timestamp.isoformat()}",
@@ -897,6 +913,7 @@ def render_stream_analysis_report(
         )
         lines.extend(
             (
+                f"核对：{streamed.audit_text}",
                 f"事件：{streamed.event_text}",
                 f"场面：{streamed.scene_text}",
                 "",
@@ -1080,9 +1097,9 @@ def _score_summary_lines_for_ids(
         atom_rate = correct_atoms / total_atoms
         lines.append(
             f"- {label}：整句 {whole_rate:.1%} "
-            f"{'✓' if whole_rate >= 0.80 else '✗'}；"
+            f"{'✓' if whole_rate >= ANALYSIS_WHOLE_ACCURACY_TARGET else '✗'}；"
             f"原子事实 {atom_rate:.1%}（{correct_atoms}/{total_atoms}）"
-            f" {'✓' if atom_rate >= 0.95 else '✗'}"
+            f" {'✓' if atom_rate >= ANALYSIS_ATOM_ACCURACY_TARGET else '✗'}"
         )
     return lines
 
@@ -1453,6 +1470,13 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("必须至少为 0")
+    return parsed
+
+
 def _positive_float(value: str) -> float:
     parsed = float(value)
     if parsed <= 0:
@@ -1506,14 +1530,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--event-timeout-seconds",
         type=_positive_float,
-        default=3.0,
+        default=10.0,
         help="stream-analysis 等待完整事件行的秒数上限",
     )
     parser.add_argument(
         "--full-timeout-seconds",
         type=_positive_float,
-        default=6.0,
+        default=10.0,
         help="stream-analysis 等待完整场面描述的秒数上限",
+    )
+    parser.add_argument(
+        "--seed",
+        type=_nonnegative_int,
+        default=ANALYSIS_SEED,
+        help="stream-analysis 使用的固定随机种子",
     )
     parser.add_argument(
         "--scores",
@@ -1625,6 +1655,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_events=args.max_events,
                 event_timeout_seconds=args.event_timeout_seconds,
                 full_timeout_seconds=args.full_timeout_seconds,
+                seed=args.seed,
             )
             write_stream_analysis_report(analysis, args.out)
             if args.score_template_out is not None:

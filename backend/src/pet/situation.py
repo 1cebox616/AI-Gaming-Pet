@@ -754,6 +754,10 @@ def _kill_detail(
         details.append("爆头" if headshot_count == 1 else f"{headshot_count}个爆头")
     if kill_count > 1:
         details.append(f"增加{kill_count}杀")
+    if snapshot.health == 100:
+        details.append("击杀时满血")
+    elif snapshot.health is not None and 0 < snapshot.health <= LOW_HEALTH_THRESHOLD:
+        details.append(f"击杀时剩{snapshot.health}血")
     if weapon is not None and weapon.ammo_clip is not None and weapon.ammo_clip <= 2:
         details.append(f"弹匣仅剩{weapon.ammo_clip}发")
     return " ".join(details) or None

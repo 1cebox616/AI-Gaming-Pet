@@ -149,12 +149,15 @@ def test_top_labels_and_five_fact_areas_are_in_fixed_order_with_full_facts() -> 
     assert "  1.4s 玩家被闪" in card
     assert "  9.1s 玩家扔了烟雾弹" in card
     assert "  19.1s 玩家弹匣仅剩1发 M4A1-S" in card
-    assert "  22.2s〔前期〕 玩家使用M4A1-S完成击杀 爆头 弹匣仅剩1发" in card
+    assert (
+        "  22.2s〔前期｜本回合第1杀〕 "
+        "玩家使用M4A1-S完成击杀 爆头 弹匣仅剩1发"
+    ) in card
     assert "  42.5s 玩家出烟 持续8.2秒" in card
     assert "  43.1s 玩家拿到包" in card
     assert "12杀 4助攻 5死 MVP1次" in card
     assert "普通死亡 存活89.8秒 本回合1杀" in card
-    assert "本回合第1杀" not in card
+    assert "【刚刚】普通死亡 存活89.8秒 本回合1杀" in card
     assert card.count("【本回合】") == 1
     for removed_summary in (
         "【本回合时间线】",
@@ -375,7 +378,7 @@ def test_all_eighteen_timeline_kinds_render_the_declared_text() -> None:
         "10.0s 玩家闪光影响结束 持续0.8秒",
         "15.0s 玩家进烟",
         "20.0s 玩家出烟 持续6.8秒",
-        "25.0s〔前期〕 玩家使用AK47完成击杀 爆头 弹匣仅剩1发",
+        "25.0s〔前期｜本回合第1杀〕 玩家使用AK47完成击杀 爆头 弹匣仅剩1发",
         "30.0s 玩家掉了35血 剩65血",
         "35.0s 玩家主武器 AK47",
         "40.0s 玩家弹匣仅剩1发 AK47",
@@ -386,7 +389,7 @@ def test_all_eighteen_timeline_kinds_render_the_declared_text() -> None:
         "65.0s 玩家拿到包",
         "70.0s 玩家丢了包",
         "75.0s 玩家助攻",
-        "80.0s〔反攻包点〕 玩家阵亡",
+        "80.0s〔反攻包点｜本回合1杀〕 玩家阵亡",
     )
     assert all(text in card for text in expected)
 
@@ -440,12 +443,12 @@ def test_kill_and_death_timeline_entries_use_code_derived_stage_labels() -> None
 
     card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
 
-    assert "14.9s〔开局〕 玩家使用AK47完成击杀" in card
-    assert "15.0s〔前期〕 玩家使用AK47完成击杀" in card
-    assert "30.0s〔中期〕 玩家使用AK47完成击杀" in card
-    assert "70.0s〔后期〕 玩家阵亡" in card
-    assert "76.0s〔守包〕 玩家使用AK47完成击杀" in card
-    assert "77.0s〔守包〕 玩家阵亡" in card
+    assert "14.9s〔开局｜本回合第1杀〕 玩家使用AK47完成击杀" in card
+    assert "15.0s〔前期｜本回合第2杀〕 玩家使用AK47完成击杀" in card
+    assert "30.0s〔中期｜本回合第3杀〕 玩家使用AK47完成击杀" in card
+    assert "70.0s〔后期｜本回合3杀〕 玩家阵亡" in card
+    assert "76.0s〔守包｜本回合第4杀〕 玩家使用AK47完成击杀" in card
+    assert "77.0s〔守包｜本回合4杀｜击杀后很快阵亡，间隔1.0秒〕 玩家阵亡" in card
 
 
 def test_close_timeline_entries_remain_complete_without_a_dense_marker() -> None:
@@ -480,6 +483,44 @@ def test_timeline_kill_labels_the_players_weapon_without_victim_ambiguity() -> N
         _event(snapshot),
     )
 
-    assert "1.0s 玩家使用Galil AR完成击杀" in card
-    assert "2.0s 玩家使用SSG 08完成击杀 爆头 弹匣仅剩1发" in card
-    assert "3.0s 玩家完成击杀 增加2杀" in card
+    assert (
+        "1.0s〔阶段不可判断｜本回合第1杀〕 玩家使用Galil AR完成击杀"
+    ) in card
+    assert (
+        "2.0s〔阶段不可判断｜本回合第2杀〕 "
+        "玩家使用SSG 08完成击杀 爆头 弹匣仅剩1发"
+    ) in card
+    assert (
+        "3.0s〔阶段不可判断｜本回合累计4杀〕 玩家完成击杀 增加2杀"
+    ) in card
+
+
+def test_timeline_relations_are_calculated_before_the_model_reads_the_card() -> None:
+    snapshot = _real_snapshot()
+    entries = (
+        TimelineEntry(0.0, "round_live", None),
+        TimelineEntry(21.1, "damage", "掉了70血 剩30血"),
+        TimelineEntry(21.3, "kill", "AK47 爆头"),
+        TimelineEntry(25.2, "smoke_end", "持续6.8秒"),
+        TimelineEntry(25.7, "kill", "M4A1-S"),
+        TimelineEntry(28.5, "kill", "M4A1-S"),
+        TimelineEntry(29.0, "death", None),
+    )
+
+    card = render_event_card(
+        snapshot,
+        _game(snapshot),
+        replace(_situation(), timeline=entries),
+        _event(snapshot),
+    )
+
+    assert (
+        "21.3s〔前期｜本回合第1杀｜近同时掉血，间隔0.2秒〕 "
+        "玩家使用AK47完成击杀 爆头"
+    ) in card
+    assert (
+        "25.7s〔前期｜本回合第2杀｜出烟后0.5秒〕 "
+        "玩家使用M4A1-S完成击杀"
+    ) in card
+    assert "28.5s〔前期｜本回合第3杀〕 玩家使用M4A1-S完成击杀" in card
+    assert "29.0s〔前期｜本回合3杀｜击杀后很快阵亡，间隔0.5秒〕 玩家阵亡" in card

@@ -768,7 +768,7 @@ def test_kill_detail_includes_low_ammo_at_that_snapshot() -> None:
     )
 
     kills = tuple(entry for entry in result.timeline if entry.kind == "kill")
-    assert kills == (TimelineEntry(1.0, "kill", "AK47 弹匣仅剩2发"),)
+    assert kills == (TimelineEntry(1.0, "kill", "AK47 击杀时满血 弹匣仅剩2发"),)
 
 
 def test_damage_detail_omits_armor_and_merges_health_loss() -> None:

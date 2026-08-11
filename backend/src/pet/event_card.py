@@ -54,6 +54,8 @@ _ZERO_SIGNAL_EVENT_FACTS = {
     "round_kills",
 }
 _STAGE_ANNOTATED_TIMELINE_KINDS = frozenset({"kill", "death"})
+_NEARBY_COMBAT_SECONDS = 1.0
+_KILL_INCREASE_PATTERN = re.compile(r"(?:^| )增加(\d+)杀(?: |$)")
 
 
 def render_event_card(
@@ -61,6 +63,8 @@ def render_event_card(
     game: GameState,
     round_situation: RoundSituation,
     event: GameEvent,
+    *,
+    death_after_kill_max_seconds: float = 8.0,
 ) -> str:
     """Render everything the model may know about this moment as Chinese text."""
     sections: list[str | None] = [
@@ -73,6 +77,7 @@ def render_event_card(
             _timeline_section(
                 round_situation.timeline,
                 self_team=round_situation.self_team,
+                death_after_kill_max_seconds=death_after_kill_max_seconds,
             )
         )
     sections.extend(
@@ -214,7 +219,10 @@ def _held_weapon_fact(weapon: WeaponSlot) -> str:
 
 
 def _timeline_section(
-    entries: tuple[TimelineEntry, ...], *, self_team: str | None
+    entries: tuple[TimelineEntry, ...],
+    *,
+    self_team: str | None,
+    death_after_kill_max_seconds: float,
 ) -> str | None:
     if not entries:
         return None
@@ -225,7 +233,10 @@ def _timeline_section(
         else "【本回合】（未观测到开打时刻，秒数从回合起点算起）"
     ]
     bomb_planted = False
-    for entry in entries:
+    round_kills = 0
+    last_kill_seconds: float | None = None
+    for index, entry in enumerate(entries):
+        annotations: list[str] = []
         stage = (
             round_stage_label(
                 entry.seconds,
@@ -236,17 +247,97 @@ def _timeline_section(
             if entry.kind in _STAGE_ANNOTATED_TIMELINE_KINDS
             else None
         )
-        lines.append(_timeline_line(entry, indent="  ", stage=stage))
+        if stage is not None:
+            annotations.append(stage)
+        elif entry.kind in _STAGE_ANNOTATED_TIMELINE_KINDS and not observed_live:
+            annotations.append("阶段不可判断")
+        if entry.kind == "kill":
+            increase = _timeline_kill_increase(entry)
+            round_kills += increase
+            annotations.append(
+                f"本回合第{round_kills}杀"
+                if increase == 1
+                else f"本回合累计{round_kills}杀"
+            )
+            damage_gap = _nearest_entry_gap(
+                entries,
+                index,
+                kind="damage",
+                maximum_seconds=_NEARBY_COMBAT_SECONDS,
+            )
+            if damage_gap is not None:
+                annotations.append(f"近同时掉血，间隔{_seconds(damage_gap)}秒")
+            smoke_gap = _previous_entry_gap(entries, index, kind="smoke_end")
+            if smoke_gap is not None and smoke_gap <= _NEARBY_COMBAT_SECONDS:
+                annotations.append(f"出烟后{_seconds(smoke_gap)}秒")
+            last_kill_seconds = entry.seconds
+        elif entry.kind == "death":
+            if round_kills > 0:
+                annotations.append(f"本回合{round_kills}杀")
+            if (
+                last_kill_seconds is not None
+                and entry.seconds - last_kill_seconds
+                <= death_after_kill_max_seconds
+            ):
+                annotations.append(
+                    "击杀后很快阵亡，间隔"
+                    f"{_seconds(entry.seconds - last_kill_seconds)}秒"
+                )
+        lines.append(
+            _timeline_line(entry, indent="  ", annotations=tuple(annotations))
+        )
         if entry.kind == "bomb" and entry.detail == "已安放":
             bomb_planted = True
     return "\n".join(lines)
 
 
 def _timeline_line(
-    entry: TimelineEntry, *, indent: str, stage: str | None = None
+    entry: TimelineEntry,
+    *,
+    indent: str,
+    annotations: tuple[str, ...] = (),
 ) -> str:
-    stage_text = f"〔{stage}〕" if stage is not None else ""
-    return f"{indent}{_seconds(entry.seconds)}s{stage_text} {_timeline_entry_text(entry)}"
+    annotation_text = f"〔{'｜'.join(annotations)}〕" if annotations else ""
+    return (
+        f"{indent}{_seconds(entry.seconds)}s{annotation_text} "
+        f"{_timeline_entry_text(entry)}"
+    )
+
+
+def _timeline_kill_increase(entry: TimelineEntry) -> int:
+    match = _KILL_INCREASE_PATTERN.search(entry.detail or "")
+    return int(match.group(1)) if match is not None else 1
+
+
+def _nearest_entry_gap(
+    entries: tuple[TimelineEntry, ...],
+    index: int,
+    *,
+    kind: str,
+    maximum_seconds: float,
+) -> float | None:
+    gaps = (
+        abs(entry.seconds - entries[index].seconds)
+        for candidate_index, entry in enumerate(entries)
+        if candidate_index != index and entry.kind == kind
+    )
+    nearby = tuple(gap for gap in gaps if gap <= maximum_seconds)
+    return min(nearby) if nearby else None
+
+
+def _previous_entry_gap(
+    entries: tuple[TimelineEntry, ...], index: int, *, kind: str
+) -> float | None:
+    current_seconds = entries[index].seconds
+    previous = next(
+        (
+            entry
+            for entry in reversed(entries[:index])
+            if entry.kind == kind and entry.seconds <= current_seconds
+        ),
+        None,
+    )
+    return current_seconds - previous.seconds if previous is not None else None
 
 
 def _timeline_entry_text(entry: TimelineEntry) -> str:
@@ -289,7 +380,11 @@ def _timeline_entry_text(entry: TimelineEntry) -> str:
 def _timeline_kill_text(detail: str | None) -> str:
     if not detail:
         return "玩家完成击杀"
-    marker = re.search(r"(?:^| )(?=(?:爆头|\d+个爆头|增加\d+杀|弹匣仅剩\d+发))", detail)
+    marker = re.search(
+        r"(?:^| )(?=(?:爆头|\d+个爆头|增加\d+杀|击杀时满血|"
+        r"击杀时剩\d+血|弹匣仅剩\d+发))",
+        detail,
+    )
     if marker is None:
         return f"玩家使用{detail}完成击杀"
     weapon = detail[: marker.start()].strip()

@@ -226,7 +226,7 @@ def test_missing_environment_variable_has_clear_error(
         OpenRouterClient.from_env()
 
 
-def test_streamed_analysis_parses_two_fields_usage_and_first_line_latency() -> None:
+def test_streamed_analysis_parses_three_fields_usage_and_event_line_latency() -> None:
     request_body: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -234,6 +234,8 @@ def test_streamed_analysis_parses_two_fields_usage_and_first_line_latency() -> N
         body = "".join(
             (
                 ': OPENROUTER PROCESSING\n\n',
+                'data: {"model":"vendor/model-actual","provider":"fast-provider",'
+                '"choices":[{"delta":{"content":"核对：类型=爆头击杀；武器=AK47\\n"}}]}\n\n',
                 'data: {"model":"vendor/model-actual","provider":"fast-provider",'
                 '"choices":[{"delta":{"content":"事件：爆头击杀\\n"}}]}\n\n',
                 'data: {"model":"vendor/model-actual","provider":"fast-provider",'
@@ -261,16 +263,19 @@ def test_streamed_analysis_parses_two_fields_usage_and_first_line_latency() -> N
             temperature=0.2,
             event_timeout_seconds=3.0,
             full_timeout_seconds=6.0,
+            seed=42,
         )
     finally:
         client.close()
 
     assert request_body["stream"] is True
     assert request_body["reasoning"] == {"effort": "none"}
+    assert request_body["seed"] == 42
     assert request_body["provider"] == {
         "only": ["fast-provider"],
         "allow_fallbacks": False,
     }
+    assert result.audit_text == "类型=爆头击杀；武器=AK47"
     assert result.event_text == "爆头击杀"
     assert result.scene_text == "掉血后紧接着完成击杀。比分仍然落后。"
     assert 0 <= result.event_latency_seconds < result.latency_seconds
@@ -290,6 +295,8 @@ def test_streamed_analysis_event_deadline_aborts_without_retry() -> None:
         return httpx.Response(
             200,
             text=(
+                'data: {"model":"vendor/model-actual",'
+                '"choices":[{"delta":{"content":"核对：类型=击杀\\n"}}]}\n\n'
                 'data: {"model":"vendor/model-actual",'
                 '"choices":[{"delta":{"content":"事件：太慢了\\n"}}]}\n\n'
                 "data: [DONE]\n\n"
@@ -328,6 +335,8 @@ def test_streamed_analysis_full_deadline_aborts_without_retry() -> None:
             200,
             text=(
                 'data: {"model":"vendor/model-actual",'
+                '"choices":[{"delta":{"content":"核对：类型=击杀\\n"}}]}\n\n'
+                'data: {"model":"vendor/model-actual",'
                 '"choices":[{"delta":{"content":"事件：击杀\\n"}}]}\n\n'
                 'data: {"model":"vendor/model-actual",'
                 '"choices":[{"delta":{"content":"场面：描述。描述。"}}]}\n\n'
@@ -348,15 +357,15 @@ def test_streamed_analysis_full_deadline_aborts_without_retry() -> None:
                 user_prompt="card",
                 max_tokens=192,
                 temperature=0.2,
-                event_timeout_seconds=0.2,
-                full_timeout_seconds=0.25,
+                event_timeout_seconds=0.4,
+                full_timeout_seconds=0.45,
             )
     finally:
         client.close()
 
     assert request_count == 1
     assert caught.value.partial_event_text == "击杀"
-    assert caught.value.event_latency_seconds == pytest.approx(0.1)
+    assert caught.value.event_latency_seconds == pytest.approx(0.3)
 
 
 def test_streamed_analysis_surfaces_midstream_error_without_retry() -> None:
@@ -368,6 +377,8 @@ def test_streamed_analysis_surfaces_midstream_error_without_retry() -> None:
         return httpx.Response(
             200,
             text=(
+                'data: {"model":"vendor/model-actual",'
+                '"choices":[{"delta":{"content":"核对：类型=击杀\\n"}}]}\n\n'
                 'data: {"model":"vendor/model-actual",'
                 '"choices":[{"delta":{"content":"事件：击杀\\n"}}]}\n\n'
                 'data: {"error":{"message":"provider disconnected"},'
@@ -400,9 +411,9 @@ def test_streamed_analysis_surfaces_midstream_error_without_retry() -> None:
     "text",
     (
         "只有一行",
-        "事件：击杀\n缺少场面前缀",
-        "事件：\n场面：描述",
-        "事件：击杀\n场面：描述\n多余：内容",
+        "核对：类型=击杀\n事件：击杀",
+        "核对：类型=击杀\n事件：\n场面：描述",
+        "核对：类型=击杀\n事件：击杀\n场面：描述\n多余：内容",
     ),
 )
 def test_analysis_protocol_rejects_malformed_output(text: str) -> None:
