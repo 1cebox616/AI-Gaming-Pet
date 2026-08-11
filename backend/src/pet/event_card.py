@@ -18,6 +18,7 @@ from pet.situation import (
     is_carrying_bomb,
     is_currently_flashed,
     is_currently_smoked,
+    round_stage_label,
     weapon_display_name,
 )
 
@@ -52,6 +53,7 @@ _ZERO_SIGNAL_EVENT_FACTS = {
     "count",
     "round_kills",
 }
+_STAGE_ANNOTATED_TIMELINE_KINDS = frozenset({"kill", "death"})
 
 
 def render_event_card(
@@ -67,7 +69,12 @@ def render_event_card(
     ]
     current_round = human_round_number(snapshot)
     if round_situation.round_number == current_round:
-        sections.append(_timeline_section(round_situation.timeline))
+        sections.append(
+            _timeline_section(
+                round_situation.timeline,
+                self_team=round_situation.self_team,
+            )
+        )
     sections.extend(
         (
             _section("全场", _match_statistics(snapshot, game)),
@@ -206,7 +213,9 @@ def _held_weapon_fact(weapon: WeaponSlot) -> str:
     return fact
 
 
-def _timeline_section(entries: tuple[TimelineEntry, ...]) -> str | None:
+def _timeline_section(
+    entries: tuple[TimelineEntry, ...], *, self_team: str | None
+) -> str | None:
     if not entries:
         return None
     observed_live = any(entry.kind == "round_live" for entry in entries)
@@ -215,12 +224,29 @@ def _timeline_section(entries: tuple[TimelineEntry, ...]) -> str | None:
         if observed_live
         else "【本回合】（未观测到开打时刻，秒数从回合起点算起）"
     ]
-    lines.extend(_timeline_line(entry, indent="  ") for entry in entries)
+    bomb_planted = False
+    for entry in entries:
+        stage = (
+            round_stage_label(
+                entry.seconds,
+                bomb_planted=bomb_planted,
+                self_team=self_team,
+                observed_live=observed_live,
+            )
+            if entry.kind in _STAGE_ANNOTATED_TIMELINE_KINDS
+            else None
+        )
+        lines.append(_timeline_line(entry, indent="  ", stage=stage))
+        if entry.kind == "bomb" and entry.detail == "已安放":
+            bomb_planted = True
     return "\n".join(lines)
 
 
-def _timeline_line(entry: TimelineEntry, *, indent: str) -> str:
-    return f"{indent}{_seconds(entry.seconds)}s {_timeline_entry_text(entry)}"
+def _timeline_line(
+    entry: TimelineEntry, *, indent: str, stage: str | None = None
+) -> str:
+    stage_text = f"〔{stage}〕" if stage is not None else ""
+    return f"{indent}{_seconds(entry.seconds)}s{stage_text} {_timeline_entry_text(entry)}"
 
 
 def _timeline_entry_text(entry: TimelineEntry) -> str:

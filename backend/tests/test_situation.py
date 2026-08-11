@@ -21,6 +21,7 @@ from pet.situation import (
     is_eco_round,
     is_low_ammo,
     is_low_health,
+    round_stage_label,
 )
 
 SELF_ID = "76561198000000001"
@@ -151,6 +152,59 @@ def test_timeline_kind_contract_contains_exactly_eighteen_values() -> None:
         "bomb_drop",
         "assist",
         "death",
+    )
+
+
+@pytest.mark.parametrize(
+    ("seconds", "bomb_planted", "team", "expected"),
+    (
+        (0.0, False, "T", "开局"),
+        (14.9, False, "CT", "开局"),
+        (15.0, False, "T", "前期"),
+        (29.9, False, "CT", "前期"),
+        (30.0, False, "T", "中期"),
+        (69.9, False, "CT", "中期"),
+        (70.0, False, "T", "后期"),
+        (50.0, True, "T", "守包"),
+        (50.0, True, "CT", "反攻包点"),
+        (50.0, True, None, "下包后"),
+    ),
+)
+def test_round_stage_labels_follow_product_clock_and_postplant_roles(
+    seconds: float,
+    bomb_planted: bool,
+    team: str | None,
+    expected: str,
+) -> None:
+    assert (
+        round_stage_label(
+            seconds,
+            bomb_planted=bomb_planted,
+            self_team=team,
+            observed_live=True,
+        )
+        == expected
+    )
+
+
+def test_round_stage_is_unknown_without_live_origin_or_before_live() -> None:
+    assert (
+        round_stage_label(
+            20.0,
+            bomb_planted=False,
+            self_team="T",
+            observed_live=False,
+        )
+        is None
+    )
+    assert (
+        round_stage_label(
+            -0.1,
+            bomb_planted=False,
+            self_team="T",
+            observed_live=True,
+        )
+        is None
     )
 
 
@@ -575,6 +629,41 @@ def test_round_live_rebases_purchase_phase_entries_to_negative_seconds() -> None
     live = next(entry for entry in result.timeline if entry.kind == "round_live")
     assert purchase == TimelineEntry(-1.0, "bought", None)
     assert live == TimelineEntry(0.0, "round_live", None)
+
+
+def test_warmup_combat_does_not_pollute_the_first_real_round_timeline() -> None:
+    tracker = SituationTracker()
+    session = GameSessionTracker(GSI_SILENCE_SECONDS)
+    warmup = _snapshot(
+        10.0,
+        map_round=0,
+        round_phase="live",
+        round_kills=3,
+        health=36,
+    ).model_copy(update={"map_phase": "warmup"})
+    freeze = _snapshot(
+        80.0,
+        map_round=0,
+        round_phase="freezetime",
+        round_kills=0,
+        health=100,
+    )
+    live = _snapshot(
+        85.0,
+        map_round=0,
+        round_phase="live",
+        round_kills=0,
+        health=100,
+    )
+
+    warmup_result = tracker.observe(warmup, session.observe(warmup))
+    tracker.observe(freeze, session.observe(freeze))
+    result = tracker.observe(live, session.observe(live))
+
+    assert warmup_result.timeline == ()
+    assert TimelineEntry(0.0, "round_live", None) in result.timeline
+    assert all(entry.seconds >= -5.0 for entry in result.timeline)
+    assert all(entry.kind not in {"kill", "damage", "death"} for entry in result.timeline)
 
 
 def test_grenade_disappearance_records_only_after_live_and_not_on_death() -> None:

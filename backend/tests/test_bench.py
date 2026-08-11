@@ -14,10 +14,12 @@ from pet.bench import (
     BenchResult,
     CaseScore,
     FieldScore,
+    answer_key_sha256,
     calculate_length_statistics,
     check_output,
     commentary_length_statistics,
     load_analysis_scores,
+    load_event_answer_keys,
     main,
     render_latency_report,
     render_report,
@@ -34,6 +36,11 @@ from pet.llm import LlmAnalysisResult, LlmError, LlmResult, LlmUsage
 from pet.prompt import load_system_prompt
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
+ANSWER_KEY_PATH = (
+    Path(__file__).parents[1]
+    / "bench-reports"
+    / "m3-t5.6-event-answer-keys.json"
+)
 
 
 class FakeLlmClient:
@@ -573,6 +580,101 @@ def test_human_score_template_round_trips_and_reports_both_thresholds(
             whole_correct=False,
             correct_atoms=2,
             total_atoms=1,
+        )
+
+
+def test_product_event_answer_key_contains_exactly_the_28_stable_cases() -> None:
+    answer_keys = load_event_answer_keys(ANSWER_KEY_PATH)
+    expected_ids = (
+        "gsi-20260809-112213:001:kill:r6",
+        "gsi-20260809-112213:002:multi_kill:r6",
+        "gsi-20260809-112213:003:multi_kill:r6",
+        "gsi-20260809-112213:004:round_win:r6",
+        "gsi-20260809-121524-745957:001:kill_headshot:r1",
+        "gsi-20260809-121524-745957:002:death_after_kill:r2",
+        "gsi-20260809-121524-745957:003:round_win:r2",
+        "gsi-20260810-114649-321103:001:kill_headshot:r2",
+        "gsi-20260810-114649-321103:002:multi_kill:r2",
+        "gsi-20260810-114649-321103:003:round_loss:r2",
+        "gsi-20260810-114649-321103:004:kill:r3",
+        "gsi-20260810-114649-321103:005:death:r3",
+        "gsi-20260810-114649-321103:006:kill:r4",
+        "gsi-20260810-114649-321103:007:round_loss:r4",
+        "gsi-20260810-114649-321103:008:death:r5",
+        "gsi-20260810-154052-044137:001:round_win:r1",
+        "gsi-20260810-154052-044137:002:kill:r2",
+        "gsi-20260810-154052-044137:003:multi_kill:r2",
+        "gsi-20260810-154052-044137:004:round_loss:r2",
+        "gsi-20260810-154052-044137:005:round_win:r3",
+        "gsi-20260810-154052-044137:006:kill_headshot:r4",
+        "gsi-20260810-154052-044137:007:round_win:r4",
+        "gsi-20260810-154052-044137:008:kill:r5",
+        "gsi-20260810-175001-250246:001:death:r2",
+        "gsi-20260810-175001-250246:002:round_loss:r2",
+        "gsi-20260810-175001-250246:003:kill:r3",
+        "gsi-20260810-175001-250246:004:multi_kill:r3",
+        "gsi-20260810-175001-250246:005:death:r3",
+    )
+
+    assert tuple(case.case_id for case in answer_keys.cases) == expected_ids
+    assert all(case.expected_summary.strip() for case in answer_keys.cases)
+    assert all(case.required_facts for case in answer_keys.cases)
+
+
+def test_event_only_scores_bind_answer_key_and_omit_scene_metric(
+    real_recording: Path,
+    prompts_directory: Path,
+    tmp_path: Path,
+) -> None:
+    result = run_stream_analysis(
+        (real_recording,),
+        model="vendor/model-under-test",
+        provider="provider-under-test",
+        client=FakeAnalysisClient(),
+        max_events=20,
+        event_timeout_seconds=3.0,
+        full_timeout_seconds=6.0,
+        prompts_directory=prompts_directory,
+    )
+    digest = answer_key_sha256(ANSWER_KEY_PATH)
+    template_path = tmp_path / "event-only-scores.json"
+    write_analysis_score_template(
+        result,
+        template_path,
+        scope="event_only",
+        answer_key_digest=digest,
+    )
+    template = load_analysis_scores(template_path)
+
+    assert template.scope == "event_only"
+    assert template.answer_key_sha256 == digest
+    assert template.cases[0].scene is None
+
+    passing = AnalysisScoreFile(
+        scope="event_only",
+        answer_key_sha256=digest,
+        cases=(
+            CaseScore(
+                case_id=result.events[0].case_id,
+                event=FieldScore(
+                    whole_correct=True,
+                    correct_atoms=3,
+                    total_atoms=3,
+                ),
+            ),
+        ),
+    )
+    report = render_stream_analysis_report(result, passing)
+
+    assert "评分范围：仅事件短句" in report
+    assert f"Answer key SHA-256：`{digest}`" in report
+    assert "事件：整句 100.0% ✓；原子事实 100.0%（3/3） ✓" in report
+    assert "场面：整句" not in report
+
+    with pytest.raises(ValueError, match="必须绑定 answer key"):
+        AnalysisScoreFile(
+            scope="event_only",
+            cases=passing.cases,
         )
 
 

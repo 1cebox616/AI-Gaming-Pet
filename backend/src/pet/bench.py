@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 import statistics
 import sys
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -269,7 +269,7 @@ class CaseScore(BaseModel):
 
     case_id: str
     event: FieldScore
-    scene: FieldScore
+    scene: FieldScore | None = None
 
 
 class AnalysisScoreFile(BaseModel):
@@ -277,7 +277,47 @@ class AnalysisScoreFile(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    scope: Literal["event_and_scene", "event_only"] = "event_and_scene"
+    answer_key_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     cases: tuple[CaseScore, ...]
+
+    @model_validator(mode="after")
+    def fields_match_declared_scope(self) -> Self:
+        if self.scope == "event_only":
+            if self.answer_key_sha256 is None:
+                raise ValueError("event_only 评分必须绑定 answer key SHA-256")
+            if any(case.scene is not None for case in self.cases):
+                raise ValueError("event_only 评分不得包含场面分数")
+        elif any(case.scene is None for case in self.cases):
+            raise ValueError("event_and_scene 评分必须包含场面分数")
+        return self
+
+
+class EventAnswerKeyCase(BaseModel):
+    """One product-approved semantic target for a stable real-recording case."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str
+    expected_summary: str = Field(min_length=1)
+    required_facts: tuple[str, ...] = Field(min_length=1)
+    forbidden_claims: tuple[str, ...] = ()
+    notes: str = ""
+
+
+class EventAnswerKeyFile(BaseModel):
+    """The immutable semantic rubric for one event-only benchmark set."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cases: tuple[EventAnswerKeyCase, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def case_ids_are_unique(self) -> Self:
+        case_ids = tuple(case.case_id for case in self.cases)
+        if len(case_ids) != len(set(case_ids)):
+            raise ValueError("answer key 包含重复 case_id")
+        return self
 
 
 def calculate_length_statistics(texts: Sequence[str]) -> LengthStatistics:
@@ -935,9 +975,33 @@ def load_analysis_scores(path: Path) -> AnalysisScoreFile:
     return AnalysisScoreFile.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def write_analysis_score_template(result: AnalysisBenchResult, path: Path) -> None:
+def load_event_answer_keys(path: Path) -> EventAnswerKeyFile:
+    """Load the product-approved event-only rubric from a checked-in artifact."""
+    return EventAnswerKeyFile.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def answer_key_sha256(path: Path) -> str:
+    """Return the digest used to bind manual scores to an immutable rubric."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_analysis_score_template(
+    result: AnalysisBenchResult,
+    path: Path,
+    *,
+    scope: Literal["event_and_scene", "event_only"] = "event_and_scene",
+    answer_key_digest: str | None = None,
+) -> None:
     """Write a complete, deliberately failing score sheet for human review."""
+    if scope == "event_only" and answer_key_digest is None:
+        raise ValueError("event_only 评分模板必须绑定 answer key SHA-256")
     payload = {
+        "scope": scope,
+        **(
+            {"answer_key_sha256": answer_key_digest}
+            if answer_key_digest is not None
+            else {}
+        ),
         "cases": [
             {
                 "case_id": item.case_id,
@@ -948,13 +1012,19 @@ def write_analysis_score_template(result: AnalysisBenchResult, path: Path) -> No
                     "errors": ["未评分"],
                     "notes": "",
                 },
-                "scene": {
-                    "whole_correct": False,
-                    "correct_atoms": 0,
-                    "total_atoms": 1,
-                    "errors": ["未评分"],
-                    "notes": "",
-                },
+                **(
+                    {
+                        "scene": {
+                            "whole_correct": False,
+                            "correct_atoms": 0,
+                            "total_atoms": 1,
+                            "errors": ["未评分"],
+                            "notes": "",
+                        }
+                    }
+                    if scope == "event_and_scene"
+                    else {}
+                ),
             }
             for item in result.events
         ]
@@ -988,11 +1058,22 @@ def _score_summary_lines_for_ids(
     ordered = tuple(by_id[case_id] for case_id in expected_ids)
     if not ordered:
         return ["- 没有可评分事件"]
-    lines: list[str] = []
-    for label, fields in (
-        ("事件", tuple(item.event for item in ordered)),
-        ("场面", tuple(item.scene for item in ordered)),
-    ):
+    lines = [
+        "- 评分范围："
+        + ("仅事件短句" if scores.scope == "event_only" else "事件短句与场面描述")
+    ]
+    if scores.answer_key_sha256 is not None:
+        lines.append(f"- Answer key SHA-256：`{scores.answer_key_sha256}`")
+    scored_fields: list[tuple[str, tuple[FieldScore, ...]]] = [
+        ("事件", tuple(item.event for item in ordered))
+    ]
+    if scores.scope == "event_and_scene":
+        scenes = tuple(item.scene for item in ordered)
+        assert all(scene is not None for scene in scenes)
+        scored_fields.append(
+            ("场面", tuple(scene for scene in scenes if scene is not None))
+        )
+    for label, fields in scored_fields:
         whole_rate = sum(item.whole_correct for item in fields) / len(fields)
         correct_atoms = sum(item.correct_atoms for item in fields)
         total_atoms = sum(item.total_atoms for item in fields)

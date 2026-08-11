@@ -20,6 +20,10 @@ ECO_EQUIP_THRESHOLD = 2000
 # One chambered round is the last-shot warning point before an empty magazine.
 LOW_AMMO_THRESHOLD = 1
 TIMELINE_MAX_ENTRIES = 25
+# Product-defined phase buckets for the roughly 110-second live round clock.
+ROUND_OPENING_END_SECONDS = 15.0
+ROUND_EARLY_END_SECONDS = 30.0
+ROUND_LATE_START_SECONDS = 70.0
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +84,7 @@ TimelineKind = Literal[
     "assist",
     "death",
 ]
+RoundStage = Literal["开局", "前期", "中期", "后期", "守包", "反攻包点", "下包后"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +128,12 @@ class SituationTracker:
 
     def observe(self, snapshot: GameSnapshot, game: GameState) -> RoundSituation:
         """Fold one snapshot into the running per-round accumulations."""
+        if game.state == "warmup":
+            # Warmup and the first real round both commonly report map.round == 0.
+            # Keeping warmup baselines would therefore rebase warmup combat to large
+            # negative timestamps when the first real round becomes live.
+            self.reset()
+            return self._current
         if game.subject_is_self is not True:
             self._close_effect_intervals()
             return self._current
@@ -658,7 +669,6 @@ class SituationTracker:
         if self._last_self_ts is None:
             return 0.0
         return max(0.0, ts - self._last_self_ts)
-
     def _close_effect_intervals(
         self,
         *,
@@ -696,6 +706,31 @@ class SituationTracker:
         if timeline is None:
             self._current = replace(self._current, timeline=tuple(result))
         return result
+
+
+def round_stage_label(
+    seconds: float,
+    *,
+    bomb_planted: bool,
+    self_team: str | None,
+    observed_live: bool,
+) -> RoundStage | None:
+    """Classify a timeline moment without asking a model to do clock arithmetic."""
+    if not observed_live or seconds < 0:
+        return None
+    if bomb_planted:
+        if self_team == "T":
+            return "守包"
+        if self_team == "CT":
+            return "反攻包点"
+        return "下包后"
+    if seconds < ROUND_OPENING_END_SECONDS:
+        return "开局"
+    if seconds < ROUND_EARLY_END_SECONDS:
+        return "前期"
+    if seconds >= ROUND_LATE_START_SECONDS:
+        return "后期"
+    return "中期"
 
 
 def _positive_increase(previous: int | None, current: int | None) -> int:
