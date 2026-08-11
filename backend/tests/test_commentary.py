@@ -18,7 +18,7 @@ from pet.commentary import (
     commentary_category,
     templates_for_map,
 )
-from pet.commentary_rules import CALLOUT_TERMS, FORBIDDEN_RAW_CURSES
+from pet.commentary_rules import CALLOUT_TERMS, find_forbidden_raw_curses
 from pet.commentary_templates import (
     COMMENTARY_TEMPLATES,
     CommentaryCategory,
@@ -174,10 +174,15 @@ def test_all_dialogue_avoids_unmasked_raw_curses() -> None:
         for utterance in utterances
     )
     assert all(
-        forbidden not in text
+        not find_forbidden_raw_curses(text)
         for text in (*commentary_texts, *idle_texts)
-        for forbidden in FORBIDDEN_RAW_CURSES
     )
+
+
+def test_raw_curse_allowlist_keeps_benign_words_without_hiding_real_hits() -> None:
+    assert find_forbidden_raw_curses("这操作太秀了") == ()
+    assert find_forbidden_raw_curses("趴在草丛里") == ()
+    assert find_forbidden_raw_curses("操") == ("操",)
 
 
 def test_unscoped_dialogue_has_no_map_names_or_callouts() -> None:

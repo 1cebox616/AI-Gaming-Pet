@@ -43,10 +43,12 @@ def _snapshot(
     equip_value: int | None = 2000,
     active_weapon: str | None = "weapon_ak47",
     ammo_clip: int | None = 30,
+    ammo_reserve: int | None = 90,
     weapon_slots: tuple[tuple[str, str | None, str], ...] | None = None,
     bomb_state: str | None = None,
     round_kills: int | None = 0,
     round_killhs: int | None = 0,
+    match_assists: int | None = 0,
     team: str = "CT",
     has_defusekit: bool | None = None,
 ) -> GameSnapshot:
@@ -83,6 +85,8 @@ def _snapshot(
         }
         if ammo_clip is not None:
             weapon["ammo_clip"] = ammo_clip
+        if ammo_reserve is not None:
+            weapon["ammo_reserve"] = ammo_reserve
         weapons["weapon_0"] = weapon
 
     payload = {
@@ -105,6 +109,9 @@ def _snapshot(
             "team": team,
             "state": state,
             "weapons": weapons,
+            "match_stats": (
+                {"assists": match_assists} if match_assists is not None else {}
+            ),
         },
     }
     return parse_snapshot(payload, received_at=ts)
@@ -124,7 +131,7 @@ def _observe_all(snapshots: tuple[GameSnapshot, ...]) -> RoundSituation:
     return current
 
 
-def test_timeline_kind_contract_contains_exactly_fourteen_values() -> None:
+def test_timeline_kind_contract_contains_exactly_eighteen_values() -> None:
     assert get_args(TimelineKind) == (
         "bought",
         "round_live",
@@ -136,9 +143,13 @@ def test_timeline_kind_contract_contains_exactly_fourteen_values() -> None:
         "damage",
         "primary_weapon",
         "ammo_low",
+        "reload",
         "grenade_used",
+        "grenade_pickup",
         "bomb",
         "bomb_pickup",
+        "bomb_drop",
+        "assist",
         "death",
     )
 
@@ -533,7 +544,37 @@ def test_round_live_records_only_freezetime_to_live_transition() -> None:
     live_entries = tuple(
         entry for entry in result.timeline if entry.kind == "round_live"
     )
-    assert live_entries == (TimelineEntry(2.0, "round_live", None),)
+    assert live_entries == (TimelineEntry(0.0, "round_live", None),)
+
+
+def test_round_live_rebases_purchase_phase_entries_to_negative_seconds() -> None:
+    result = _observe_all(
+        (
+            _snapshot(
+                10.0,
+                round_phase="freezetime",
+                money=5000,
+                equip_value=1000,
+            ),
+            _snapshot(
+                11.0,
+                round_phase="freezetime",
+                money=3000,
+                equip_value=3000,
+            ),
+            _snapshot(
+                12.0,
+                round_phase="live",
+                money=3000,
+                equip_value=3000,
+            ),
+        )
+    )
+
+    purchase = next(entry for entry in result.timeline if entry.kind == "bought")
+    live = next(entry for entry in result.timeline if entry.kind == "round_live")
+    assert purchase == TimelineEntry(-1.0, "bought", None)
+    assert live == TimelineEntry(0.0, "round_live", None)
 
 
 def test_grenade_disappearance_records_only_after_live_and_not_on_death() -> None:
@@ -565,7 +606,28 @@ def test_grenade_disappearance_records_only_after_live_and_not_on_death() -> Non
     )
 
     grenades = tuple(entry for entry in result.timeline if entry.kind == "grenade_used")
-    assert grenades == (TimelineEntry(3.0, "grenade_used", "扔了烟雾弹"),)
+    assert grenades == (TimelineEntry(1.0, "grenade_used", "扔了烟雾弹"),)
+
+
+def test_grenade_pickup_records_only_after_round_is_live() -> None:
+    rifle = (("weapon_ak47", "Rifle", "active"),)
+    with_flash = rifle + (("weapon_flashbang", "Grenade", "holstered"),)
+    with_two_grenades = with_flash + (
+        ("weapon_smokegrenade", "Grenade", "holstered"),
+    )
+    result = _observe_all(
+        (
+            _snapshot(10.0, round_phase="freezetime", weapon_slots=rifle),
+            _snapshot(11.0, round_phase="freezetime", weapon_slots=with_flash),
+            _snapshot(12.0, round_phase="live", weapon_slots=with_flash),
+            _snapshot(13.0, round_phase="live", weapon_slots=with_two_grenades),
+        )
+    )
+
+    pickups = tuple(
+        entry for entry in result.timeline if entry.kind == "grenade_pickup"
+    )
+    assert pickups == (TimelineEntry(1.0, "grenade_pickup", "捡到烟雾弹"),)
 
 
 def test_ammo_low_rearms_after_weapon_switch_and_reload() -> None:
@@ -589,6 +651,25 @@ def test_ammo_low_rearms_after_weapon_switch_and_reload() -> None:
     )
 
 
+def test_reload_requires_clip_up_and_reserve_down_on_same_held_weapon() -> None:
+    reloaded = _observe_all(
+        (
+            _snapshot(10.0, ammo_clip=3, ammo_reserve=60),
+            _snapshot(11.0, ammo_clip=30, ammo_reserve=33),
+        )
+    )
+    reserve_unchanged = _observe_all(
+        (
+            _snapshot(10.0, ammo_clip=3, ammo_reserve=60),
+            _snapshot(11.0, ammo_clip=30, ammo_reserve=60),
+        )
+    )
+
+    reloads = tuple(entry for entry in reloaded.timeline if entry.kind == "reload")
+    assert reloads == (TimelineEntry(1.0, "reload", "换弹 AK47"),)
+    assert all(entry.kind != "reload" for entry in reserve_unchanged.timeline)
+
+
 def test_kill_detail_includes_low_ammo_at_that_snapshot() -> None:
     result = _observe_all(
         (
@@ -601,7 +682,7 @@ def test_kill_detail_includes_low_ammo_at_that_snapshot() -> None:
     assert kills == (TimelineEntry(1.0, "kill", "AK47 弹匣仅剩2发"),)
 
 
-def test_damage_detail_includes_and_merges_actual_armor_loss() -> None:
+def test_damage_detail_omits_armor_and_merges_health_loss() -> None:
     result = _observe_all(
         (
             _snapshot(10.0, health=100, armor=100),
@@ -612,25 +693,71 @@ def test_damage_detail_includes_and_merges_actual_armor_loss() -> None:
 
     damage = tuple(entry for entry in result.timeline if entry.kind == "damage")
     assert damage == (
-        TimelineEntry(1.0, "damage", "掉了50血、15甲 剩50血、85甲"),
+        TimelineEntry(1.0, "damage", "掉了50血 剩50血"),
     )
 
 
-def test_bomb_pickup_records_false_to_true_but_never_infers_a_drop() -> None:
+def test_bomb_pickup_and_alive_drop_are_recorded_but_death_is_not_a_drop() -> None:
     rifle = (("weapon_ak47", "Rifle", "active"),)
     rifle_and_bomb = rifle + (("weapon_c4", "C4", "holstered"),)
-    result = _observe_all(
+    alive_drop = _observe_all(
         (
             _snapshot(10.0, weapon_slots=rifle),
             _snapshot(11.0, weapon_slots=rifle_and_bomb),
-            _snapshot(12.0, health=0, weapon_slots=()),
+            _snapshot(12.0, health=100, weapon_slots=rifle),
+        )
+    )
+    death = _observe_all(
+        (
+            _snapshot(10.0, weapon_slots=rifle_and_bomb),
+            _snapshot(11.0, health=0, weapon_slots=()),
         )
     )
 
     bomb_entries = tuple(
-        entry for entry in result.timeline if entry.kind == "bomb_pickup"
+        entry
+        for entry in alive_drop.timeline
+        if entry.kind in {"bomb_pickup", "bomb_drop"}
     )
-    assert bomb_entries == (TimelineEntry(1.0, "bomb_pickup", None),)
+    assert bomb_entries == (
+        TimelineEntry(1.0, "bomb_pickup", None),
+        TimelineEntry(2.0, "bomb_drop", None),
+    )
+    assert all(entry.kind != "bomb_drop" for entry in death.timeline)
+
+
+def test_assist_records_each_match_assist_increase() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, match_assists=2),
+            _snapshot(11.0, match_assists=3),
+            _snapshot(12.0, match_assists=5),
+        )
+    )
+
+    assists = tuple(entry for entry in result.timeline if entry.kind == "assist")
+    assert assists == (
+        TimelineEntry(1.0, "assist", None),
+        TimelineEntry(2.0, "assist", None),
+    )
+
+
+def test_death_closes_active_flash_and_smoke_as_unfinished_intervals() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, flashed=0, smoked=0, health=100),
+            _snapshot(11.0, flashed=1, smoked=200, health=100),
+            _snapshot(12.0, flashed=1, smoked=200, health=0),
+        )
+    )
+
+    assert TimelineEntry(
+        2.0, "flash_end", "未结束 已持续1.0秒"
+    ) in result.timeline
+    assert TimelineEntry(
+        2.0, "smoke_end", "未结束 已持续1.0秒"
+    ) in result.timeline
+    assert result.timeline[-1] == TimelineEntry(2.0, "death", None)
 
 
 def test_purchase_merge_uses_consecutive_gap_and_exact_three_seconds_is_boundary() -> None:
@@ -740,7 +867,7 @@ def test_pure_derivations_apply_declared_thresholds_and_weapon_state() -> None:
     assert is_low_health(snapshot) is True
     assert is_eco_round(snapshot) is True
     assert is_low_ammo(snapshot) is True
-    assert armor_status(snapshot) == "有甲无头"
+    assert armor_status(snapshot) == "有甲"
     assert held_weapon(snapshot) is not None
     assert held_weapon(snapshot).name == "weapon_deagle"
     assert is_currently_flashed(snapshot) is True

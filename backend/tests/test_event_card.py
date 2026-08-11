@@ -1,8 +1,11 @@
 """GSI-event-card rendering tests based on an existing scrubbed GSI sample."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from pet.events import GameEvent
 from pet.gsi import GameSnapshot, WeaponSlot, parse_snapshot
@@ -76,15 +79,16 @@ def _situation(*, round_number: int | None = 6) -> RoundSituation:
         seconds_since_bomb_planted=8.67891,
         self_team="CT",
         timeline=(
-            TimelineEntry(10.9, "round_live", None),
-            TimelineEntry(12.345, "flash_start", None),
-            TimelineEntry(13.049, "flash_end", "持续0.7秒"),
-            TimelineEntry(20.0, "grenade_used", "扔了烟雾弹"),
-            TimelineEntry(30.0, "ammo_low", "弹匣仅剩1发 M4A1-S"),
-            TimelineEntry(33.149, "kill", "M4A1-S 爆头 弹匣仅剩1发"),
-            TimelineEntry(45.222, "smoke_start", None),
-            TimelineEntry(53.444, "smoke_end", "持续8.2秒"),
-            TimelineEntry(54.0, "bomb_pickup", None),
+            TimelineEntry(-3.9, "bought", None),
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(1.445, "flash_start", None),
+            TimelineEntry(2.149, "flash_end", "持续0.7秒"),
+            TimelineEntry(9.1, "grenade_used", "扔了烟雾弹"),
+            TimelineEntry(19.1, "ammo_low", "弹匣仅剩1发 M4A1-S"),
+            TimelineEntry(22.249, "kill", "M4A1-S 爆头 弹匣仅剩1发"),
+            TimelineEntry(34.322, "smoke_start", None),
+            TimelineEntry(42.544, "smoke_end", "持续8.2秒"),
+            TimelineEntry(43.1, "bomb_pickup", None),
         ),
     )
 
@@ -109,13 +113,19 @@ def _event(snapshot: GameSnapshot) -> GameEvent:
     )
 
 
-def test_all_five_sections_are_present_in_fixed_order_with_full_facts() -> None:
+def test_top_labels_and_five_fact_areas_are_in_fixed_order_with_full_facts() -> None:
     snapshot = _real_snapshot().model_copy(update={"health": 0, "bomb_state": "planted"})
 
     card = render_event_card(snapshot, _game(snapshot), _situation(), _event(snapshot))
 
     headings = [
-        "【对局】",
+        "【游戏模式】",
+        "【地图】",
+        "【回合】",
+        "【比分】",
+        "【我方】",
+        "【局势】",
+        "【连败】",
         "【我】",
         "【本回合】",
         "【全场】",
@@ -125,18 +135,27 @@ def test_all_five_sections_are_present_in_fixed_order_with_full_facts() -> None:
     assert [card.index(heading) for heading in headings] == sorted(
         card.index(heading) for heading in headings
     )
-    assert "休闲 de_anubis 第6回合 CT 2:3 T 我在CT方 我方连败2轮" in card
-    assert "已阵亡 倒地前12血 有甲无头 1750块 装备4100" in card
+    assert "【游戏模式】休闲" in card
+    assert "【地图】de_anubis" in card
+    assert "【回合】第6回合" in card
+    assert "【比分】CT 2 : 3 T" in card
+    assert "【我方】CT" in card
+    assert "【局势】落后" in card
+    assert "【连败】2轮" in card
+    assert "已阵亡 倒地前12血 有甲 1750块 装备4100" in card
     assert "手持M4A1-S 弹匣12/20 备弹40" in card
-    assert "  10.9s 正式开打" in card
-    assert "  12.3s 被闪" in card
-    assert "  20.0s 扔了烟雾弹" in card
-    assert "  30.0s 弹匣仅剩1发 M4A1-S" in card
-    assert "  33.1s 击杀 M4A1-S 爆头 弹匣仅剩1发" in card
-    assert "  53.4s 出烟 持续8.2秒" in card
-    assert "  54.0s 拿到炸弹" in card
+    assert "【本回合】（秒数从正式开打算起）" in card
+    assert "  -3.9s 买了装备" in card
+    assert "  0.0s 正式开打" in card
+    assert "  1.4s 被闪" in card
+    assert "  9.1s 扔了烟雾弹" in card
+    assert "  19.1s 弹匣仅剩1发 M4A1-S" in card
+    assert "  22.2s 击杀 M4A1-S 爆头 弹匣仅剩1发" in card
+    assert "  42.5s 出烟 持续8.2秒" in card
+    assert "  43.1s 拿到包" in card
     assert "12杀 4助攻 5死 MVP1次" in card
     assert "普通死亡 存活89.8秒 本回合1杀" in card
+    assert "本回合第1杀" not in card
     assert card.count("【本回合】") == 1
     for removed_summary in (
         "【本回合时间线】",
@@ -279,7 +298,7 @@ def test_stale_round_situation_is_omitted_while_other_sections_remain() -> None:
     )
 
     assert "【本回合】" not in card
-    assert "【对局】" in card
+    assert "【游戏模式】" in card
     assert "【我】" in card
     assert "【全场】" in card
     assert "【刚刚】" in card
@@ -306,7 +325,11 @@ def test_spectating_keeps_match_round_timeline_and_self_team_but_not_player_data
 
     card = render_event_card(snapshot, game, _situation(), _event(snapshot))
 
-    assert "【对局】休闲 de_anubis 第6回合 CT 2:3 T 我在CT方" in card
+    assert "【游戏模式】休闲" in card
+    assert "【地图】de_anubis" in card
+    assert "【回合】第6回合" in card
+    assert "【比分】CT 2 : 3 T" in card
+    assert "【我方】CT" in card
     assert "【我】" not in card
     assert "【全场】" not in card
     assert "【本回合】" in card
@@ -315,3 +338,112 @@ def test_spectating_keeps_match_round_timeline_and_self_team_but_not_player_data
     assert "5血" not in card
     assert "99个击杀" not in card
     assert "99个爆头击杀" not in card
+
+
+def test_all_eighteen_timeline_kinds_render_the_declared_text() -> None:
+    entries = (
+        TimelineEntry(-2.0, "bought", None),
+        TimelineEntry(0.0, "round_live", None),
+        TimelineEntry(5.0, "flash_start", None),
+        TimelineEntry(10.0, "flash_end", "持续0.8秒"),
+        TimelineEntry(15.0, "smoke_start", None),
+        TimelineEntry(20.0, "smoke_end", "持续6.8秒"),
+        TimelineEntry(25.0, "kill", "AK47 爆头 弹匣仅剩1发"),
+        TimelineEntry(30.0, "damage", "掉了35血 剩65血"),
+        TimelineEntry(35.0, "primary_weapon", "AK47"),
+        TimelineEntry(40.0, "ammo_low", "弹匣仅剩1发 AK47"),
+        TimelineEntry(45.0, "reload", "换弹 AK47"),
+        TimelineEntry(50.0, "grenade_used", "扔了闪光弹"),
+        TimelineEntry(55.0, "grenade_pickup", "捡到烟雾弹"),
+        TimelineEntry(60.0, "bomb", "已安放"),
+        TimelineEntry(65.0, "bomb_pickup", None),
+        TimelineEntry(70.0, "bomb_drop", None),
+        TimelineEntry(75.0, "assist", None),
+        TimelineEntry(80.0, "death", None),
+    )
+    snapshot = _real_snapshot()
+
+    card = render_event_card(
+        snapshot,
+        _game(snapshot),
+        replace(_situation(), timeline=entries),
+        _event(snapshot),
+    )
+
+    expected = (
+        "-2.0s 买了装备",
+        "0.0s 正式开打",
+        "5.0s 被闪",
+        "10.0s 闪光结束 持续0.8秒",
+        "15.0s 进烟",
+        "20.0s 出烟 持续6.8秒",
+        "25.0s 击杀 AK47 爆头 弹匣仅剩1发",
+        "30.0s 掉了35血 剩65血",
+        "35.0s 主武器 AK47",
+        "40.0s 弹匣仅剩1发 AK47",
+        "45.0s 换弹 AK47",
+        "50.0s 扔了闪光弹",
+        "55.0s 捡到烟雾弹",
+        "60.0s 炸弹已安放",
+        "65.0s 拿到包",
+        "70.0s 丢了包",
+        "75.0s 助攻",
+        "80.0s 阵亡",
+    )
+    assert all(text in card for text in expected)
+
+
+def test_unclosed_flash_and_smoke_render_as_still_active_not_normal_end() -> None:
+    snapshot = _real_snapshot()
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(55.0, "flash_start", None),
+            TimelineEntry(57.4, "flash_end", "未结束 已持续1.2秒"),
+            TimelineEntry(58.0, "smoke_start", None),
+            TimelineEntry(64.8, "smoke_end", "未结束 已持续6.8秒"),
+        ),
+    )
+
+    card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
+
+    assert "57.4s 闪光未结束 已持续1.2秒" in card
+    assert "64.8s 仍在烟中 已持续6.8秒" in card
+    assert "57.4s 闪光结束" not in card
+    assert "64.8s 出烟" not in card
+
+
+def test_timeline_without_round_live_declares_fallback_origin() -> None:
+    snapshot = _real_snapshot()
+    situation = replace(
+        _situation(), timeline=(TimelineEntry(3.0, "damage", "掉了10血 剩90血"),)
+    )
+
+    card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
+
+    assert "【本回合】（未观测到开打时刻，秒数从回合起点算起）" in card
+
+
+@pytest.mark.parametrize(
+    ("seconds", "has_marker"),
+    (
+        ((1.0, 2.0, 5.0), True),
+        ((1.0, 2.0), False),
+        ((1.0, 2.0, 5.1), False),
+    ),
+)
+def test_dense_timeline_marker_requires_three_entries_within_four_seconds(
+    seconds: tuple[float, ...], has_marker: bool
+) -> None:
+    snapshot = _real_snapshot()
+    entries = tuple(TimelineEntry(value, "assist", None) for value in seconds)
+
+    card = render_event_card(
+        snapshot,
+        _game(snapshot),
+        replace(_situation(), timeline=entries),
+        _event(snapshot),
+    )
+
+    assert ("── 密集：" in card) is has_marker

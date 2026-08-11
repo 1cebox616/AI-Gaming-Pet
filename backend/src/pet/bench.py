@@ -13,7 +13,7 @@ import statistics
 import sys
 
 from pet.commentary import commentary_category
-from pet.commentary_rules import CALLOUT_TERMS, FORBIDDEN_RAW_CURSES
+from pet.commentary_rules import CALLOUT_TERMS, find_forbidden_raw_curses
 from pet.commentary_templates import COMMENTARY_TEMPLATES, CommentaryCategory
 from pet.config import PersonalityStyle, load_config
 from pet.events import EventType, GameEvent
@@ -181,7 +181,7 @@ def check_output(
             else None
         ),
         callout_terms=tuple(term for term in CALLOUT_TERMS if term in text),
-        raw_curses=tuple(term for term in FORBIDDEN_RAW_CURSES if term in text),
+        raw_curses=find_forbidden_raw_curses(text),
     )
 
 

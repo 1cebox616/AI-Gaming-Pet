@@ -51,6 +51,10 @@ _ZERO_SIGNAL_EVENT_FACTS = {
     "count",
     "round_kills",
 }
+# Three state changes inside four seconds reliably identify a high-signal window
+# without assigning any tactical meaning to what happened there.
+DENSE_TIMELINE_MIN_ENTRIES = 3
+DENSE_TIMELINE_MAX_SPAN_SECONDS = 4.0
 
 
 def render_event_card(
@@ -60,8 +64,8 @@ def render_event_card(
     event: GameEvent,
 ) -> str:
     """Render everything the model may know about this moment as Chinese text."""
-    sections = [
-        _section("对局", _match_facts(snapshot, round_situation)),
+    sections: list[str | None] = [
+        *_match_sections(snapshot, round_situation, event),
         _section("我", _player_facts(snapshot, game, round_situation)),
     ]
     current_round = human_round_number(snapshot)
@@ -81,29 +85,36 @@ def _section(name: str, facts: Iterable[str]) -> str | None:
     return f"【{name}】{content}" if content else None
 
 
-def _match_facts(
-    snapshot: GameSnapshot, round_situation: RoundSituation
+def _match_sections(
+    snapshot: GameSnapshot,
+    round_situation: RoundSituation,
+    event: GameEvent,
 ) -> list[str]:
-    facts: list[str] = []
+    sections: list[str] = []
     if snapshot.map_mode is not None:
-        facts.append(_MODE_LABELS.get(snapshot.map_mode.lower(), snapshot.map_mode))
+        mode = _MODE_LABELS.get(snapshot.map_mode.lower(), snapshot.map_mode)
+        sections.append(f"【游戏模式】{mode}")
     if snapshot.map_name is not None:
-        facts.append(snapshot.map_name)
+        sections.append(f"【地图】{snapshot.map_name}")
     round_number = human_round_number(snapshot)
     if round_number is not None:
-        facts.append(f"第{round_number}回合")
+        sections.append(f"【回合】第{round_number}回合")
     if snapshot.score_ct is not None and snapshot.score_t is not None:
-        facts.append(f"CT {snapshot.score_ct}:{snapshot.score_t} T")
+        sections.append(f"【比分】CT {snapshot.score_ct} : {snapshot.score_t} T")
     if round_situation.self_team in {"CT", "T"}:
-        facts.append(f"我在{round_situation.self_team}方")
+        sections.append(f"【我方】{round_situation.self_team}")
+    score_situation = event.facts.get("score_situation")
+    if isinstance(score_situation, str) and score_situation:
+        sections.append(f"【局势】{score_situation}")
+    if round_situation.self_team in {"CT", "T"}:
         losses = (
             snapshot.ct_consecutive_round_losses
             if round_situation.self_team == "CT"
             else snapshot.t_consecutive_round_losses
         )
         if losses is not None and losses > 0:
-            facts.append(f"我方连败{losses}轮")
-    return facts
+            sections.append(f"【连败】{losses}轮")
+    return sections
 
 
 def _player_facts(
@@ -176,7 +187,7 @@ def _event_facts(event: GameEvent) -> list[str]:
         value = event.facts.get(key)
         if value is not None and not (
             key in _ZERO_SIGNAL_EVENT_FACTS and value == 0
-        ):
+        ) and not (key == "round_kill_index" and value == 1):
             facts.append(renderers[key](value))
     return facts
 
@@ -196,12 +207,46 @@ def _held_weapon_fact(weapon: WeaponSlot) -> str:
 def _timeline_section(entries: tuple[TimelineEntry, ...]) -> str | None:
     if not entries:
         return None
-    lines = ["【本回合】"]
-    lines.extend(
-        f"  {_seconds(entry.seconds)}s {_timeline_entry_text(entry)}"
-        for entry in entries
-    )
+    observed_live = any(entry.kind == "round_live" for entry in entries)
+    lines = [
+        "【本回合】（秒数从正式开打算起）"
+        if observed_live
+        else "【本回合】（未观测到开打时刻，秒数从回合起点算起）"
+    ]
+    index = 0
+    while index < len(entries):
+        dense_end = _dense_segment_end(entries, index)
+        if dense_end is None:
+            lines.append(_timeline_line(entries[index], indent="  "))
+            index += 1
+            continue
+        group = entries[index:dense_end]
+        lines.append(
+            "  ── 密集："
+            f"{_seconds(group[0].seconds)}s–{_seconds(group[-1].seconds)}s "
+            f"内连续 {len(group)} 件事 ──"
+        )
+        lines.extend(_timeline_line(entry, indent="    ") for entry in group)
+        index = dense_end
     return "\n".join(lines)
+
+
+def _dense_segment_end(
+    entries: tuple[TimelineEntry, ...], start: int
+) -> int | None:
+    end = start
+    while (
+        end + 1 < len(entries)
+        and entries[end + 1].seconds - entries[start].seconds
+        <= DENSE_TIMELINE_MAX_SPAN_SECONDS + 1e-9
+    ):
+        end += 1
+    count = end - start + 1
+    return end + 1 if count >= DENSE_TIMELINE_MIN_ENTRIES else None
+
+
+def _timeline_line(entry: TimelineEntry, *, indent: str) -> str:
+    return f"{indent}{_seconds(entry.seconds)}s {_timeline_entry_text(entry)}"
 
 
 def _timeline_entry_text(entry: TimelineEntry) -> str:
@@ -213,10 +258,14 @@ def _timeline_entry_text(entry: TimelineEntry) -> str:
     if entry.kind == "flash_start":
         return "被闪"
     if entry.kind == "flash_end":
+        if detail is not None and detail.startswith("未结束 "):
+            return "闪光" + detail
         return "闪光结束" + (f" {detail}" if detail else "")
     if entry.kind == "smoke_start":
         return "进烟"
     if entry.kind == "smoke_end":
+        if detail is not None and detail.startswith("未结束 "):
+            return "仍在烟中 " + detail.removeprefix("未结束 ")
         return "出烟" + (f" {detail}" if detail else "")
     if entry.kind == "kill":
         return "击杀" + (f" {detail}" if detail else "")
@@ -224,12 +273,16 @@ def _timeline_entry_text(entry: TimelineEntry) -> str:
         return detail or "受到伤害"
     if entry.kind == "primary_weapon":
         return "主武器" + (f" {detail}" if detail else "")
-    if entry.kind in {"ammo_low", "grenade_used"}:
+    if entry.kind in {"ammo_low", "reload", "grenade_used", "grenade_pickup"}:
         return detail or "状态变化"
     if entry.kind == "bomb":
         return "炸弹" + (detail or "状态变化")
     if entry.kind == "bomb_pickup":
-        return "拿到炸弹"
+        return "拿到包"
+    if entry.kind == "bomb_drop":
+        return "丢了包"
+    if entry.kind == "assist":
+        return "助攻"
     return "阵亡"
 
 

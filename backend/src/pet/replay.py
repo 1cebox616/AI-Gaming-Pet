@@ -267,8 +267,8 @@ _PURE_FACTS: tuple[
     (
         _DerivedFact(
             "armor_status",
-            "player.state.armor + player.state.helmet",
-            "按护甲值与头盔组合返回无甲、有甲无头或满甲",
+            "player.state.armor",
+            "按护甲值返回无甲或有甲，不保留无关的具体甲量与头盔细分",
         ),
         armor_status,
     ),
@@ -675,8 +675,8 @@ def _summarize_pure_values(name: str, values: Sequence[object | None]) -> str:
     if name == "armor_status":
         counts = Counter(values)
         return (
-            f"无甲 {counts['无甲']} 次 / 有甲无头 {counts['有甲无头']} 次 / "
-            f"满甲 {counts['满甲']} 次 / 无法判断 {counts[None]} 次"
+            f"无甲 {counts['无甲']} 次 / 有甲 {counts['有甲']} 次 / "
+            f"无法判断 {counts[None]} 次"
         )
     if name == "held_weapon":
         names = [value.name for value in values if isinstance(value, WeaponSlot)]

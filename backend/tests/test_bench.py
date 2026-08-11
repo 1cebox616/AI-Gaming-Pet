@@ -99,7 +99,7 @@ def test_external_prompt_joins_reading_then_personality_and_replaces_limit() -> 
     prompt = load_system_prompt("brother", max_chars=19)
 
     assert prompt.startswith("你在看一份 CS2 对局的实时事实卡")
-    assert prompt.index("## 这张卡的五段") < prompt.index("你是观战朋友打 CS2")
+    assert prompt.index("## 这张卡怎么读") < prompt.index("你是观战朋友打 CS2")
     assert "最多包含 19 个汉字" in prompt
     assert "没有提供的信息不要推断，更不要编造" in prompt
     assert "{max_chars}" not in prompt
