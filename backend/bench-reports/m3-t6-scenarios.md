@@ -98,6 +98,20 @@
 - 必答：剩41血、三杀、M4A1-S、阵亡
 - 禁项：不得出现队友或敌人身份；不得声称玩家所在位置；不得编造伤害来源
 
+### four_kill —— 用 M4A1-S 完成本回合四杀
+- 分类：乙类
+- 模板来源：gsi-20260810-154052-044137.jsonl 第 18–73 行
+- 改造：第71行 set player.state.round_kills=4；第72行 set player.state.round_kills=4；第73行 set player.state.round_kills=4
+- 必答：M4A1-S、四杀
+- 禁项：不得出现队友或敌人身份；不得声称玩家所在位置；不得编造伤害来源
+
+### ace —— 用 M4A1-S 连续完成第四杀和第五杀
+- 分类：乙类
+- 模板来源：gsi-20260810-154052-044137.jsonl 第 18–73 行
+- 改造：第41行 set player.state.round_kills=2；第42行 set player.state.round_kills=2；第43行 set player.state.round_kills=2；第44行 set player.state.round_kills=2；第45行 set player.state.round_kills=2；第46行 set player.state.round_kills=2；第47行 set player.state.round_kills=2；第48行 set player.state.round_kills=2；第49行 set player.state.round_kills=2；第50行 set player.state.round_kills=2；第51行 set player.state.round_kills=2；第52行 set player.state.round_kills=2；第53行 set player.state.round_kills=2；第54行 set player.state.round_kills=2；第55行 set player.state.round_kills=3；第56行 set player.state.round_kills=3；第57行 set player.state.round_kills=3；第58行 set player.state.round_kills=3；第59行 set player.state.round_kills=3；第60行 set player.state.round_kills=3；第61行 set player.state.round_kills=3；第62行 set player.state.round_kills=3；第63行 set player.state.round_kills=3；第64行 set player.state.round_kills=3；第65行 set player.state.round_kills=3；第66行 set player.state.round_kills=3；第67行 set player.state.round_kills=4；第68行 set player.state.round_kills=4；第69行 set player.state.round_kills=4；第70行 set player.state.round_kills=4；第71行 set player.state.round_kills=5；第72行 set player.state.round_kills=5；第73行 set player.state.round_kills=5
+- 必答：M4A1-S、五杀
+- 禁项：不得出现队友或敌人身份；不得声称玩家所在位置；不得编造伤害来源
+
 ### flash_kill —— 被闪期间用 M4A1-S 击杀一人
 - 分类：丙类
 - 模板来源：gsi-20260810-154052-044137.jsonl 第 18–73 行
@@ -154,6 +168,13 @@
 - 必答：烟雾、被闪、M4A1-S、击杀
 - 禁项：不得出现队友或敌人身份；不得声称玩家所在位置；不得编造伤害来源
 
+### burning_kill —— 踩火期间用 AK47 击杀一人，随后阵亡
+- 分类：丙类
+- 模板来源：gsi-20260811-223119-169538.jsonl 第 440–476 行
+- 改造：第463行 set player.state.burning=255；第464行 set player.state.burning=255；第465行 set player.state.burning=255；第466行 set player.state.burning=255；第467行 set player.state.burning=255；第468行 set player.state.burning=255；第469行 set player.state.burning=0
+- 必答：燃烧、AK47、击杀、阵亡
+- 禁项：不得出现队友或敌人身份；不得声称玩家所在位置；不得编造伤害来源
+
 ### bomb_pickup_then_death —— 拿到炸弹后阵亡，死亡不额外记作主动丢包
 - 分类：丁类
 - 模板来源：gsi-20260810-114649-321103.jsonl 第 65–100 行
@@ -203,10 +224,20 @@
 - 必答：炸弹已安放、阵亡、回合失败
 - 禁项：不得出现队友或敌人身份；不得声称玩家所在位置；不得编造伤害来源
 
+### late_defuse —— 炸弹安放 33.4 秒后完成拆除
+- 分类：丁类
+- 模板来源：gsi-20260809-112213.jsonl 第 40–72 行
+- 改造：第66行 set player.team='CT'；第67行 set player.team='CT'；第68行 set player.team='CT'；第69行 set player.team='CT'；第70行 set player.team='CT'；第71行 set player.team='CT'；第72行 set player.team='CT'
+- 必答：炸弹已安放、33.4、炸弹已拆除、回合胜利
+- 禁项：不得出现队友或敌人身份；不得声称玩家所在位置；不得编造伤害来源
+
+### bomb_explosion_win —— T方守包到炸弹爆炸并赢下回合
+- 分类：丁类
+- 模板来源：gsi-20260811-223119-169538.jsonl 第 1470–1493 行
+- 改造：沿用模板中的已观测状态变化，不额外改值
+- 必答：我方T、炸弹已安放、炸弹引爆、回合胜利
+- 禁项：不得出现队友或敌人身份；不得声称玩家所在位置；不得编造伤害来源
+
 ## 未生成的越界场景
 
-- `four_kill`：两个数据清单均只观测到 player.state.round_kills 最大为 3
-- `ace`：ace 需要 round_kills=5，超出数据清单观测范围 0–3
-- `bomb_explosion`：round.bomb 只观测到 planted/defused，从未观测到 exploded
-- `extreme_defuse`：真实模板最晚只观测到下包后 27.4 秒拆除，不足以冒充极限拆包
-- `burning_combo`：player.state.burning 的观测范围为 0–0，规格明确禁止合成非零值
+- 无

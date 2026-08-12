@@ -484,6 +484,7 @@ def _required_event_facts(
             required.append("有显著贡献")
             skeleton = _multikill_event_skeleton(
                 kill_facts,
+                kill_count=round_kills,
                 result=required[0],
                 death_after_kill=death_after_kill,
                 significant_contribution=True,
@@ -507,6 +508,7 @@ def _required_event_facts(
             required.append(death_fact)
         skeleton = _multikill_event_skeleton(
             kill_facts,
+            kill_count=round_kills,
             death_after_kill=death_after_kill,
         )
         if skeleton is not None:
@@ -543,6 +545,7 @@ def _scoped_multikill_facts(kill_facts: list[str]) -> list[str]:
 def _multikill_event_skeleton(
     kill_facts: list[str],
     *,
+    kill_count: int,
     result: str | None = None,
     death_after_kill: bool,
     significant_contribution: bool = False,
@@ -586,7 +589,7 @@ def _multikill_event_skeleton(
         descriptions.append(
             f"{stage}{included_health}{smoke}{weapon}{duel}{headshot}{action}"
         )
-    parts = [*descriptions, _kill_count_label(len(kill_facts))]
+    parts = [*descriptions, _kill_count_label(kill_count)]
     if death_after_kill:
         parts[-1] += "被补"
     if significant_contribution:

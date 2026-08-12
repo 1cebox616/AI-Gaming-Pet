@@ -201,6 +201,32 @@
     ]
   },
   {
+    "case_id": "four_kill",
+    "expected_summary": "用 M4A1-S 完成本回合四杀",
+    "required_facts": [
+      "M4A1-S",
+      "四杀"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "ace",
+    "expected_summary": "用 M4A1-S 连续完成第四杀和第五杀",
+    "required_facts": [
+      "M4A1-S",
+      "五杀"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
     "case_id": "flash_kill",
     "expected_summary": "被闪期间用 M4A1-S 击杀一人",
     "required_facts": [
@@ -318,6 +344,21 @@
     ]
   },
   {
+    "case_id": "burning_kill",
+    "expected_summary": "踩火期间用 AK47 击杀一人，随后阵亡",
+    "required_facts": [
+      "燃烧",
+      "AK47",
+      "击杀",
+      "阵亡"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
     "case_id": "bomb_pickup_then_death",
     "expected_summary": "拿到炸弹后阵亡，死亡不额外记作主动丢包",
     "required_facts": [
@@ -408,6 +449,36 @@
       "炸弹已安放",
       "阵亡",
       "回合失败"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "late_defuse",
+    "expected_summary": "炸弹安放 33.4 秒后完成拆除",
+    "required_facts": [
+      "炸弹已安放",
+      "33.4",
+      "炸弹已拆除",
+      "回合胜利"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "bomb_explosion_win",
+    "expected_summary": "T方守包到炸弹爆炸并赢下回合",
+    "required_facts": [
+      "我方T",
+      "炸弹已安放",
+      "炸弹引爆",
+      "回合胜利"
     ],
     "forbidden_claims": [
       "不得出现队友或敌人身份",

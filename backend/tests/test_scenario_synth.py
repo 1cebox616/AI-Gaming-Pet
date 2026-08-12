@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import json
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,42 +12,41 @@ from pet.config import load_config
 from pet.replay import load_recording, replay_recording
 from pet.scenario_synth import (
     INVENTORY_PATHS,
+    OBSERVED_CONSTRAINTS_PATH,
     SCENARIO_SPECS,
     SCENARIOS_DIRECTORY,
     SYNTHETIC_NAME,
     SYNTHETIC_STEAMID,
     Mutation,
     load_inventory_constraints,
-    synthesize_scenario,
+    validate_mutation,
 )
 
 
 def test_unknown_inventory_path_aborts_synthesis() -> None:
-    spec = replace(
-        SCENARIO_SPECS[0],
-        mutations=(Mutation(18, "player.state.not_a_real_field", "set", 1),),
-    )
+    constraints = load_inventory_constraints(INVENTORY_PATHS)
 
     with pytest.raises(ValueError, match="不在数据清单白名单"):
-        synthesize_scenario(spec)
+        validate_mutation(
+            Mutation(18, "player.state.not_a_real_field", "set", 1),
+            constraints,
+        )
 
 
 @pytest.mark.parametrize(
     ("path", "value", "message"),
     (
         ("player.state.flashed", 255, "超出观测范围"),
-        ("player.state.burning", 1, "超出观测范围"),
+        ("player.state.burning", 256, "超出观测范围"),
     ),
 )
 def test_out_of_range_state_value_aborts_synthesis(
     path: str, value: int, message: str
 ) -> None:
-    spec = replace(
-        SCENARIO_SPECS[0], mutations=(Mutation(18, path, "set", value),)
-    )
+    constraints = load_inventory_constraints(INVENTORY_PATHS)
 
     with pytest.raises(ValueError, match=message):
-        synthesize_scenario(spec)
+        validate_mutation(Mutation(18, path, "set", value), constraints)
 
 
 def test_inventory_reports_provide_positive_path_constraints() -> None:
@@ -58,18 +55,13 @@ def test_inventory_reports_provide_positive_path_constraints() -> None:
     assert "player.state.flashed" in constraints
     assert constraints["player.state.flashed"].maximum == 1
     assert constraints["player.state.burning"].minimum == 0
-    assert constraints["player.state.burning"].maximum == 0
+    assert constraints["player.state.burning"].maximum == 255
+    assert constraints["player.state.round_kills"].maximum == 6
+    evidence = OBSERVED_CONSTRAINTS_PATH.read_text(encoding="utf-8")
+    assert "76561" not in evidence
 
 
 def test_synthetic_products_scrub_all_source_identities() -> None:
-    source_identities: set[str] = set()
-    for spec in SCENARIO_SPECS:
-        filename = spec.template_source.split(" 第 ", 1)[0]
-        source = SCENARIOS_DIRECTORY.parent / "recordings" / filename
-        for line in source.read_text(encoding="utf-8").splitlines():
-            wrapper = json.loads(line)
-            _collect_source_identities(wrapper, source_identities)
-
     combined = "".join(
         path.read_text(encoding="utf-8")
         for path in SCENARIOS_DIRECTORY.glob("*.jsonl")
@@ -77,7 +69,9 @@ def test_synthetic_products_scrub_all_source_identities() -> None:
     assert "76561" not in combined
     assert SYNTHETIC_STEAMID in combined
     assert SYNTHETIC_NAME in combined
-    assert all(identity not in combined for identity in source_identities)
+    for path in SCENARIOS_DIRECTORY.glob("*.jsonl"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            _assert_placeholder_identities(json.loads(line))
 
 
 def test_every_scenario_replays_and_renders_declared_facts() -> None:
@@ -114,6 +108,7 @@ def test_every_scenario_replays_and_renders_declared_facts() -> None:
 
 
 def test_generated_values_respect_flash_and_burn_observations() -> None:
+    observed_burning = False
     for path in SCENARIOS_DIRECTORY.glob("*.jsonl"):
         for line in path.read_text(encoding="utf-8").splitlines():
             wrapper = json.loads(line)
@@ -121,22 +116,36 @@ def test_generated_values_respect_flash_and_burn_observations() -> None:
                 if field == "flashed":
                     assert isinstance(value, int) and 0 <= value <= 1, path.name
                 elif field == "burning":
-                    assert value == 0, path.name
+                    assert isinstance(value, int) and 0 <= value <= 255, path.name
+                    observed_burning = observed_burning or value > 0
+    assert observed_burning
 
 
-def _collect_source_identities(value: object, output: set[str]) -> None:
+def test_rare_corrective_scenarios_are_permanent_regressions() -> None:
+    scenario_ids = {spec.scenario_id for spec in SCENARIO_SPECS}
+
+    assert {
+        "four_kill",
+        "ace",
+        "burning_kill",
+        "late_defuse",
+        "bomb_explosion_win",
+    } <= scenario_ids
+
+
+def _assert_placeholder_identities(value: object) -> None:
     if isinstance(value, dict):
         mapping = value
-        for key, child in mapping.items():
-            if key in {"steamid", "name"} and isinstance(child, str):
-                if key == "steamid" or any(
-                    marker in mapping for marker in ("observer_slot", "activity")
-                ):
-                    output.add(child)
-            _collect_source_identities(child, output)
+        steamid = mapping.get("steamid")
+        if isinstance(steamid, str):
+            assert steamid == SYNTHETIC_STEAMID
+        if "observer_slot" in mapping and isinstance(mapping.get("name"), str):
+            assert mapping["name"] == SYNTHETIC_NAME
+        for child in mapping.values():
+            _assert_placeholder_identities(child)
     elif isinstance(value, list):
         for child in value:
-            _collect_source_identities(child, output)
+            _assert_placeholder_identities(child)
 
 
 def _walk_fields(value: object) -> list[tuple[str, Any]]:

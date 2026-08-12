@@ -1,0 +1,992 @@
+{
+  "added.map.round_wins": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "added.map.round_wins.2": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "added.map.round_wins.3": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "added.map.round_wins.4": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "added.player.state.defusekit": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "added.player.weapons.*": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "added.player.weapons.*.ammo_clip": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "added.player.weapons.*.ammo_clip_max": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "added.player.xpoverload": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "added.round.bomb": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "added.round.win_team": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "map.mode": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "casual"
+    ]
+  },
+  "map.name": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "cs_shelter",
+      "de_ancient_night",
+      "de_anubis",
+      "de_mirage",
+      "de_nuke",
+      "de_overpass",
+      "de_train"
+    ]
+  },
+  "map.num_matches_to_win_series": {
+    "minimum": 0.0,
+    "maximum": 0.0,
+    "values": []
+  },
+  "map.phase": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "gameover",
+      "live",
+      "warmup"
+    ]
+  },
+  "map.round": {
+    "minimum": 0.0,
+    "maximum": 13.0,
+    "values": []
+  },
+  "map.round_wins.1": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "ct_win_defuse",
+      "ct_win_elimination",
+      "t_win_elimination"
+    ]
+  },
+  "map.round_wins.2": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "ct_win_elimination",
+      "t_win_bomb",
+      "t_win_elimination"
+    ]
+  },
+  "map.round_wins.3": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "ct_win_defuse",
+      "ct_win_elimination",
+      "t_win_elimination"
+    ]
+  },
+  "map.round_wins.4": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "ct_win_defuse",
+      "ct_win_elimination",
+      "t_win_elimination"
+    ]
+  },
+  "map.team_ct.consecutive_round_losses": {
+    "minimum": 0.0,
+    "maximum": 6.0,
+    "values": []
+  },
+  "map.team_ct.matches_won_this_series": {
+    "minimum": 0.0,
+    "maximum": 0.0,
+    "values": []
+  },
+  "map.team_ct.score": {
+    "minimum": 0.0,
+    "maximum": 8.0,
+    "values": []
+  },
+  "map.team_ct.timeouts_remaining": {
+    "minimum": 1.0,
+    "maximum": 1.0,
+    "values": []
+  },
+  "map.team_t.consecutive_round_losses": {
+    "minimum": 0.0,
+    "maximum": 6.0,
+    "values": []
+  },
+  "map.team_t.matches_won_this_series": {
+    "minimum": 0.0,
+    "maximum": 0.0,
+    "values": []
+  },
+  "map.team_t.score": {
+    "minimum": 0.0,
+    "maximum": 8.0,
+    "values": []
+  },
+  "map.team_t.timeouts_remaining": {
+    "minimum": 1.0,
+    "maximum": 1.0,
+    "values": []
+  },
+  "player.activity": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "menu",
+      "playing"
+    ]
+  },
+  "player.match_stats.assists": {
+    "minimum": 0.0,
+    "maximum": 7.0,
+    "values": []
+  },
+  "player.match_stats.deaths": {
+    "minimum": 0.0,
+    "maximum": 10.0,
+    "values": []
+  },
+  "player.match_stats.kills": {
+    "minimum": 0.0,
+    "maximum": 18.0,
+    "values": []
+  },
+  "player.match_stats.mvps": {
+    "minimum": 0.0,
+    "maximum": 3.0,
+    "values": []
+  },
+  "player.match_stats.score": {
+    "minimum": 0.0,
+    "maximum": 58.0,
+    "values": []
+  },
+  "player.name": {
+    "minimum": null,
+    "maximum": null,
+    "values": []
+  },
+  "player.observer_slot": {
+    "minimum": 0.0,
+    "maximum": 19.0,
+    "values": []
+  },
+  "player.state.armor": {
+    "minimum": 0.0,
+    "maximum": 100.0,
+    "values": []
+  },
+  "player.state.burning": {
+    "minimum": 0.0,
+    "maximum": 255.0,
+    "values": []
+  },
+  "player.state.defusekit": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "player.state.equip_value": {
+    "minimum": 1200.0,
+    "maximum": 7950.0,
+    "values": []
+  },
+  "player.state.flashed": {
+    "minimum": 0.0,
+    "maximum": 1.0,
+    "values": []
+  },
+  "player.state.health": {
+    "minimum": 0.0,
+    "maximum": 100.0,
+    "values": []
+  },
+  "player.state.helmet": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "false",
+      "true"
+    ]
+  },
+  "player.state.money": {
+    "minimum": 0.0,
+    "maximum": 10000.0,
+    "values": []
+  },
+  "player.state.round_killhs": {
+    "minimum": 0.0,
+    "maximum": 3.0,
+    "values": []
+  },
+  "player.state.round_kills": {
+    "minimum": 0.0,
+    "maximum": 6.0,
+    "values": []
+  },
+  "player.state.smoked": {
+    "minimum": 0.0,
+    "maximum": 255.0,
+    "values": []
+  },
+  "player.steamid": {
+    "minimum": null,
+    "maximum": null,
+    "values": []
+  },
+  "player.team": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "CT",
+      "T"
+    ]
+  },
+  "player.weapons.*.ammo_clip": {
+    "minimum": 0.0,
+    "maximum": 50.0,
+    "values": []
+  },
+  "player.weapons.*.ammo_clip_max": {
+    "minimum": 1.0,
+    "maximum": 50.0,
+    "values": []
+  },
+  "player.weapons.*.ammo_reserve": {
+    "minimum": 0.0,
+    "maximum": 32.0,
+    "values": []
+  },
+  "player.weapons.*.name": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "weapon_ak47",
+      "weapon_aug",
+      "weapon_awp",
+      "weapon_bayonet",
+      "weapon_c4",
+      "weapon_deagle",
+      "weapon_famas",
+      "weapon_fiveseven",
+      "weapon_flashbang",
+      "weapon_galilar",
+      "weapon_glock",
+      "weapon_hegrenade",
+      "weapon_hkp2000",
+      "weapon_incgrenade",
+      "weapon_knife",
+      "weapon_knife_butterfly",
+      "weapon_knife_cord",
+      "weapon_knife_falchion",
+      "weapon_knife_gut",
+      "weapon_knife_gypsy_jackknife",
+      "weapon_knife_karambit",
+      "weapon_knife_kukri",
+      "weapon_knife_outdoor",
+      "weapon_knife_push",
+      "weapon_knife_stiletto",
+      "weapon_knife_survival_bowie",
+      "weapon_knife_t",
+      "weapon_knife_tactical",
+      "weapon_m4a1",
+      "weapon_m4a1_silencer",
+      "weapon_mac10",
+      "weapon_mag7",
+      "weapon_molotov",
+      "weapon_mp5sd",
+      "weapon_mp7",
+      "weapon_nova",
+      "weapon_p250",
+      "weapon_p90",
+      "weapon_sg556",
+      "weapon_smokegrenade",
+      "weapon_ssg08",
+      "weapon_taser",
+      "weapon_tec9",
+      "weapon_usp_silencer"
+    ]
+  },
+  "player.weapons.*.paintkit": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "aa_fade",
+      "aa_glock_18_urban_moon_fever",
+      "aa_vertigo_blue",
+      "ak_porcelain",
+      "am_carbon_fiber",
+      "am_doppler_phase1",
+      "am_doppler_phase2_b",
+      "am_doppler_phase4",
+      "am_emerald_marbleized",
+      "am_emerald_marbleized_glock",
+      "am_gamma_doppler_phase2_glock",
+      "am_gamma_doppler_phase4",
+      "am_jade",
+      "am_marble_fade",
+      "am_nuclear_pattern1_glock",
+      "am_ruby_marbleized",
+      "am_zebra",
+      "an_navy",
+      "an_royalbleed",
+      "an_tiger_orange",
+      "aq_blued",
+      "aq_damascus_sg553",
+      "aq_deagle_naga",
+      "aq_glock_coiled",
+      "aq_glock_dark-fall",
+      "aq_m4a1s_basilisk",
+      "aq_mac_10_alien_camo",
+      "aq_oiled",
+      "aq_steel_knife",
+      "aq_tec9_chalk_pattern",
+      "awp_longdog",
+      "awp_printstream",
+      "cu_ak47_asiimov",
+      "cu_ak47_cogthings",
+      "cu_ak47_courage_alt",
+      "cu_ak47_mastery",
+      "cu_ak47_nightwish",
+      "cu_ak_head_shot_holo",
+      "cu_aug_momentum",
+      "cu_awp_neonoir",
+      "cu_fireserpent_ak47_bravo",
+      "cu_fiveseven_alpha_omega",
+      "cu_fiveseven_urban_hazard",
+      "cu_glock18_weasel",
+      "cu_glock_eyecontact",
+      "cu_glock_moon_rabbit",
+      "cu_m4a1_flashback",
+      "cu_m4a1s_feeding_frenzy",
+      "cu_mag7_insomnia",
+      "cu_p2k_flying_dream",
+      "cu_p90-asiimov",
+      "cu_sg553_darkwing",
+      "cu_tec9_bamboo",
+      "cu_usp_black_lotus",
+      "cu_usp_cut",
+      "cu_usp_progressiv",
+      "cu_usp_spitfire",
+      "cu_usp_to_hell",
+      "cu_usps_noir",
+      "default",
+      "glock_brick_mondrian",
+      "gs_ak_colony01_red",
+      "gs_awp_death",
+      "gs_deagle_exo",
+      "gs_falchion_autotronic",
+      "gs_fiveseven_hot_rod_violet",
+      "gs_m4a1_decimator",
+      "gs_nova_sobek",
+      "gs_p90_neoqueen",
+      "gs_p90_tangled",
+      "gs_tec9_fubar",
+      "gs_usp_voltage",
+      "gs_usps_hangedman",
+      "gsch_ak_djiin",
+      "ht_red_edges_fineline",
+      "ht_simple_camo",
+      "hy_ak47lam_blue",
+      "hy_digicam_forest",
+      "hy_doomkitty",
+      "hy_ducts_green",
+      "hy_flecktarn",
+      "hy_forest_boreal",
+      "hy_granite",
+      "hy_labrat_mp5",
+      "hy_nuclear_skulls_aqua",
+      "hy_varicamo",
+      "hy_varicamo_night",
+      "hy_webs",
+      "hy_webs_darker",
+      "hye_ak47_nouveau",
+      "hye_batik_eyes_tec9",
+      "hye_gold_camo",
+      "hye_topo",
+      "m4a1s_black_lotus",
+      "m4a1s_electrum",
+      "m4a1s_quick_liquidation",
+      "m4a4_green_camo",
+      "m4a4_snakebite",
+      "mac10_video_cam",
+      "mp7_just_smile",
+      "p2000_deep_red",
+      "so_ceramic",
+      "so_mustard",
+      "so_night",
+      "so_red",
+      "soe_blue_and_chrome",
+      "soe_blue_and_gold",
+      "soe_blue_famas",
+      "soe_metallic_green_2",
+      "soe_purple",
+      "soe_teal_glitter",
+      "soe_tropical",
+      "soe_varicamo",
+      "sp_dapple",
+      "sp_leaves",
+      "sp_mesh_tan",
+      "ssg08_brutalist",
+      "usps_bruteforce_green",
+      "usps_doggy",
+      "usps_silent_boy",
+      "zeus_thunder_god"
+    ]
+  },
+  "player.weapons.*.state": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "active",
+      "holstered",
+      "reloading"
+    ]
+  },
+  "player.weapons.*.type": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "C4",
+      "Grenade",
+      "Knife",
+      "Pistol",
+      "Rifle",
+      "Shotgun",
+      "SniperRifle",
+      "Submachine Gun"
+    ]
+  },
+  "player.xpoverload": {
+    "minimum": 1.0,
+    "maximum": 85.0,
+    "values": []
+  },
+  "previously.map": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "previously.map.round": {
+    "minimum": 0.0,
+    "maximum": 12.0,
+    "values": []
+  },
+  "previously.map.team_ct.consecutive_round_losses": {
+    "minimum": 0.0,
+    "maximum": 3.0,
+    "values": []
+  },
+  "previously.map.team_ct.score": {
+    "minimum": 0.0,
+    "maximum": 7.0,
+    "values": []
+  },
+  "previously.map.team_t.consecutive_round_losses": {
+    "minimum": 0.0,
+    "maximum": 5.0,
+    "values": []
+  },
+  "previously.map.team_t.score": {
+    "minimum": 0.0,
+    "maximum": 4.0,
+    "values": []
+  },
+  "previously.player": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "previously.player.activity": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "menu",
+      "playing"
+    ]
+  },
+  "previously.player.match_stats.assists": {
+    "minimum": 0.0,
+    "maximum": 6.0,
+    "values": []
+  },
+  "previously.player.match_stats.deaths": {
+    "minimum": 0.0,
+    "maximum": 10.0,
+    "values": []
+  },
+  "previously.player.match_stats.kills": {
+    "minimum": 0.0,
+    "maximum": 18.0,
+    "values": []
+  },
+  "previously.player.match_stats.mvps": {
+    "minimum": 0.0,
+    "maximum": 3.0,
+    "values": []
+  },
+  "previously.player.match_stats.score": {
+    "minimum": 0.0,
+    "maximum": 58.0,
+    "values": []
+  },
+  "previously.player.name": {
+    "minimum": null,
+    "maximum": null,
+    "values": []
+  },
+  "previously.player.observer_slot": {
+    "minimum": 0.0,
+    "maximum": 19.0,
+    "values": []
+  },
+  "previously.player.state.armor": {
+    "minimum": 0.0,
+    "maximum": 100.0,
+    "values": []
+  },
+  "previously.player.state.burning": {
+    "minimum": 0.0,
+    "maximum": 255.0,
+    "values": []
+  },
+  "previously.player.state.defusekit": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "previously.player.state.equip_value": {
+    "minimum": 1200.0,
+    "maximum": 7950.0,
+    "values": []
+  },
+  "previously.player.state.flashed": {
+    "minimum": 0.0,
+    "maximum": 1.0,
+    "values": []
+  },
+  "previously.player.state.health": {
+    "minimum": 0.0,
+    "maximum": 100.0,
+    "values": []
+  },
+  "previously.player.state.helmet": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "false",
+      "true"
+    ]
+  },
+  "previously.player.state.money": {
+    "minimum": 0.0,
+    "maximum": 10000.0,
+    "values": []
+  },
+  "previously.player.state.round_killhs": {
+    "minimum": 0.0,
+    "maximum": 3.0,
+    "values": []
+  },
+  "previously.player.state.round_kills": {
+    "minimum": 0.0,
+    "maximum": 6.0,
+    "values": []
+  },
+  "previously.player.state.smoked": {
+    "minimum": 0.0,
+    "maximum": 255.0,
+    "values": []
+  },
+  "previously.player.steamid": {
+    "minimum": null,
+    "maximum": null,
+    "values": []
+  },
+  "previously.player.team": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "CT",
+      "T"
+    ]
+  },
+  "previously.player.weapons.*.ammo_clip": {
+    "minimum": 0.0,
+    "maximum": 50.0,
+    "values": []
+  },
+  "previously.player.weapons.*.ammo_clip_max": {
+    "minimum": 1.0,
+    "maximum": 50.0,
+    "values": []
+  },
+  "previously.player.weapons.*.ammo_reserve": {
+    "minimum": 0.0,
+    "maximum": 32.0,
+    "values": []
+  },
+  "previously.player.weapons.*.name": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "weapon_ak47",
+      "weapon_aug",
+      "weapon_awp",
+      "weapon_bayonet",
+      "weapon_c4",
+      "weapon_deagle",
+      "weapon_famas",
+      "weapon_fiveseven",
+      "weapon_flashbang",
+      "weapon_galilar",
+      "weapon_glock",
+      "weapon_hegrenade",
+      "weapon_hkp2000",
+      "weapon_incgrenade",
+      "weapon_knife",
+      "weapon_knife_butterfly",
+      "weapon_knife_cord",
+      "weapon_knife_falchion",
+      "weapon_knife_gut",
+      "weapon_knife_gypsy_jackknife",
+      "weapon_knife_karambit",
+      "weapon_knife_kukri",
+      "weapon_knife_outdoor",
+      "weapon_knife_push",
+      "weapon_knife_stiletto",
+      "weapon_knife_survival_bowie",
+      "weapon_knife_t",
+      "weapon_knife_tactical",
+      "weapon_m4a1",
+      "weapon_m4a1_silencer",
+      "weapon_mac10",
+      "weapon_mag7",
+      "weapon_molotov",
+      "weapon_mp5sd",
+      "weapon_mp7",
+      "weapon_nova",
+      "weapon_p250",
+      "weapon_p90",
+      "weapon_sg556",
+      "weapon_smokegrenade",
+      "weapon_ssg08",
+      "weapon_taser",
+      "weapon_tec9",
+      "weapon_usp_silencer"
+    ]
+  },
+  "previously.player.weapons.*.paintkit": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "aa_fade",
+      "aa_glock_18_urban_moon_fever",
+      "aa_vertigo_blue",
+      "ak_porcelain",
+      "am_carbon_fiber",
+      "am_doppler_phase1",
+      "am_doppler_phase2_b",
+      "am_doppler_phase4",
+      "am_emerald_marbleized",
+      "am_emerald_marbleized_glock",
+      "am_gamma_doppler_phase2_glock",
+      "am_gamma_doppler_phase4",
+      "am_jade",
+      "am_marble_fade",
+      "am_nuclear_pattern1_glock",
+      "am_ruby_marbleized",
+      "am_zebra",
+      "an_navy",
+      "an_royalbleed",
+      "an_tiger_orange",
+      "aq_blued",
+      "aq_damascus_sg553",
+      "aq_deagle_naga",
+      "aq_glock_coiled",
+      "aq_glock_dark-fall",
+      "aq_m4a1s_basilisk",
+      "aq_mac_10_alien_camo",
+      "aq_oiled",
+      "aq_steel_knife",
+      "aq_tec9_chalk_pattern",
+      "awp_longdog",
+      "awp_printstream",
+      "cu_ak47_asiimov",
+      "cu_ak47_cogthings",
+      "cu_ak47_courage_alt",
+      "cu_ak47_mastery",
+      "cu_ak47_nightwish",
+      "cu_ak_head_shot_holo",
+      "cu_aug_momentum",
+      "cu_awp_neonoir",
+      "cu_fireserpent_ak47_bravo",
+      "cu_fiveseven_alpha_omega",
+      "cu_fiveseven_urban_hazard",
+      "cu_glock18_weasel",
+      "cu_glock_eyecontact",
+      "cu_glock_moon_rabbit",
+      "cu_m4a1_flashback",
+      "cu_m4a1s_feeding_frenzy",
+      "cu_mag7_insomnia",
+      "cu_p2k_flying_dream",
+      "cu_p90-asiimov",
+      "cu_sg553_darkwing",
+      "cu_tec9_bamboo",
+      "cu_usp_black_lotus",
+      "cu_usp_cut",
+      "cu_usp_progressiv",
+      "cu_usp_spitfire",
+      "cu_usp_to_hell",
+      "cu_usps_noir",
+      "default",
+      "glock_brick_mondrian",
+      "gs_ak_colony01_red",
+      "gs_awp_death",
+      "gs_deagle_exo",
+      "gs_falchion_autotronic",
+      "gs_fiveseven_hot_rod_violet",
+      "gs_m4a1_decimator",
+      "gs_nova_sobek",
+      "gs_p90_neoqueen",
+      "gs_p90_tangled",
+      "gs_tec9_fubar",
+      "gs_usp_voltage",
+      "gs_usps_hangedman",
+      "gsch_ak_djiin",
+      "ht_red_edges_fineline",
+      "ht_simple_camo",
+      "hy_ak47lam_blue",
+      "hy_digicam_forest",
+      "hy_doomkitty",
+      "hy_ducts_green",
+      "hy_flecktarn",
+      "hy_forest_boreal",
+      "hy_granite",
+      "hy_labrat_mp5",
+      "hy_nuclear_skulls_aqua",
+      "hy_varicamo",
+      "hy_varicamo_night",
+      "hy_webs",
+      "hy_webs_darker",
+      "hye_ak47_nouveau",
+      "hye_batik_eyes_tec9",
+      "hye_gold_camo",
+      "hye_topo",
+      "m4a1s_black_lotus",
+      "m4a1s_electrum",
+      "m4a1s_quick_liquidation",
+      "m4a4_green_camo",
+      "m4a4_snakebite",
+      "mac10_video_cam",
+      "mp7_just_smile",
+      "p2000_deep_red",
+      "so_ceramic",
+      "so_mustard",
+      "so_night",
+      "so_red",
+      "soe_blue_and_chrome",
+      "soe_blue_and_gold",
+      "soe_blue_famas",
+      "soe_metallic_green_2",
+      "soe_purple",
+      "soe_teal_glitter",
+      "soe_tropical",
+      "soe_varicamo",
+      "sp_dapple",
+      "sp_leaves",
+      "sp_mesh_tan",
+      "ssg08_brutalist",
+      "usps_bruteforce_green",
+      "usps_doggy",
+      "usps_silent_boy",
+      "zeus_thunder_god"
+    ]
+  },
+  "previously.player.weapons.*.state": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "active",
+      "holstered",
+      "reloading"
+    ]
+  },
+  "previously.player.weapons.*.type": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "C4",
+      "Grenade",
+      "Knife",
+      "Pistol",
+      "Rifle",
+      "Shotgun",
+      "SniperRifle",
+      "Submachine Gun"
+    ]
+  },
+  "previously.player.xpoverload": {
+    "minimum": 1.0,
+    "maximum": 85.0,
+    "values": []
+  },
+  "previously.round": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "true"
+    ]
+  },
+  "previously.round.bomb": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "defused",
+      "exploded",
+      "planted"
+    ]
+  },
+  "previously.round.phase": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "freezetime",
+      "live",
+      "over"
+    ]
+  },
+  "previously.round.win_team": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "CT",
+      "T"
+    ]
+  },
+  "provider.appid": {
+    "minimum": 730.0,
+    "maximum": 730.0,
+    "values": []
+  },
+  "provider.name": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "Counter-Strike: Global Offensive",
+      "recording-probe"
+    ]
+  },
+  "provider.steamid": {
+    "minimum": null,
+    "maximum": null,
+    "values": []
+  },
+  "provider.timestamp": {
+    "minimum": 1786289096.0,
+    "maximum": 1786505146.0,
+    "values": []
+  },
+  "provider.version": {
+    "minimum": 14174.0,
+    "maximum": 14174.0,
+    "values": []
+  },
+  "round.bomb": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "defused",
+      "exploded",
+      "planted"
+    ]
+  },
+  "round.phase": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "freezetime",
+      "live",
+      "over"
+    ]
+  },
+  "round.win_team": {
+    "minimum": null,
+    "maximum": null,
+    "values": [
+      "CT",
+      "T"
+    ]
+  }
+}

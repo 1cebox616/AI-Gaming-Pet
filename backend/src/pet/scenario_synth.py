@@ -26,6 +26,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 RECORDINGS_DIRECTORY = BACKEND_ROOT / "recordings"
 SCENARIOS_DIRECTORY = BACKEND_ROOT / "scenarios"
 REPORTS_DIRECTORY = BACKEND_ROOT / "bench-reports"
+OBSERVED_CONSTRAINTS_PATH = REPORTS_DIRECTORY / "m3-t6-observed-constraints.json"
 INVENTORY_PATHS = (
     REPORTS_DIRECTORY / "m3-t2-data-inventory.md",
     REPORTS_DIRECTORY / "m3-t2-inventory2.md",
@@ -64,7 +65,6 @@ _NUMBER_RANGE = re.compile(
 _QUOTED_VALUE = re.compile(r'"([^"]+)"')
 _WEAPON_KEY = re.compile(r"(?<=\.weapons\.)weapon_\d+(?=\.)")
 _TEMPLATE_SOURCE = re.compile(r"^(.+\.jsonl) 第 (\d+)–(\d+) 行$")
-_INVENTORY_RECORDING = re.compile(r"^- 录制文件：`([^`]+)`$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +131,9 @@ BASE_CT = "gsi-20260810-154052-044137.jsonl 第 18–73 行"
 BASE_CT_SHORT = "gsi-20260810-154052-044137.jsonl 第 104–132 行"
 BASE_CT_DEFUSE = "gsi-20260810-154052-044137.jsonl 第 3–16 行"
 BASE_T_C4 = "gsi-20260810-114649-321103.jsonl 第 65–100 行"
+BASE_BURN = "gsi-20260811-223119-169538.jsonl 第 440–476 行"
+BASE_LATE_DEFUSE = "gsi-20260809-112213.jsonl 第 40–72 行"
+BASE_EXPLOSION = "gsi-20260811-223119-169538.jsonl 第 1470–1493 行"
 COMMON_FORBIDDEN = (
     "不得出现队友或敌人身份",
     "不得声称玩家所在位置",
@@ -283,6 +286,27 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         ("剩41血", "三杀", "M4A1-S", "阵亡"),
     ),
     _ct_spec(
+        "four_kill",
+        "乙",
+        "用 M4A1-S 完成本回合四杀",
+        (*_span(71, 73, "player.state.round_kills", 4),),
+        ("M4A1-S", "四杀"),
+        expected_event_type="multi_kill",
+    ),
+    _ct_spec(
+        "ace",
+        "乙",
+        "用 M4A1-S 连续完成第四杀和第五杀",
+        (
+            *_span(41, 54, "player.state.round_kills", 2),
+            *_span(55, 66, "player.state.round_kills", 3),
+            *_span(67, 70, "player.state.round_kills", 4),
+            *_span(71, 73, "player.state.round_kills", 5),
+        ),
+        ("M4A1-S", "五杀"),
+        expected_event_type="multi_kill",
+    ),
+    _ct_spec(
         "flash_kill",
         "丙",
         "被闪期间用 M4A1-S 击杀一人",
@@ -363,6 +387,18 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         ("烟雾", "被闪", "M4A1-S", "击杀"),
     ),
     _ct_spec(
+        "burning_kill",
+        "丙",
+        "踩火期间用 AK47 击杀一人，随后阵亡",
+        (
+            *_span(463, 468, "player.state.burning", 255),
+            _set(469, "player.state.burning", 0),
+        ),
+        ("燃烧", "AK47", "击杀", "阵亡"),
+        expected_event_type="death",
+        source=BASE_BURN,
+    ),
+    _ct_spec(
         "bomb_pickup_then_death",
         "丁",
         "拿到炸弹后阵亡，死亡不额外记作主动丢包",
@@ -429,46 +465,36 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         (),
         ("炸弹已安放", "阵亡", "回合失败"),
     ),
+    _ct_spec(
+        "late_defuse",
+        "丁",
+        "炸弹安放 33.4 秒后完成拆除",
+        (*_span(66, 72, "player.team", "CT"),),
+        ("炸弹已安放", "33.4", "炸弹已拆除", "回合胜利"),
+        expected_event_type="round_win",
+        source=BASE_LATE_DEFUSE,
+    ),
+    _ct_spec(
+        "bomb_explosion_win",
+        "丁",
+        "T方守包到炸弹爆炸并赢下回合",
+        (),
+        ("我方T", "炸弹已安放", "炸弹引爆", "回合胜利"),
+        expected_event_type="round_win",
+        source=BASE_EXPLOSION,
+    ),
 )
 
-SKIPPED_SCENARIOS: tuple[tuple[str, str], ...] = (
-    (
-        "four_kill",
-        "两个数据清单均只观测到 player.state.round_kills 最大为 3",
-    ),
-    (
-        "ace",
-        "ace 需要 round_kills=5，超出数据清单观测范围 0–3",
-    ),
-    (
-        "bomb_explosion",
-        "round.bomb 只观测到 planted/defused，从未观测到 exploded",
-    ),
-    (
-        "extreme_defuse",
-        "真实模板最晚只观测到下包后 27.4 秒拆除，不足以冒充极限拆包",
-    ),
-    (
-        "burning_combo",
-        "player.state.burning 的观测范围为 0–0，规格明确禁止合成非零值",
-    ),
-)
+SKIPPED_SCENARIOS: tuple[tuple[str, str], ...] = ()
 
 
 def load_inventory_constraints(
     paths: Sequence[Path] = INVENTORY_PATHS,
 ) -> dict[str, PathConstraint]:
-    """Parse the committed inventories into a union field/value whitelist."""
+    """Load the inventory path whitelist and every committed observed range."""
     constraints: dict[str, PathConstraint] = {}
-    inventory_recordings: list[Path] = []
     for path in paths:
-        report_lines = path.read_text(encoding="utf-8").splitlines()
-        for line in report_lines:
-            recording_match = _INVENTORY_RECORDING.match(line)
-            if recording_match is not None:
-                inventory_recordings.append(
-                    RECORDINGS_DIRECTORY / recording_match.group(1)
-                )
+        for line in path.read_text(encoding="utf-8").splitlines():
             match = _TABLE_ROW.match(line)
             if match is None or int(match.group(2)) <= 0:
                 continue
@@ -486,10 +512,23 @@ def load_inventory_constraints(
             constraints[raw_path] = constraints.get(raw_path, PathConstraint()).merge(
                 candidate
             )
-    # Markdown deliberately abbreviates long string sample sets. Revisit only
-    # the two real recordings named by those reports to recover the complete
-    # observed set; the report remains the authority for which paths exist.
-    for recording_path in inventory_recordings:
+    if OBSERVED_CONSTRAINTS_PATH.exists():
+        committed = json.loads(OBSERVED_CONSTRAINTS_PATH.read_text(encoding="utf-8"))
+        for raw_path, raw_constraint in committed.items():
+            if raw_path not in constraints:
+                continue
+            constraints[raw_path] = constraints[raw_path].merge(
+                PathConstraint(
+                    minimum=raw_constraint.get("minimum"),
+                    maximum=raw_constraint.get("maximum"),
+                    values=frozenset(raw_constraint.get("values", ())),
+                )
+            )
+    # The old Markdown reports abbreviate string samples and predate the latest
+    # recordings. All local real recordings may extend values, but never paths.
+    for recording_path in RECORDINGS_DIRECTORY.glob("*.jsonl"):
+        if recording_path.stat().st_size == 0:
+            continue
         for raw_line in recording_path.read_text(encoding="utf-8").splitlines():
             wrapper = json.loads(raw_line)
             payload = wrapper.get("payload")
@@ -498,6 +537,25 @@ def load_inventory_constraints(
                     cast(dict[str, Any], payload), constraints
                 )
     return constraints
+
+
+def write_observed_constraints(
+    constraints: Mapping[str, PathConstraint],
+    *,
+    output_path: Path = OBSERVED_CONSTRAINTS_PATH,
+) -> None:
+    """Persist a scrubbed range proof so validation does not require recordings."""
+    data: dict[str, dict[str, object]] = {}
+    for raw_path, constraint in sorted(constraints.items()):
+        sensitive = raw_path.endswith("player.name") or raw_path.endswith("steamid")
+        data[raw_path] = {
+            "minimum": constraint.minimum,
+            "maximum": constraint.maximum,
+            "values": [] if sensitive else sorted(constraint.values),
+        }
+    output_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def _merge_observed_payload_values(
@@ -645,7 +703,10 @@ def write_scenario(
     scenarios_directory.mkdir(parents=True, exist_ok=True)
     output = scenarios_directory / f"{spec.scenario_id}.jsonl"
     output.write_text(
-        "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows),
+        "".join(
+            json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+            for row in rows
+        ),
         encoding="utf-8",
     )
     return output
@@ -720,7 +781,12 @@ def _scenario_report(specs: Sequence[ScenarioSpec]) -> str:
             )
         )
     lines.extend(("## 未生成的越界场景", ""))
-    lines.extend(f"- `{scenario_id}`：{reason}" for scenario_id, reason in SKIPPED_SCENARIOS)
+    lines.extend(
+        f"- `{scenario_id}`：{reason}"
+        for scenario_id, reason in SKIPPED_SCENARIOS
+    )
+    if not SKIPPED_SCENARIOS:
+        lines.append("- 无")
     lines.append("")
     return "\n".join(lines)
 
@@ -775,6 +841,7 @@ def generate_all(
 ) -> tuple[Path, ...]:
     """Generate all scenarios and zero-call review artifacts."""
     constraints = load_inventory_constraints()
+    write_observed_constraints(constraints)
     scenarios_directory.mkdir(parents=True, exist_ok=True)
     expected_names = {f"{spec.scenario_id}.jsonl" for spec in specs}
     for stale_path in scenarios_directory.glob("*.jsonl"):
@@ -806,18 +873,25 @@ def generate_all(
     )
     real_counts = _timeline_kind_counts(real_paths)
     synthetic_counts = _timeline_kind_counts(paths)
+    coverage_kinds: tuple[TimelineKind, ...] = (
+        "round_live",
+        "bought",
+        *REPORTED_TIMELINE_KINDS,
+        "burn_start",
+        "burn_end",
+    )
     coverage_lines = [
         "# M3-T6 时间线覆盖统计",
         "",
-        "当前代码共有 22 个 TimelineKind。本任务按规格统计其中 18 个动作/状态 kind；",
-        "另有 round_live、bought 两个锚点，burn_start、burn_end 因实测始终为 0 而禁止合成。",
+        "当前代码共有 22 个 TimelineKind；以下同时列出规格中的18个动作/状态 kind、",
+        "round_live 与 bought 两个锚点，以及已由完整真实录制证实的 burn_start/burn_end。",
         "",
         "| kind | 全部真实录制 | 合成集 |",
         "|---|---:|---:|",
     ]
     coverage_lines.extend(
         f"| `{kind}` | {real_counts[kind]} | {synthetic_counts[kind]} |"
-        for kind in REPORTED_TIMELINE_KINDS
+        for kind in coverage_kinds
     )
     coverage_lines.extend(
         (
