@@ -18,6 +18,7 @@ from pet.bench import (
     UniversalForbiddenFile,
     apply_universal_forbidden,
     answer_key_sha256,
+    build_analysis_system_prompt,
     calculate_length_statistics,
     check_output,
     commentary_length_statistics,
@@ -489,6 +490,7 @@ def test_stream_analysis_uses_strict_protocol_settings_and_split_metrics(
     assert "提示词 SHA-256" in report
     assert "事件卡集合 SHA-256" in report
     assert "固定随机种子：43" in report
+    assert "提示词变体：A：骨架逐字复制" in report
     assert "否定总结 ✓" in report
     assert "越界措辞 ✓" in report
 
@@ -818,9 +820,32 @@ def test_universal_forbidden_file_has_both_factual_categories() -> None:
 
     assert "队友" in forbidden.a_gsi_unavailable
     assert "对手的钱" in forbidden.a_gsi_unavailable
+    assert "A点" in forbidden.a_gsi_unavailable
+    assert "B点" in forbidden.a_gsi_unavailable
+    assert "中路" in forbidden.a_gsi_unavailable
+    assert "包点" not in forbidden.a_gsi_unavailable
     assert "可能" in forbidden.b_inference_or_causality
     assert "导致" in forbidden.b_inference_or_causality
     assert len(forbidden.terms) == len(set(forbidden.terms))
+
+
+def test_analysis_prompt_variants_change_only_the_skeleton_contract() -> None:
+    baseline = build_analysis_system_prompt(variant="baseline")
+    checklist = build_analysis_system_prompt(variant="checklist")
+    personality = build_analysis_system_prompt(variant="checklist_personality")
+
+    assert "事件行逐字复制 X" in baseline
+    assert "推断评测必须原样复制" in baseline
+    assert "事件行逐字复制 X" not in checklist
+    assert "推断评测必须原样复制" not in checklist
+    assert "下列事实必须全部出现，措辞由你决定" in checklist
+    assert personality.startswith(
+        "你是陪朋友打 CS2 的中文游戏搭子，说话短、随口、像个懂行的老玩家。\n"
+        "可以损但不刻薄。不要用书面语，不要像解说员报幕。\n"
+        "但下面的事实要求高于一切：宁可说得平淡，也不能说错或说出卡上没有的事。\n\n"
+    )
+    assert personality.endswith(checklist)
+    assert len({baseline, checklist, personality}) == 3
 
 
 def test_universal_forbidden_hit_forces_whole_sentence_wrong() -> None:

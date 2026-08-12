@@ -43,6 +43,32 @@ ANALYSIS_WHOLE_ACCURACY_TARGET = 0.95
 ANALYSIS_ATOM_ACCURACY_TARGET = 0.95
 ANALYSIS_MIN_SCENE_SENTENCES = 2
 ANALYSIS_MAX_SCENE_SENTENCES = 4
+AnalysisPromptVariant = Literal["baseline", "checklist", "checklist_personality"]
+_SKELETON_READING_RULE = (
+    "- 【事件必答】中的「推荐骨架」是确定性事实的压缩顺序，不是模型推断；"
+    "推断评测必须原样复制。"
+)
+_CHECKLIST_READING_RULE = (
+    "- 【事件必答】中的「推荐骨架」是确定性事实的压缩顺序，不是模型推断；"
+    "下列事实必须全部出现，措辞由你决定。"
+)
+_SKELETON_INFERENCE_RULE = (
+    "若有「推荐骨架：X」，事件行逐字复制 X；该骨架已由程序压到字数上限内，"
+    "不要改写、扩写或\n把后一杀补成前一杀的武器。"
+)
+_CHECKLIST_INFERENCE_RULE = (
+    "若有「推荐骨架：X」，它只是一份确定性事实的必答清单；"
+    "下列事实必须全部出现，措辞由你决定。\n"
+    "不得删除清单中的阶段、武器归属、累计杀数、结算方式、对枪、摸烟、被补等确定性关系。"
+)
+_LIGHT_PERSONALITY_PREFIX = """你是陪朋友打 CS2 的中文游戏搭子，说话短、随口、像个懂行的老玩家。
+可以损但不刻薄。不要用书面语，不要像解说员报幕。
+但下面的事实要求高于一切：宁可说得平淡，也不能说错或说出卡上没有的事。"""
+_ANALYSIS_PROMPT_VARIANT_LABELS: dict[AnalysisPromptVariant, str] = {
+    "baseline": "A：骨架逐字复制",
+    "checklist": "B：骨架作为必答清单",
+    "checklist_personality": "C：必答清单 + 轻量性格前缀",
+}
 _NEGATIVE_SUMMARY_TERMS = (
     "未阵亡",
     "未拆除",
@@ -238,6 +264,7 @@ class AnalysisBenchResult:
     requested_model: str
     requested_provider: str | None
     system_prompt: str
+    prompt_variant: AnalysisPromptVariant
     run_timestamp: datetime
     snapshot_count: int
     detected_event_count: int
@@ -578,6 +605,7 @@ def run_stream_analysis(
     max_completion_tokens: int = ANALYSIS_MAX_COMPLETION_TOKENS,
     reasoning_effort: str = "none",
     seed: int = ANALYSIS_SEED,
+    prompt_variant: AnalysisPromptVariant = "baseline",
     prompts_directory: Path = PROMPTS_DIRECTORY,
 ) -> AnalysisBenchResult:
     """Replay recordings and stream one strict audited response per event."""
@@ -596,10 +624,9 @@ def run_stream_analysis(
     if max_completion_tokens < 1:
         raise ValueError("max completion tokens must be positive")
 
-    system_prompt = load_system_prompt(
-        "inference",
-        max_chars=ANALYSIS_MAX_EVENT_CHARS,
+    system_prompt = build_analysis_system_prompt(
         prompts_directory=prompts_directory,
+        variant=prompt_variant,
     )
     configuration = load_config()
     events: list[AnalysisBenchEvent] = []
@@ -667,6 +694,7 @@ def run_stream_analysis(
         requested_model=model,
         requested_provider=provider,
         system_prompt=system_prompt,
+        prompt_variant=prompt_variant,
         run_timestamp=datetime.now(timezone.utc),
         snapshot_count=snapshot_count,
         detected_event_count=detected_event_count,
@@ -679,6 +707,37 @@ def run_stream_analysis(
         seed=seed,
         events=tuple(events),
     )
+
+
+def build_analysis_system_prompt(
+    *,
+    prompts_directory: Path = PROMPTS_DIRECTORY,
+    variant: AnalysisPromptVariant = "baseline",
+) -> str:
+    """Load one factual prompt variant while preserving every unrelated byte."""
+    prompt = load_system_prompt(
+        "inference",
+        max_chars=ANALYSIS_MAX_EVENT_CHARS,
+        prompts_directory=prompts_directory,
+    )
+    if variant == "baseline":
+        return prompt
+
+    replacements: tuple[tuple[str, str], ...] = (
+        (_SKELETON_READING_RULE, _CHECKLIST_READING_RULE),
+        (_SKELETON_INFERENCE_RULE, _CHECKLIST_INFERENCE_RULE),
+    )
+    checklist_prompt = prompt
+    for old, new in replacements:
+        if checklist_prompt.count(old) != 1:
+            raise ValueError("骨架逐字复制规则未恰好出现一次，拒绝生成不可比提示词")
+        checklist_prompt = checklist_prompt.replace(old, new, 1)
+
+    if variant == "checklist":
+        return checklist_prompt
+    if variant == "checklist_personality":
+        return f"{_LIGHT_PERSONALITY_PREFIX}\n\n{checklist_prompt}"
+    raise ValueError(f"unknown analysis prompt variant: {variant}")
 
 
 def _attempt_stream_analysis(
@@ -924,6 +983,7 @@ def render_stream_analysis_report(
         ),
         f"- 上游实际返回型号：{_join_or_unavailable(actual_models)}",
         f"- 实际上游：{_join_or_unavailable(actual_providers)}",
+        f"- 提示词变体：{_ANALYSIS_PROMPT_VARIANT_LABELS[result.prompt_variant]}",
         f"- 事件/完整截止时间：{result.event_timeout_seconds:g}s / "
         f"{result.full_timeout_seconds:g}s",
         f"- 温度 / 完成上限：{ANALYSIS_TEMPERATURE:g} / "
@@ -1833,6 +1893,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="stream-analysis 的最大完成 token 数",
     )
     parser.add_argument(
+        "--analysis-prompt-variant",
+        choices=("baseline", "checklist", "checklist_personality"),
+        default="baseline",
+        help="stream-analysis 的提示词对照组；默认保持当前基线",
+    )
+    parser.add_argument(
         "--scores",
         type=Path,
         help="人工评分 JSON；与 --score-report 一起离线追加准确率汇总",
@@ -1881,6 +1947,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if args.score_template_out is not None and not args.stream_analysis:
         print("错误：--score-template-out 仅适用于 --stream-analysis", file=sys.stderr)
+        return 2
+    if not args.stream_analysis and args.analysis_prompt_variant != "baseline":
+        print("错误：--analysis-prompt-variant 仅适用于 --stream-analysis", file=sys.stderr)
         return 2
     if not args.cards_only and not score_report_mode and args.model is None:
         print("错误：模型评测必须传入 --model", file=sys.stderr)
@@ -1945,6 +2014,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_completion_tokens=args.analysis_max_tokens,
                 reasoning_effort=args.reasoning_effort,
                 seed=args.seed,
+                prompt_variant=args.analysis_prompt_variant,
             )
             write_stream_analysis_report(analysis, args.out)
             if args.score_template_out is not None:
