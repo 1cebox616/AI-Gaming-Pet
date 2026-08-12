@@ -56,6 +56,9 @@ _ZERO_SIGNAL_EVENT_FACTS = {
 }
 _STAGE_ANNOTATED_TIMELINE_KINDS = frozenset({"kill", "death"})
 _NEARBY_COMBAT_SECONDS = 1.0
+_REQUIRED_FACT_CHAR_BUDGET = 30
+_DROPPED_REQUIRED_PREFIX = "因字数丢弃："
+_HAN_CHARACTER = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _CONTINUOUS_EVENT_MAX_SECONDS = 3.0
 _CONTINUOUS_EVENT_KINDS = frozenset(
     {
@@ -173,13 +176,26 @@ def _section(name: str, facts: Iterable[str]) -> str | None:
 
 def _required_facts_section(facts: Iterable[str]) -> str | None:
     """Render mandatory atoms as peers instead of privileging sentence-like prose."""
-    items = [fact for fact in facts if fact and fact != "仅覆盖以上事实"]
+    items = [
+        fact
+        for fact in facts
+        if fact and fact != "仅覆盖以上事实" and not fact.startswith(_DROPPED_REQUIRED_PREFIX)
+    ]
+    dropped = next(
+        (
+            fact.removeprefix(_DROPPED_REQUIRED_PREFIX)
+            for fact in facts
+            if fact.startswith(_DROPPED_REQUIRED_PREFIX)
+        ),
+        None,
+    )
     if not items:
         return None
     numbered = "｜".join(
         f"〔必答{index}〕{fact}" for index, fact in enumerate(items, start=1)
     )
-    return f"【事件必答】{numbered}｜〔边界〕仅覆盖以上事实"
+    suffix = f"｜〔因字数丢弃〕{dropped}" if dropped else ""
+    return f"【事件必答】{numbered}｜〔边界〕仅覆盖以上事实{suffix}"
 
 
 def _match_sections(
@@ -487,7 +503,7 @@ def _required_event_facts(
         bomb_result = method_label in {"炸弹拆除", "炸弹引爆"} or any(
             "炸弹已拆除" in fact or "下包" in fact for fact in rare_facts
         )
-        if bomb_result:
+        if bomb_result and round_kills == 0:
             return [_compact_bomb_result_fact(rare_facts, result_fact)]
         if not observed_live and round_kills == 0:
             return [*rare_facts, f"{result_fact}；未观测开打时刻"]
@@ -496,8 +512,6 @@ def _required_event_facts(
             if death_fact is not None:
                 required.append(death_fact)
             return [_bundle_required(*rare_facts, *required)]
-        if round_kills == 1 and rare_facts:
-            return [_bundle_required(*rare_facts, result_fact)]
         special_multikill = _compact_special_multikill_fact(
             rare_facts,
             kill_facts,
@@ -507,16 +521,19 @@ def _required_event_facts(
         )
         if special_multikill is not None:
             return [special_multikill]
+        # A type-1 line comments on the player, not on the scoreboard.  Keep
+        # the settlement first for round events, then preserve the player's
+        # own contribution before optional bomb context.
         required = [result_fact]
         if round_kills >= 2:
-            required.append(_compact_multikill_fact(kill_facts, round_kills))
+            required.append(_compact_player_kill_summary(kill_facts, round_kills))
             if death_fact is not None:
                 required.append(death_fact)
             required.append("有显著贡献")
         else:
-            required.extend(kill_facts)
+            required.append(_compact_player_kill_summary(kill_facts, round_kills))
             required.append(death_fact or "存活到结算")
-        return [_bundle_required(*rare_facts, *required)]
+        return _prioritize_required_facts(required, rare_facts)
 
     if event.type in {"kill", "kill_headshot"}:
         grenade_focus = next(
@@ -526,19 +543,14 @@ def _required_event_facts(
             weapon = _weapon_from_required_kill_fact(kill_facts[-1]) if kill_facts else None
             kill = f"{weapon}完成击杀" if weapon is not None else "完成击杀"
             return [_bundle_required(grenade_focus, kill)]
-        return [
-            _bundle_required(
-                *rare_facts, *(kill_facts[-1:] or _event_facts(event))
-            )
-        ]
+        return _prioritize_required_facts(
+            [*(kill_facts[-1:] or _event_facts(event))], rare_facts
+        )
     if event.type == "multi_kill":
-        required = [
-            *rare_facts,
-            _compact_multikill_fact(kill_facts, max(round_kills, 2)),
-        ]
+        required = [_compact_multikill_fact(kill_facts, max(round_kills, 2))]
         if death_fact is not None:
             required.append(death_fact)
-        return [_bundle_required(*required)]
+        return _prioritize_required_facts(required, rare_facts)
     if round_kills == 0:
         stage = (
             _required_stage(stages[death_index], observed_live)
@@ -546,20 +558,19 @@ def _required_event_facts(
             else "未观测开打时刻"
         )
         if rare_facts:
-            return [
-                _bundle_required(
-                    *rare_facts, f"{stage}、{_EVENT_LABELS[event.type]}"
-                )
-            ]
+            return _prioritize_required_facts(
+                [f"{stage}、{_EVENT_LABELS[event.type]}"], rare_facts
+            )
         return [f"{stage}、{_EVENT_LABELS[event.type]}"]
-    required = [*rare_facts]
-    if round_kills >= 2:
-        required.append(_compact_multikill_fact(kill_facts, round_kills))
-    else:
-        required.extend(kill_facts)
+    required: list[str] = []
+    required.append(
+        _compact_player_kill_summary(
+            kill_facts, round_kills, include_stage=False, include_health=False
+        )
+    )
     if death_fact is not None:
         required.append(death_fact)
-    return [_bundle_required(*required)]
+    return _prioritize_required_facts(required, rare_facts)
 
 
 def _compact_multikill_fact(kill_facts: list[str], kill_count: int) -> str:
@@ -568,9 +579,81 @@ def _compact_multikill_fact(kill_facts: list[str], kill_count: int) -> str:
     return f"击杀经过={sequence}；本回合累计{_kill_count_label(kill_count)}"
 
 
+def _compact_player_kill_summary(
+    kill_facts: list[str],
+    kill_count: int,
+    *,
+    include_stage: bool = True,
+    include_health: bool = True,
+) -> str:
+    """Keep the player-facing kill facts without replaying every timeline token."""
+    if not kill_facts:
+        return f"本回合{_kill_count_label(kill_count)}"
+    first = kill_facts[0].split("、")
+    stage = next(
+        (
+            atom
+            for atom in first
+            if atom
+            in {
+                "开局",
+                "前期",
+                "中期",
+                "后期",
+                "守包",
+                "反攻包点",
+                "未观测开打时刻",
+            }
+        ),
+        "",
+    )
+    health = next(
+        (atom for atom in first if atom == "满血" or atom.startswith("剩")),
+        "",
+    )
+    weapon = _weapon_from_required_kill_fact(kill_facts[0]) or ""
+    headshot = "爆头" if "爆头击杀" in kill_facts[0] else ""
+    relation = "赢下对枪" if "赢下对枪" in kill_facts[0] else ""
+    smoke = "摸烟" if "摸烟击杀" in kill_facts[0] else ""
+    count = "一杀" if kill_count == 1 else _kill_count_label(kill_count)
+    return "".join(
+        (
+            stage if include_stage else "",
+            health if include_health else "",
+            smoke,
+            weapon,
+            headshot,
+            count,
+            relation,
+        )
+    )
+
+
 def _bundle_required(*facts: str) -> str:
     """Join mandatory atoms into one coverage unit while leaving wording free."""
     return "；".join(dict.fromkeys(fact for fact in facts if fact))
+
+
+def _prioritize_required_facts(
+    primary_facts: list[str], secondary_facts: list[str]
+) -> list[str]:
+    """Return player-first mandatory atoms in deterministic retention order."""
+    selected = list(dict.fromkeys(fact for fact in primary_facts if fact))
+    dropped: list[str] = []
+    for fact in dict.fromkeys(fact for fact in secondary_facts if fact):
+        projected = "；".join((*selected, fact))
+        if _chinese_character_count(projected) <= _REQUIRED_FACT_CHAR_BUDGET:
+            selected.append(fact)
+        else:
+            dropped.append(fact)
+    if dropped:
+        selected.append(_DROPPED_REQUIRED_PREFIX + "；".join(dropped))
+    return selected
+
+
+def _chinese_character_count(text: str) -> int:
+    """Measure the same Chinese-character budget used by the event utterance."""
+    return len(_HAN_CHARACTER.findall(text))
 
 
 def _compact_bomb_result_fact(rare_facts: list[str], result_fact: str) -> str:

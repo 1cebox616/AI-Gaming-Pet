@@ -6,6 +6,7 @@ import argparse
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
@@ -95,11 +96,12 @@ class ScenarioSpec:
 
 @dataclass(frozen=True, slots=True)
 class PathConstraint:
-    """Union of values observed for one raw field in the two inventories."""
+    """All values observed for one whitelisted raw field in real recordings."""
 
     minimum: float | None = None
     maximum: float | None = None
     values: frozenset[str] = frozenset()
+    source_files: frozenset[str] = frozenset()
 
     def merge(self, other: "PathConstraint") -> "PathConstraint":
         minimums = tuple(
@@ -112,6 +114,7 @@ class PathConstraint:
             minimum=min(minimums) if minimums else None,
             maximum=max(maximums) if maximums else None,
             values=self.values | other.values,
+            source_files=self.source_files | other.source_files,
         )
 
 
@@ -133,7 +136,7 @@ BASE_CT = "gsi-20260810-154052-044137.jsonl 第 18–73 行"
 BASE_CT_SHORT = "gsi-20260810-154052-044137.jsonl 第 104–132 行"
 BASE_CT_DEFUSE = "gsi-20260810-154052-044137.jsonl 第 3–16 行"
 BASE_T_C4 = "gsi-20260810-114649-321103.jsonl 第 65–100 行"
-BASE_BURN = "gsi-20260811-223119-169538.jsonl 第 440–476 行"
+BASE_BURN = "gsi-20260811-223119-169538.jsonl 第 452–476 行"
 BASE_LATE_DEFUSE = "gsi-20260809-112213.jsonl 第 40–72 行"
 BASE_EXPLOSION = "gsi-20260811-223119-169538.jsonl 第 1413–1493 行"
 COMMON_FORBIDDEN = (
@@ -471,8 +474,10 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         "丙",
         "踩火期间用 AK47 击杀一人，随后阵亡",
         (
-            *_span(463, 468, "player.state.burning", 255),
-            _set(469, "player.state.burning", 0),
+            *_span(458, 467, "player.state.round_kills", 1),
+            *_span(458, 467, "player.match_stats.kills", 6),
+            *_span(458, 467, "player.weapons.weapon_2.state", "active"),
+            *_span(458, 467, "player.weapons.weapon_3.state", "holstered"),
         ),
         ("燃烧", "AK47", "击杀", "阵亡"),
         expected_event_type="death",
@@ -579,41 +584,16 @@ SKIPPED_SCENARIOS: tuple[tuple[str, str], ...] = ()
 def load_inventory_constraints(
     paths: Sequence[Path] = INVENTORY_PATHS,
 ) -> dict[str, PathConstraint]:
-    """Load the inventory path whitelist and every committed observed range."""
-    constraints: dict[str, PathConstraint] = {}
+    """Scan every real recording while restricting paths to the inventory whitelist."""
+    allowed_paths: set[str] = set()
     for path in paths:
         for line in path.read_text(encoding="utf-8").splitlines():
             match = _TABLE_ROW.match(line)
             if match is None or int(match.group(2)) <= 0:
                 continue
-            raw_path, summary = match.group(1), match.group(3)
-            range_match = _NUMBER_RANGE.search(summary)
-            candidate = PathConstraint(
-                minimum=float(range_match.group(1)) if range_match else None,
-                maximum=float(range_match.group(2)) if range_match else None,
-                values=frozenset(_QUOTED_VALUE.findall(summary)),
-            )
-            if "true" in summary:
-                candidate = candidate.merge(PathConstraint(values=frozenset({"true"})))
-            if "false" in summary:
-                candidate = candidate.merge(PathConstraint(values=frozenset({"false"})))
-            constraints[raw_path] = constraints.get(raw_path, PathConstraint()).merge(
-                candidate
-            )
-    if OBSERVED_CONSTRAINTS_PATH.exists():
-        committed = json.loads(OBSERVED_CONSTRAINTS_PATH.read_text(encoding="utf-8"))
-        for raw_path, raw_constraint in committed.items():
-            if raw_path not in constraints:
-                continue
-            constraints[raw_path] = constraints[raw_path].merge(
-                PathConstraint(
-                    minimum=raw_constraint.get("minimum"),
-                    maximum=raw_constraint.get("maximum"),
-                    values=frozenset(raw_constraint.get("values", ())),
-                )
-            )
-    # The old Markdown reports abbreviate string samples and predate the latest
-    # recordings. All local real recordings may extend values, but never paths.
+            allowed_paths.add(match.group(1))
+
+    constraints: dict[str, PathConstraint] = {}
     for recording_path in RECORDINGS_DIRECTORY.glob("*.jsonl"):
         if recording_path.stat().st_size == 0:
             continue
@@ -622,7 +602,10 @@ def load_inventory_constraints(
             payload = wrapper.get("payload")
             if isinstance(payload, dict):
                 _merge_observed_payload_values(
-                    cast(dict[str, Any], payload), constraints
+                    cast(dict[str, Any], payload),
+                    constraints,
+                    allowed_paths=allowed_paths,
+                    source_file=recording_path.name,
                 )
     return constraints
 
@@ -632,7 +615,20 @@ def write_observed_constraints(
     *,
     output_path: Path = OBSERVED_CONSTRAINTS_PATH,
 ) -> None:
-    """Persist a scrubbed range proof so validation does not require recordings."""
+    """Persist reproducible all-recording evidence without player identities."""
+    recording_paths = tuple(
+        sorted(
+            (
+                path
+                for path in RECORDINGS_DIRECTORY.glob("*.jsonl")
+                if path.stat().st_size > 0
+            ),
+            key=lambda path: path.name,
+        )
+    )
+    payload_count = sum(
+        len(path.read_text(encoding="utf-8").splitlines()) for path in recording_paths
+    )
     data: dict[str, dict[str, object]] = {}
     for raw_path, constraint in sorted(constraints.items()):
         sensitive = raw_path.endswith("player.name") or raw_path.endswith("steamid")
@@ -640,28 +636,60 @@ def write_observed_constraints(
             "minimum": constraint.minimum,
             "maximum": constraint.maximum,
             "values": [] if sensitive else sorted(constraint.values),
+            "source_files": sorted(constraint.source_files),
         }
+    if any(
+        not entry["values"]
+        and entry["minimum"] is not None
+        and entry["maximum"] not in (None, 0)
+        for entry in data.values()
+    ):
+        raise ValueError("观测约束含有非零范围却缺少实际取值")
+    payload = {
+        "metadata": {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "source_files": [path.name for path in recording_paths],
+            "payload_count": payload_count,
+        },
+        "constraints": data,
+    }
     output_path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
 
 def _merge_observed_payload_values(
-    payload: Mapping[str, Any], constraints: dict[str, PathConstraint]
+    payload: Mapping[str, Any],
+    constraints: dict[str, PathConstraint],
+    *,
+    allowed_paths: set[str],
+    source_file: str,
 ) -> None:
     for raw_path, value in _iter_scalar_paths(payload):
         normalized = normalize_inventory_path(raw_path)
-        if normalized not in constraints:
+        if normalized not in allowed_paths:
             continue
         if isinstance(value, bool):
-            observed = PathConstraint(values=frozenset({str(value).lower()}))
+            observed = PathConstraint(
+                values=frozenset({str(value).lower()}),
+                source_files=frozenset({source_file}),
+            )
         elif isinstance(value, (int, float)):
-            observed = PathConstraint(minimum=float(value), maximum=float(value))
+            observed = PathConstraint(
+                minimum=float(value),
+                maximum=float(value),
+                values=frozenset({str(value)}),
+                source_files=frozenset({source_file}),
+            )
         elif isinstance(value, str):
-            observed = PathConstraint(values=frozenset({value}))
+            observed = PathConstraint(
+                values=frozenset({value}), source_files=frozenset({source_file})
+            )
         else:
             continue
-        constraints[normalized] = constraints[normalized].merge(observed)
+        constraints[normalized] = constraints.get(
+            normalized, PathConstraint()
+        ).merge(observed)
 
 
 def _iter_scalar_paths(

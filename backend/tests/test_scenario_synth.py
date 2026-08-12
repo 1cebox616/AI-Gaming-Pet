@@ -58,9 +58,26 @@ def test_inventory_reports_provide_positive_path_constraints() -> None:
     assert constraints["player.state.flashed"].maximum == 1
     assert constraints["player.state.burning"].minimum == 0
     assert constraints["player.state.burning"].maximum == 255
+    assert "gsi-20260811-223119-169538.jsonl" in constraints[
+        "player.state.burning"
+    ].source_files
     assert constraints["player.state.round_kills"].maximum == 6
     evidence = OBSERVED_CONSTRAINTS_PATH.read_text(encoding="utf-8")
     assert "76561" not in evidence
+
+
+def test_observed_constraints_are_complete_real_recording_evidence() -> None:
+    evidence = json.loads(OBSERVED_CONSTRAINTS_PATH.read_text(encoding="utf-8"))
+
+    assert evidence["metadata"]["payload_count"] == 2400
+    assert evidence["metadata"]["source_files"]
+    for constraint in evidence["constraints"].values():
+        assert constraint["source_files"]
+        assert not (
+            not constraint["values"]
+            and constraint["minimum"] is not None
+            and constraint["maximum"] not in (None, 0)
+        )
 
 
 def test_synthetic_products_scrub_all_source_identities() -> None:
@@ -138,6 +155,19 @@ def test_rare_corrective_scenarios_are_permanent_regressions() -> None:
         "late_defuse",
         "bomb_explosion_win",
     } <= scenario_ids
+
+
+def test_burning_scenario_reuses_the_observed_burning_shape() -> None:
+    rows = [
+        json.loads(line)
+        for line in (SCENARIOS_DIRECTORY / "burning_kill.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    burning = [row["payload"]["player"]["state"]["burning"] for row in rows]
+
+    assert [255, 227, 167, 108] == burning[:4]
+    assert burning[-1] == 0
 
 
 def _assert_placeholder_identities(value: object) -> None:

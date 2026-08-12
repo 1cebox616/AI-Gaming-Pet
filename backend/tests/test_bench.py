@@ -18,7 +18,6 @@ from pet.bench import (
     UniversalForbiddenFile,
     apply_universal_forbidden,
     answer_key_sha256,
-    build_analysis_system_prompt,
     calculate_length_statistics,
     check_output,
     commentary_length_statistics,
@@ -38,9 +37,9 @@ from pet.bench import (
     write_report,
     _score_summary_lines_for_ids,
 )
+from pet.prompt import load_system_prompt
 from pet.commentary_templates import COMMENTARY_TEMPLATES
 from pet.llm import LlmAnalysisResult, LlmError, LlmResult, LlmUsage
-from pet.prompt import load_system_prompt
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 ANSWER_KEY_PATH = (
@@ -490,9 +489,43 @@ def test_stream_analysis_uses_strict_protocol_settings_and_split_metrics(
     assert "提示词 SHA-256" in report
     assert "事件卡集合 SHA-256" in report
     assert "固定随机种子：43" in report
-    assert "提示词变体：A：骨架逐字复制" in report
+    assert "提示词：正式 B 方案（编号必答清单，措辞自由）" in report
     assert "否定总结 ✓" in report
     assert "越界措辞 ✓" in report
+
+
+def test_stream_analysis_can_select_one_declared_target_per_recording(
+    real_recording: Path,
+    prompts_directory: Path,
+) -> None:
+    result = run_stream_analysis(
+        (real_recording,),
+        model="vendor/model-under-test",
+        provider="provider-under-test",
+        client=FakeAnalysisClient(),
+        max_events=20,
+        event_timeout_seconds=3.0,
+        full_timeout_seconds=6.0,
+        prompts_directory=prompts_directory,
+        expected_event_types=("death_after_kill",),
+    )
+
+    assert result.selected_event_count == 1
+    assert result.events[0].case_id == real_recording.stem
+    assert result.events[0].event.type == "death_after_kill"
+
+    with pytest.raises(ValueError, match="目标事件类型数量"):
+        run_stream_analysis(
+            (real_recording,),
+            model="vendor/model-under-test",
+            provider="provider-under-test",
+            client=FakeAnalysisClient(),
+            max_events=20,
+            event_timeout_seconds=3.0,
+            full_timeout_seconds=6.0,
+            prompts_directory=prompts_directory,
+            expected_event_types=("death_after_kill", "death"),
+        )
 
 
 def test_stream_analysis_flags_known_unsupported_inference_phrases(
@@ -829,33 +862,20 @@ def test_universal_forbidden_file_has_both_factual_categories() -> None:
     assert len(forbidden.terms) == len(set(forbidden.terms))
 
 
-def test_analysis_prompt_variants_change_only_the_skeleton_contract() -> None:
-    baseline = build_analysis_system_prompt(variant="baseline")
-    checklist = build_analysis_system_prompt(variant="checklist")
-    personality = build_analysis_system_prompt(variant="checklist_personality")
+def test_analysis_prompt_is_loaded_from_the_product_owned_files() -> None:
+    prompt = load_system_prompt("inference", max_chars=ANALYSIS_MAX_EVENT_CHARS)
 
-    assert "事件行逐字复制 X" in baseline
-    assert "推断评测必须原样复制" in baseline
-    assert "事件行逐字复制 X" not in checklist
-    assert "推断评测必须原样复制" not in checklist
-    assert "每个〔必答N〕都必须出现在事件行" in checklist
-    assert "但【事件必答】若列出" in checklist
-    assert "零杀：事件行只能是" not in checklist
-    assert "事件必答覆盖规则" not in baseline
-    assert "事件必答覆盖规则" in checklist
-    assert "被闪/烟雾/燃烧" in checklist
-    assert "不要把清单外的旁支事件自行升级成必答项" in checklist
-    assert "已按保留优先级从左到右排列" in checklist
-    assert "一律不得删除" in checklist
-    assert "不得把精确数量概括成“多道具”" in checklist
-    assert "事件必答覆盖规则" in personality
-    assert personality.startswith(
-        "你是陪朋友打 CS2 的中文游戏搭子，说话短、随口、像个懂行的老玩家。\n"
-        "可以损但不刻薄。不要用书面语，不要像解说员报幕。\n"
-        "但下面的事实要求高于一切：宁可说得平淡，也不能说错或说出卡上没有的事。\n\n"
-    )
-    assert personality.endswith(checklist)
-    assert len({baseline, checklist, personality}) == 3
+    assert "事件行逐字复制 X" not in prompt
+    assert "推断评测必须原样复制" not in prompt
+    assert "每个〔必答N〕都必须出现在事件行" in prompt
+    assert "但【事件必答】若列出" in prompt
+    assert "零杀：事件行只能是" not in prompt
+    assert "事件必答覆盖规则" in prompt
+    assert "被闪/烟雾/燃烧" in prompt
+    assert "不要把清单外的旁支事件自行升级成必答项" in prompt
+    assert "已按保留优先级从左到右排列" in prompt
+    assert "一律不得删除" in prompt
+    assert "不得把精确数量概括成“多道具”" in prompt
 
 
 def test_universal_forbidden_hit_forces_whole_sentence_wrong() -> None:

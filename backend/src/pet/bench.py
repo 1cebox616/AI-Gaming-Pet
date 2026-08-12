@@ -43,62 +43,6 @@ ANALYSIS_WHOLE_ACCURACY_TARGET = 0.95
 ANALYSIS_ATOM_ACCURACY_TARGET = 0.95
 ANALYSIS_MIN_SCENE_SENTENCES = 2
 ANALYSIS_MAX_SCENE_SENTENCES = 4
-AnalysisPromptVariant = Literal["baseline", "checklist", "checklist_personality"]
-_SKELETON_READING_RULE = (
-    "- 【事件必答】中的「推荐骨架」是确定性事实的压缩顺序，不是模型推断；"
-    "推断评测必须原样复制。"
-)
-_CHECKLIST_READING_RULE = (
-    "- 【事件必答】是程序给出的编号原子清单；每个〔必答N〕都必须出现在事件行，"
-    "措辞由你决定。"
-)
-_SKELETON_INFERENCE_RULE = (
-    "若有「推荐骨架：X」，事件行逐字复制 X；该骨架已由程序压到字数上限内，"
-    "不要改写、扩写或\n把后一杀补成前一杀的武器。"
-)
-_CHECKLIST_INFERENCE_RULE = (
-    "【事件必答】按〔必答1〕、〔必答2〕……列出原子事实；每一项都必须在事件行出现，"
-    "措辞与合并方式由你决定。\n"
-    "〔边界〕不是事实；它只表示不得添加清单外的个人经过。不得删除清单中的阶段、"
-    "武器归属、累计杀数、结算方式、对枪、摸烟、被补等确定性关系。"
-)
-_ZERO_KILL_DEATH_GATE = """1. 焦点为普通死亡且本回合零杀：事件行只能是「阶段+普通死亡」；「无」一律省略，禁止补写
-   未观测击杀、未造成伤害、烟闪、换弹或掉血过程。"""
-_CHECKLIST_ZERO_KILL_DEATH_GATE = """1. 焦点为普通死亡且本回合零杀：通用事实只写「阶段+普通死亡」；但【事件必答】若列出
-   下包、弹匣、烟闪等罕见事实，必须同时覆盖这些编号事实，不得被本条删掉。"""
-_ZERO_KILL_RESULT_GATE = """2. 焦点为回合胜负且本人零杀：事件行只能是「结算方式+回合胜负」；若未观测开打再补
-   「未观测开打时刻」。禁止追加白给、普通死亡或其他个人经过。"""
-_CHECKLIST_ZERO_KILL_RESULT_GATE = """2. 焦点为回合胜负且本人零杀：通用事实写「结算方式+回合胜负」；若【事件必答】列出
-   炸弹已安放、拆除计时、我方阵营等罕见事实，必须全部保留；不得追加清单外个人经过。"""
-_RARE_FACT_PRIORITY_RULE = """## 事件必答覆盖规则（优先级高于下文所有“只能写”和“到此结束”）
-
-程序已经把与本次焦点直接相关的罕见关系（被闪/烟雾/燃烧、换弹与弹匣、残血、道具、
-MVP/助攻、拿包与炸弹计时等）算进【事件必答】。〔必答N〕是地位相同、逐项验收的原子，
-不是供你挑选的素材。必须先在心里逐项打勾，再压成事件行；措辞可以合并，事实不得合并消失。
-【本回合】时间线只用于核对先后与措辞，不要把清单外的旁支事件自行升级成必答项。
-
-【事件必答】已按保留优先级从左到右排列。30 字冲突时，先把相邻原子压成短语，仍不得
-漏掉任意编号；例如“被闪期间完成双杀”可压成“被闪双杀”，但不能只写“双杀”。
-
-不得补执行者、位置、敌人或伤害来源。只有未编号的“满血”和重复阶段等修饰可以删除；
-凡带〔必答N〕的内容，包括罕见关系、武器、最终多杀数、“有显著贡献”和回合结果，
-一律不得删除。一个〔必答N〕内部用分号隔开的每个子项也都必须出现，不能只挑最后的
-回合结果。输出前按编号和分号子项逐个复核覆盖数量。
-
-本节是最终覆盖门，优先于上文“四类事件的硬格式”和示范：若旧格式会漏掉编号事实，
-必须扩写事件行保住编号事实。例如“本回合新增助攻；灭队，回合胜利”必须同时说助攻和
-回合胜利；“炸弹已安放；我方CT；炸弹引爆，回合失败”三项必须全部说。
-“投掷物：闪光弹×2｜烟雾弹×1｜手雷×1；M4A1-S完成击杀”不能只说击杀；数量是核心。
-也不得把精确数量概括成“多道具”或“四颗道具”，必须逐种保留闪2、烟1、雷1。
-“M4A1-S最后1发完成第3杀”不能退化成普通三杀；最后一发是核心。"""
-_LIGHT_PERSONALITY_PREFIX = """你是陪朋友打 CS2 的中文游戏搭子，说话短、随口、像个懂行的老玩家。
-可以损但不刻薄。不要用书面语，不要像解说员报幕。
-但下面的事实要求高于一切：宁可说得平淡，也不能说错或说出卡上没有的事。"""
-_ANALYSIS_PROMPT_VARIANT_LABELS: dict[AnalysisPromptVariant, str] = {
-    "baseline": "A：骨架逐字复制",
-    "checklist": "B：骨架作为必答清单",
-    "checklist_personality": "C：必答清单 + 轻量性格前缀",
-}
 _NEGATIVE_SUMMARY_TERMS = (
     "未阵亡",
     "未拆除",
@@ -294,7 +238,6 @@ class AnalysisBenchResult:
     requested_model: str
     requested_provider: str | None
     system_prompt: str
-    prompt_variant: AnalysisPromptVariant
     run_timestamp: datetime
     snapshot_count: int
     detected_event_count: int
@@ -635,8 +578,8 @@ def run_stream_analysis(
     max_completion_tokens: int = ANALYSIS_MAX_COMPLETION_TOKENS,
     reasoning_effort: str = "none",
     seed: int = ANALYSIS_SEED,
-    prompt_variant: AnalysisPromptVariant = "baseline",
     prompts_directory: Path = PROMPTS_DIRECTORY,
+    expected_event_types: Sequence[EventType] | None = None,
 ) -> AnalysisBenchResult:
     """Replay recordings and stream one strict audited response per event."""
     if not recording_paths:
@@ -653,10 +596,13 @@ def run_stream_analysis(
         raise ValueError("full timeout must be at least the event timeout")
     if max_completion_tokens < 1:
         raise ValueError("max completion tokens must be positive")
+    if expected_event_types is not None and len(expected_event_types) != len(recording_paths):
+        raise ValueError("目标事件类型数量必须与录制文件数量一致")
 
-    system_prompt = build_analysis_system_prompt(
+    system_prompt = load_system_prompt(
+        "inference",
+        max_chars=ANALYSIS_MAX_EVENT_CHARS,
         prompts_directory=prompts_directory,
-        variant=prompt_variant,
     )
     configuration = load_config()
     events: list[AnalysisBenchEvent] = []
@@ -664,7 +610,7 @@ def run_stream_analysis(
     detected_event_count = 0
     selected_event_count = 0
 
-    for recording_path in recording_paths:
+    for recording_index, recording_path in enumerate(recording_paths):
         snapshots = load_recording(recording_path)
         replay = replay_commentary(
             snapshots,
@@ -679,8 +625,33 @@ def run_stream_analysis(
         )
         snapshot_count += len(snapshots)
         detected_event_count += len(replay.dispositions)
-        selected_event_count += len(selected)
-        for selected_index, disposition in enumerate(selected, 1):
+        expected_type = (
+            expected_event_types[recording_index]
+            if expected_event_types is not None
+            else None
+        )
+        if expected_type is None:
+            chosen_for_recording = selected
+        else:
+            matches = tuple(
+                disposition
+                for disposition in selected
+                if disposition.decision.event.type == expected_type
+            )
+            if not matches:
+                observed = ", ".join(
+                    disposition.decision.event.type for disposition in selected
+                ) or "无"
+                raise ValueError(
+                    f"{recording_path.name} 未选中目标事件 {expected_type}；"
+                    f"实际为：{observed}"
+                )
+            # A synthetic scenario may contain setup events of the same kind.
+            # Its declared target is the final matching event, identical to
+            # scenario_synth's cards-only selection rule.
+            chosen_for_recording = (matches[-1],)
+        selected_event_count += len(chosen_for_recording)
+        for selected_index, disposition in enumerate(chosen_for_recording, 1):
             if len(events) >= max_events:
                 continue
             event = disposition.decision.event
@@ -694,8 +665,12 @@ def run_stream_analysis(
                 ),
             )
             case_id = (
-                f"{recording_path.stem}:{selected_index:03d}:{event.type}:"
-                f"r{event.round_number if event.round_number is not None else 'na'}"
+                recording_path.stem
+                if expected_type is not None
+                else (
+                    f"{recording_path.stem}:{selected_index:03d}:{event.type}:"
+                    f"r{event.round_number if event.round_number is not None else 'na'}"
+                )
             )
             events.append(
                 AnalysisBenchEvent(
@@ -724,7 +699,6 @@ def run_stream_analysis(
         requested_model=model,
         requested_provider=provider,
         system_prompt=system_prompt,
-        prompt_variant=prompt_variant,
         run_timestamp=datetime.now(timezone.utc),
         snapshot_count=snapshot_count,
         detected_event_count=detected_event_count,
@@ -737,41 +711,6 @@ def run_stream_analysis(
         seed=seed,
         events=tuple(events),
     )
-
-
-def build_analysis_system_prompt(
-    *,
-    prompts_directory: Path = PROMPTS_DIRECTORY,
-    variant: AnalysisPromptVariant = "baseline",
-) -> str:
-    """Load one factual prompt variant while preserving every unrelated byte."""
-    prompt = load_system_prompt(
-        "inference",
-        max_chars=ANALYSIS_MAX_EVENT_CHARS,
-        prompts_directory=prompts_directory,
-    )
-    if variant == "baseline":
-        return prompt
-
-    replacements: tuple[tuple[str, str], ...] = (
-        (_SKELETON_READING_RULE, _CHECKLIST_READING_RULE),
-        (_SKELETON_INFERENCE_RULE, _CHECKLIST_INFERENCE_RULE),
-        (_ZERO_KILL_DEATH_GATE, _CHECKLIST_ZERO_KILL_DEATH_GATE),
-        (_ZERO_KILL_RESULT_GATE, _CHECKLIST_ZERO_KILL_RESULT_GATE),
-    )
-    checklist_prompt = prompt
-    for old, new in replacements:
-        if checklist_prompt.count(old) != 1:
-            raise ValueError("B 组替换规则未恰好出现一次，拒绝生成冲突提示词")
-        checklist_prompt = checklist_prompt.replace(old, new, 1)
-
-    checklist_prompt = f"{checklist_prompt}\n\n{_RARE_FACT_PRIORITY_RULE}"
-
-    if variant == "checklist":
-        return checklist_prompt
-    if variant == "checklist_personality":
-        return f"{_LIGHT_PERSONALITY_PREFIX}\n\n{checklist_prompt}"
-    raise ValueError(f"unknown analysis prompt variant: {variant}")
 
 
 def _attempt_stream_analysis(
@@ -1017,7 +956,7 @@ def render_stream_analysis_report(
         ),
         f"- 上游实际返回型号：{_join_or_unavailable(actual_models)}",
         f"- 实际上游：{_join_or_unavailable(actual_providers)}",
-        f"- 提示词变体：{_ANALYSIS_PROMPT_VARIANT_LABELS[result.prompt_variant]}",
+        "- 提示词：正式 B 方案（编号必答清单，措辞自由）",
         f"- 事件/完整截止时间：{result.event_timeout_seconds:g}s / "
         f"{result.full_timeout_seconds:g}s",
         f"- 温度 / 完成上限：{ANALYSIS_TEMPERATURE:g} / "
@@ -1861,6 +1800,21 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         help="GSI JSONL 录制文件；stream-analysis 模式可重复传入",
     )
+    parser.add_argument(
+        "--expected-event-type",
+        action="append",
+        choices=(
+            "kill",
+            "kill_headshot",
+            "multi_kill",
+            "death",
+            "death_after_kill",
+            "death_thrown_away",
+            "round_win",
+            "round_loss",
+        ),
+        help="与每个 --replay 对齐的目标事件类型；用于每场景只评测声明的目标事件",
+    )
     parser.add_argument("--model", help="OpenRouter 型号 ID；cards-only 时可省略")
     parser.add_argument("--provider", help="锁定的 OpenRouter 上游服务商 slug")
     parser.add_argument("--out", type=Path, required=True, help="Markdown 报告输出路径")
@@ -1927,12 +1881,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="stream-analysis 的最大完成 token 数",
     )
     parser.add_argument(
-        "--analysis-prompt-variant",
-        choices=("baseline", "checklist", "checklist_personality"),
-        default="baseline",
-        help="stream-analysis 的提示词对照组；默认保持当前基线",
-    )
-    parser.add_argument(
         "--scores",
         type=Path,
         help="人工评分 JSON；与 --score-report 一起离线追加准确率汇总",
@@ -1982,9 +1930,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.score_template_out is not None and not args.stream_analysis:
         print("错误：--score-template-out 仅适用于 --stream-analysis", file=sys.stderr)
         return 2
-    if not args.stream_analysis and args.analysis_prompt_variant != "baseline":
-        print("错误：--analysis-prompt-variant 仅适用于 --stream-analysis", file=sys.stderr)
-        return 2
     if not args.cards_only and not score_report_mode and args.model is None:
         print("错误：模型评测必须传入 --model", file=sys.stderr)
         return 2
@@ -2000,6 +1945,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if not args.stream_analysis and not score_report_mode and len(recordings) != 1:
         print("错误：只有 --stream-analysis 可重复传入 --replay", file=sys.stderr)
+        return 2
+    expected_event_types = tuple(args.expected_event_type or ())
+    if expected_event_types and not args.stream_analysis:
+        print("错误：--expected-event-type 仅适用于 --stream-analysis", file=sys.stderr)
+        return 2
+    if expected_event_types and len(expected_event_types) != len(recordings):
+        print("错误：--expected-event-type 数量必须与 --replay 数量一致", file=sys.stderr)
         return 2
 
     if score_report_mode:
@@ -2048,7 +2000,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_completion_tokens=args.analysis_max_tokens,
                 reasoning_effort=args.reasoning_effort,
                 seed=args.seed,
-                prompt_variant=args.analysis_prompt_variant,
+                expected_event_types=expected_event_types or None,
             )
             write_stream_analysis_report(analysis, args.out)
             if args.score_template_out is not None:

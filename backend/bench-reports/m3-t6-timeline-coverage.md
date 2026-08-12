@@ -5,18 +5,18 @@ round_live 与 bought 两个锚点，以及已由完整真实录制证实的 bur
 
 | kind | 全部真实录制 | 合成集 |
 |---|---:|---:|
-| `round_live` | 44 | 29 |
+| `round_live` | 44 | 28 |
 | `bought` | 75 | 55 |
 | `flash_start` | 14 | 28 |
 | `flash_end` | 14 | 28 |
 | `smoke_start` | 10 | 23 |
 | `smoke_end` | 10 | 23 |
 | `kill` | 39 | 44 |
-| `damage` | 137 | 106 |
-| `primary_weapon` | 77 | 67 |
+| `damage` | 137 | 104 |
+| `primary_weapon` | 77 | 66 |
 | `ammo_low` | 11 | 23 |
 | `reload` | 28 | 55 |
-| `grenade_used` | 56 | 68 |
+| `grenade_used` | 56 | 66 |
 | `grenade_pickup` | 31 | 8 |
 | `bomb` | 30 | 26 |
 | `bomb_pickup` | 5 | 4 |
@@ -29,5 +29,5 @@ round_live 与 bought 两个锚点，以及已由完整真实录制证实的 bur
 | `burn_end` | 4 | 1 |
 
 - 场景数：34
-- 合成录制总大小：2406396 bytes
+- 合成录制总大小：2383866 bytes
 - 模型调用次数：0

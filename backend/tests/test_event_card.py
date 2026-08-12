@@ -762,7 +762,8 @@ def test_multikill_required_facts_are_numbered_atoms_without_a_sentence_skeleton
     assert "击杀经过=第1杀、前期、满血、AK47、爆头击杀" in required
     assert "第2杀、中期、剩38血、普通击杀、赢下对枪" in required
     assert "；本回合累计双杀" in required
-    assert required.endswith("〔边界〕仅覆盖以上事实")
+    assert "〔边界〕仅覆盖以上事实" in required
+    assert "〔因字数丢弃〕" in required
 
 
 def test_round_result_multikill_atoms_keep_method_and_contribution() -> None:
@@ -792,9 +793,8 @@ def test_round_result_multikill_atoms_keep_method_and_contribution() -> None:
     required = card.split("【事件必答】", 1)[1]
     assert "推荐骨架" not in required
     assert "灭队，回合失败" in required
-    assert "击杀经过=第1杀、前期、满血、AK47、爆头击杀" in required
-    assert "第2杀、中期、剩38血、普通击杀、赢下对枪" in required
-    assert "本回合累计双杀" in required
+    assert "前期满血AK47爆头双杀" in required
+    assert "中期、被补枪" in required
     assert "有显著贡献" in required
 
 
@@ -822,7 +822,7 @@ def test_required_facts_choose_one_coherent_rare_focus_without_duplicates() -> N
     assert "换弹完成后0.5秒完成击杀" not in required
     assert "弹匣仅剩1发 AK47时完成击杀" not in required
     assert "残血（剩45血）完成击杀" not in required
-    assert required.index("被闪期间完成击杀") < required.index("第1杀")
+    assert required.index("AK47") < required.index("被闪期间完成击杀")
 
 
 def test_round_result_without_kills_keeps_death_stage_in_required_facts() -> None:
