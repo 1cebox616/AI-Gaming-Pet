@@ -207,6 +207,7 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         (
             *_span(18, 73, "player.state.round_kills", 0),
             *_span(18, 73, "player.state.round_killhs", 0),
+            *(_delete(line, "round.bomb") for line in range(36, 73)),
             *DEATH_WITHOUT_ROUND_RESULT,
         ),
         ("弹匣打空", "阵亡"),
@@ -525,7 +526,7 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         "postplant_triple_loss",
         "丁",
         "下包后反攻阶段完成三杀但最终回合失败",
-        (),
+        (_set(72, "player.weapons.weapon_2.ammo_clip", 2),),
         ("反攻包点", "三杀", "回合失败"),
     ),
     _ct_spec(

@@ -602,7 +602,8 @@ def test_timeline_without_round_live_declares_fallback_origin() -> None:
     card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
 
     assert "【本回合】（未观测到开打时刻，秒数从回合起点算起）" in card
-    assert "〔" not in card
+    timeline = card.split("【本回合】", 1)[1].split("【事件必答】", 1)[0]
+    assert "〔" not in timeline
 
 
 def test_kill_and_death_timeline_entries_use_code_derived_stage_labels() -> None:
@@ -735,7 +736,7 @@ def test_timeline_relations_are_calculated_before_the_model_reads_the_card() -> 
     ) in card
 
 
-def test_multikill_required_facts_include_a_scoped_compact_skeleton() -> None:
+def test_multikill_required_facts_are_numbered_atoms_without_a_sentence_skeleton() -> None:
     snapshot = _real_snapshot()
     entries = (
         TimelineEntry(0.0, "round_live", None),
@@ -755,16 +756,16 @@ def test_multikill_required_facts_include_a_scoped_compact_skeleton() -> None:
         event,
     )
 
-    assert (
-        "推荐骨架：前期满血AK47爆头一杀，"
-        "中期剩38血对枪再杀，双杀被补"
-    ) in card
-    assert "仅覆盖以上事实" in card
-    assert "第2杀必须单独写" not in card
-    assert "中期AK47" not in card.split("推荐骨架：", 1)[1].split(" ", 1)[0]
+    required = card.split("【事件必答】", 1)[1]
+    assert "推荐骨架" not in required
+    assert "〔必答1〕" in required
+    assert "击杀经过=第1杀、前期、满血、AK47、爆头击杀" in required
+    assert "第2杀、中期、剩38血、普通击杀、赢下对枪" in required
+    assert "；本回合累计双杀" in required
+    assert required.endswith("〔边界〕仅覆盖以上事实")
 
 
-def test_round_result_multikill_skeleton_keeps_method_and_contribution() -> None:
+def test_round_result_multikill_atoms_keep_method_and_contribution() -> None:
     snapshot = _real_snapshot()
     entries = (
         TimelineEntry(0.0, "round_live", None),
@@ -788,15 +789,16 @@ def test_round_result_multikill_skeleton_keeps_method_and_contribution() -> None
         event,
     )
 
-    assert (
-        "推荐骨架：灭队，回合失败，前期满血AK47爆头一杀，"
-        "中期对枪再杀，双杀被补，有显著贡献"
-    ) in card
-    assert "第2杀必须单独写" not in card
-    assert "灭队，回合失败" in card
+    required = card.split("【事件必答】", 1)[1]
+    assert "推荐骨架" not in required
+    assert "灭队，回合失败" in required
+    assert "击杀经过=第1杀、前期、满血、AK47、爆头击杀" in required
+    assert "第2杀、中期、剩38血、普通击杀、赢下对枪" in required
+    assert "本回合累计双杀" in required
+    assert "有显著贡献" in required
 
 
-def test_required_facts_promote_rare_focus_relations_without_model_arithmetic() -> None:
+def test_required_facts_choose_one_coherent_rare_focus_without_duplicates() -> None:
     snapshot = _real_snapshot()
     entries = (
         TimelineEntry(0.0, "round_live", None),
@@ -817,9 +819,9 @@ def test_required_facts_promote_rare_focus_relations_without_model_arithmetic() 
 
     required = card.split("【事件必答】", 1)[1]
     assert "被闪期间完成击杀" in required
-    assert "换弹完成后0.5秒完成击杀" in required
-    assert "弹匣仅剩1发 AK47时完成击杀" in required
-    assert "残血（剩45血）完成击杀" in required
+    assert "换弹完成后0.5秒完成击杀" not in required
+    assert "弹匣仅剩1发 AK47时完成击杀" not in required
+    assert "残血（剩45血）完成击杀" not in required
     assert required.index("被闪期间完成击杀") < required.index("第1杀")
 
 
