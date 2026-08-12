@@ -489,7 +489,7 @@ def test_stream_analysis_uses_strict_protocol_settings_and_split_metrics(
     assert "提示词 SHA-256" in report
     assert "事件卡集合 SHA-256" in report
     assert "固定随机种子：43" in report
-    assert "提示词：正式 B 方案（编号必答清单，措辞自由）" in report
+    assert "提示词：只响应【刚刚】事件或连续事件" in report
     assert "否定总结 ✓" in report
     assert "越界措辞 ✓" in report
 
@@ -865,17 +865,12 @@ def test_universal_forbidden_file_has_both_factual_categories() -> None:
 def test_analysis_prompt_is_loaded_from_the_product_owned_files() -> None:
     prompt = load_system_prompt("inference", max_chars=ANALYSIS_MAX_EVENT_CHARS)
 
-    assert "事件行逐字复制 X" not in prompt
-    assert "推断评测必须原样复制" not in prompt
-    assert "每个〔必答N〕都必须出现在事件行" in prompt
-    assert "但【事件必答】若列出" in prompt
-    assert "零杀：事件行只能是" not in prompt
-    assert "事件必答覆盖规则" in prompt
-    assert "被闪/烟雾/燃烧" in prompt
-    assert "不要把清单外的旁支事件自行升级成必答项" in prompt
-    assert "已按保留优先级从左到右排列" in prompt
-    assert "一律不得删除" in prompt
-    assert "不得把精确数量概括成“多道具”" in prompt
+    assert "【事件必答】" not in prompt
+    assert "只对事件卡最末的【刚刚】区域作出反应" in prompt
+    assert "【本回合历史】明确禁止回应" in prompt
+    assert "也不得补充、累计或总结" in prompt
+    assert "场面行可引用【比分】" in prompt
+    assert "不得补三杀" in prompt
 
 
 def test_universal_forbidden_hit_forces_whole_sentence_wrong() -> None:

@@ -122,7 +122,7 @@ def _event(snapshot: GameSnapshot) -> GameEvent:
     )
 
 
-def test_top_labels_and_fact_areas_are_in_fixed_order_with_integrated_focus() -> None:
+def test_top_labels_separate_forbidden_history_from_the_only_response_scope() -> None:
     snapshot = _real_snapshot().model_copy(update={"health": 0, "bomb_state": "planted"})
 
     card = render_event_card(snapshot, _game(snapshot), _situation(), _event(snapshot))
@@ -137,8 +137,8 @@ def test_top_labels_and_fact_areas_are_in_fixed_order_with_integrated_focus() ->
         "【全场】",
         "【下包后】",
         "【本回合投掷物】",
-        "【本回合】",
-        "【刚刚",
+        "【本回合历史】",
+        "【刚刚】",
     ]
     assert all(heading in card for heading in headings)
     assert [card.index(heading) for heading in headings] == sorted(
@@ -153,7 +153,7 @@ def test_top_labels_and_fact_areas_are_in_fixed_order_with_integrated_focus() ->
     assert "手持M4A1-S 弹匣12/20 备弹40" in card
     assert "【本回合投掷物】闪光弹×2｜烟雾弹×1" in card
     assert "【下包后】8.7秒" in card
-    assert "【本回合】（秒数从正式开打算起）" in card
+    assert "【本回合历史】（仅供校验，禁止回应；秒数从正式开打算起）" in card
     assert "  -3.9s 玩家购买装备（仅检测到金额与价值变化）" in card
     assert "  0.0s 正式开打" in card
     assert "  1.4s 玩家被闪" in card
@@ -166,12 +166,13 @@ def test_top_labels_and_fact_areas_are_in_fixed_order_with_integrated_focus() ->
     assert "  42.5s 玩家出烟 持续8.2秒" in card
     assert "  43.1s 玩家拿到包" in card
     assert "12杀 4助攻 5死 MVP1次" in card
-    assert "89.8s【刚刚｜后期】" in card
+    assert "【刚刚】（唯一回应范围）" in card
+    assert "89.8s【后期】" in card
     assert "玩家阵亡（本次焦点：普通死亡｜本回合1杀）" in card
     assert "存活89.8秒" not in card
-    assert card.count("【刚刚") == 1
-    assert "\n【刚刚】" not in card
-    assert card.count("【本回合】") == 1
+    assert card.count("【刚刚】") == 1
+    assert "\n【刚刚】（唯一回应范围）\n" in card
+    assert card.count("【本回合历史】") == 1
     for removed_summary in (
         "【本回合时间线】",
         "被闪累计",
@@ -188,7 +189,7 @@ def test_top_labels_and_fact_areas_are_in_fixed_order_with_integrated_focus() ->
         "我方连败2轮",
         "连续增加",
     ):
-        assert redundant not in card.split("【刚刚", 1)[1]
+        assert redundant not in card.split("【刚刚】", 1)[1]
 
 
 def test_missing_fields_are_omitted_without_unknown_or_zero_substitution() -> None:
@@ -269,7 +270,7 @@ def test_zero_and_no_occurrence_facts_are_omitted() -> None:
         "本回合未买装备",
     ):
         assert omitted not in card
-    assert "【本回合】" not in card
+    assert "【本回合历史】" not in card
     assert "【全场】" not in card
 
 
@@ -341,7 +342,7 @@ def test_burn_transitions_and_mvp_increase_render_as_timeline_facts() -> None:
     assert "20.0s 玩家开始燃烧" in card
     assert "22.4s 玩家燃烧结束 持续2.4秒" in card
     assert (
-        "80.0s【刚刚】 玩家获得MVP（MVP+1） + "
+        "80.0s 玩家获得MVP（MVP+1） + "
         "灭队（本次焦点：回合胜利｜结算：灭队）"
     ) in card
 
@@ -402,7 +403,7 @@ def test_stale_round_situation_is_omitted_while_other_sections_remain() -> None:
         _event(snapshot),
     )
 
-    assert "【本回合】" not in card
+    assert "【本回合历史】" not in card
     assert "【游戏模式】" in card
     assert "【我】" in card
     assert "【全场】" in card
@@ -436,8 +437,8 @@ def test_spectating_keeps_match_round_timeline_and_self_team_but_not_player_data
     assert "【比分】我方CT 2:3（落后）" in card
     assert "【我】" not in card
     assert "【全场】" not in card
-    assert "【本回合】" in card
-    assert "【刚刚｜" in card
+    assert "【本回合历史】" in card
+    assert "【刚刚】（唯一回应范围）" in card
     assert "余额9999" not in card
     assert "5血" not in card
     assert "99个击杀" not in card
@@ -492,13 +493,13 @@ def test_existing_timeline_kinds_render_the_declared_text() -> None:
         "65.0s 玩家拿到包",
         "70.0s 玩家丢了包",
         "75.0s 玩家助攻",
-        "80.0s【刚刚｜反攻包点】 "
+        "80.0s【反攻包点】 "
         "玩家阵亡（本次焦点：普通死亡｜本回合1杀）",
     )
     assert all(text in card for text in expected)
 
 
-def test_round_result_is_the_integrated_focus_instead_of_a_separate_section() -> None:
+def test_round_result_is_rendered_only_in_the_separate_focus_section() -> None:
     snapshot = _real_snapshot().model_copy(
         update={"round_phase": "over", "round_win_team": "T"}
     )
@@ -518,11 +519,11 @@ def test_round_result_is_the_integrated_focus_instead_of_a_separate_section() ->
     card = render_event_card(snapshot, _game(snapshot), situation, event)
 
     assert (
-        "57.4s【刚刚】 灭队"
+        "57.4s 灭队"
         "（本次焦点：回合失败｜结算：灭队）"
     ) in card
-    assert card.count("回合失败") == 2
-    assert "\n【刚刚】" not in card
+    assert card.count("回合失败") == 1
+    assert "\n【刚刚】（唯一回应范围）\n" in card
 
 
 def test_round_result_deduplicates_matching_global_bomb_transition() -> None:
@@ -545,11 +546,11 @@ def test_round_result_deduplicates_matching_global_bomb_transition() -> None:
     card = render_event_card(snapshot, _game(snapshot), situation, event)
 
     assert (
-        "57.4s【刚刚】 炸弹拆除"
+        "57.4s 炸弹拆除"
         "（本次焦点：回合失败｜结算：炸弹拆除）"
     ) in card
     assert "炸弹已拆除" not in card
-    assert card.count("炸弹拆除") == 3
+    assert card.count("炸弹拆除") == 2
 
 
 def test_same_snapshot_uses_plus_without_a_redundant_zero_second_marker() -> None:
@@ -566,7 +567,7 @@ def test_same_snapshot_uses_plus_without_a_redundant_zero_second_marker() -> Non
     card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
 
     assert (
-        "18.0s【刚刚｜前期】 玩家掉了100血 剩0血 + "
+        "18.0s【前期】 玩家掉了100血 剩0血 + "
         "阵亡（本次焦点：普通死亡）"
     ) in card
     assert "连续事件0.0秒" not in card
@@ -601,8 +602,8 @@ def test_timeline_without_round_live_declares_fallback_origin() -> None:
 
     card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
 
-    assert "【本回合】（未观测到开打时刻，秒数从回合起点算起）" in card
-    timeline = card.split("【本回合】", 1)[1].split("【事件必答】", 1)[0]
+    assert "【本回合历史】（仅供校验，禁止回应；未观测到开打时刻，秒数从回合起点算起）" in card
+    timeline = card.split("【本回合历史】", 1)[1]
     assert "〔" not in timeline
 
 
@@ -627,7 +628,7 @@ def test_kill_and_death_timeline_entries_use_code_derived_stage_labels() -> None
     assert "使用AK47完成击杀（本回合第2杀）" in card
     assert "30.0s【中期】 玩家使用AK47完成击杀（本回合第3杀）" in card
     assert "70.0s【后期】 玩家阵亡（本回合3杀）" in card
-    assert "77.0s【刚刚｜连续事件2.0秒｜守包】" in card
+    assert "77.0s【连续事件2.0秒｜守包】" in card
     assert "使用AK47完成击杀（本回合第4杀）" in card
     assert (
         "阵亡（本次焦点：普通死亡｜本回合4杀｜"
@@ -645,7 +646,7 @@ def test_close_timeline_entries_remain_complete_without_a_dense_marker() -> None
         snapshot,
         _game(snapshot),
         replace(_situation(), timeline=entries),
-        _event(snapshot),
+        _event(snapshot).model_copy(update={"type": "kill"}),
     )
 
     assert "密集" not in card
@@ -667,7 +668,7 @@ def test_continuous_group_uses_only_total_three_second_window_without_gap_limit(
         _event(snapshot).model_copy(update={"type": "kill"}),
     )
 
-    assert "22.5s【刚刚｜连续事件2.5秒｜前期】" in card
+    assert "22.5s【连续事件2.5秒｜前期】" in card
     assert (
         "玩家掉了40血 剩60血 > 使用AK47完成击杀"
         "（本次焦点：普通击杀｜本回合第1杀）"
@@ -728,7 +729,7 @@ def test_timeline_relations_are_calculated_before_the_model_reads_the_card() -> 
     assert "25.7s【连续事件0.5秒｜前期】" in card
     assert "玩家出烟 持续6.8秒 > 使用M4A1-S完成击杀" in card
     assert "摸烟击杀，出烟后0.5秒" in card
-    assert "29.0s【刚刚｜连续事件0.5秒｜前期】" in card
+    assert "29.0s【连续事件0.5秒｜前期】" in card
     assert "使用M4A1-S完成击杀（本回合第3杀｜该阶段三杀）" in card
     assert (
         "阵亡（本次焦点：普通死亡｜本回合3杀｜"
@@ -736,7 +737,7 @@ def test_timeline_relations_are_calculated_before_the_model_reads_the_card() -> 
     ) in card
 
 
-def test_multikill_required_facts_are_numbered_atoms_without_a_sentence_skeleton() -> None:
+def test_event_card_has_no_required_facts_and_separates_focus_from_history() -> None:
     snapshot = _real_snapshot()
     entries = (
         TimelineEntry(0.0, "round_live", None),
@@ -756,17 +757,14 @@ def test_multikill_required_facts_are_numbered_atoms_without_a_sentence_skeleton
         event,
     )
 
-    required = card.split("【事件必答】", 1)[1]
-    assert "推荐骨架" not in required
-    assert "〔必答1〕" in required
-    assert "击杀经过=第1杀、前期、满血、AK47、爆头击杀" in required
-    assert "第2杀、中期、剩38血、普通击杀、赢下对枪" in required
-    assert "；本回合累计双杀" in required
-    assert "〔边界〕仅覆盖以上事实" in required
-    assert "〔因字数丢弃〕" in required
+    assert "【事件必答】" not in card
+    assert "〔必答" not in card
+    assert "〔因字数丢弃〕" not in card
+    assert card.count("【刚刚】") == 1
+    assert "本次焦点：多杀" in card
 
 
-def test_round_result_multikill_atoms_keep_method_and_contribution() -> None:
+def test_round_result_focus_does_not_add_a_historical_contribution_section() -> None:
     snapshot = _real_snapshot()
     entries = (
         TimelineEntry(0.0, "round_live", None),
@@ -790,15 +788,55 @@ def test_round_result_multikill_atoms_keep_method_and_contribution() -> None:
         event,
     )
 
-    required = card.split("【事件必答】", 1)[1]
-    assert "推荐骨架" not in required
-    assert "灭队，回合失败" in required
-    assert "前期满血AK47爆头双杀" in required
-    assert "中期、被补枪" in required
-    assert "有显著贡献" in required
+    assert "【事件必答】" not in card
+    assert "【刚刚】（唯一回应范围）" in card
+    assert "本次焦点：回合失败" in card
+    assert "结算：灭队" in card
 
 
-def test_required_facts_choose_one_coherent_rare_focus_without_duplicates() -> None:
+def test_round_result_focus_omits_adjacent_death_to_avoid_invented_causality() -> None:
+    snapshot = _real_snapshot()
+    entries = (
+        TimelineEntry(0.0, "round_live", None),
+        TimelineEntry(40.0, "death", None),
+        TimelineEntry(40.0, "round_result", "T"),
+    )
+    event = _event(snapshot).model_copy(
+        update={"type": "round_loss", "facts": {"method": "t_win_elimination"}}
+    )
+
+    card = render_event_card(
+        snapshot,
+        _game(snapshot),
+        replace(_situation(), self_team="CT", timeline=entries),
+        event,
+    )
+    focus = card.split("【刚刚】", 1)[1]
+
+    assert "灭队（本次焦点：回合失败｜结算：灭队）" in focus
+    assert "阵亡" not in focus
+
+
+def test_death_focus_omits_grenade_to_avoid_guessing_damage_source() -> None:
+    snapshot = _real_snapshot()
+    entries = (
+        TimelineEntry(0.0, "round_live", None),
+        TimelineEntry(19.0, "grenade_used", "扔了手雷"),
+        TimelineEntry(20.0, "damage", "掉了100血 剩0血"),
+        TimelineEntry(20.0, "death", None),
+    )
+    event = _event(snapshot).model_copy(update={"type": "death_thrown_away"})
+
+    card = render_event_card(
+        snapshot, _game(snapshot), replace(_situation(), timeline=entries), event
+    )
+    focus = card.split("【刚刚】", 1)[1]
+
+    assert "白给" in focus
+    assert "扔了手雷" not in focus
+
+
+def test_rare_context_remains_only_in_the_timeline() -> None:
     snapshot = _real_snapshot()
     entries = (
         TimelineEntry(0.0, "round_live", None),
@@ -814,18 +852,17 @@ def test_required_facts_choose_one_coherent_rare_focus_without_duplicates() -> N
         snapshot,
         _game(snapshot),
         replace(_situation(), flash_count=1, timeline=entries),
-        _event(snapshot),
+        _event(snapshot).model_copy(update={"type": "kill"}),
     )
 
-    required = card.split("【事件必答】", 1)[1]
-    assert "被闪期间完成击杀" in required
-    assert "换弹完成后0.5秒完成击杀" not in required
-    assert "弹匣仅剩1发 AK47时完成击杀" not in required
-    assert "残血（剩45血）完成击杀" not in required
-    assert required.index("AK47") < required.index("被闪期间完成击杀")
+    assert "【事件必答】" not in card
+    assert "玩家被闪" in card
+    assert "换弹 AK47" in card
+    assert "弹匣仅剩1发 AK47" in card
+    assert "本次焦点：普通击杀" in card
 
 
-def test_round_result_without_kills_keeps_death_stage_in_required_facts() -> None:
+def test_round_result_keeps_only_one_focus_marker_without_required_facts() -> None:
     snapshot = _real_snapshot()
     entries = (
         TimelineEntry(0.0, "round_live", None),
@@ -844,9 +881,9 @@ def test_round_result_without_kills_keeps_death_stage_in_required_facts() -> Non
         event,
     )
 
-    required = card.split("【事件必答】", 1)[1]
-    assert "灭队，回合失败" in required
-    assert "反攻包点、普通死亡" in required
+    assert "【事件必答】" not in card
+    assert card.count("【刚刚】") == 1
+    assert "本次焦点：回合失败" in card
 
 
 def test_timeline_code_labels_split_stage_multi_kills_without_model_arithmetic() -> None:

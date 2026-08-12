@@ -102,7 +102,7 @@ def render_event_card(
         _section("全场", _match_statistics(snapshot, game)),
     ]
     current_round = human_round_number(snapshot)
-    focus_integrated = False
+    focus_rendered = False
     if round_situation.round_number == current_round:
         event_self_team = event.facts.get("self_team")
         self_team = round_situation.self_team or (
@@ -110,26 +110,20 @@ def render_event_card(
         )
         sections.append(_bomb_timer(round_situation.seconds_since_bomb_planted))
         sections.append(_grenade_summary(round_situation.grenades_used))
-        timeline, focus_integrated = _timeline_section(
+        timeline_history, focus_line = _timeline_sections(
             round_situation.timeline,
             self_team=self_team,
             death_after_kill_max_seconds=death_after_kill_max_seconds,
             event=event,
         )
-        sections.append(timeline)
-        sections.append(
-            _required_facts_section(
-                _required_event_facts(
-                    round_situation,
-                    event,
-                    self_team=self_team,
-                    death_after_kill_max_seconds=death_after_kill_max_seconds,
-                )
-            )
-        )
-    if not focus_integrated:
-        # Incomplete or stale timelines cannot host a truthful focus marker.
-        sections.append(_section("刚刚", _event_facts(event)))
+        sections.append(timeline_history)
+        if focus_line is not None:
+            sections.append(f"【刚刚】（唯一回应范围）\n{focus_line}")
+            focus_rendered = True
+    if not focus_rendered:
+        # Incomplete or stale timelines cannot host a truthful timeline focus.
+        fallback = " ".join(_event_facts(event))
+        sections.append(f"【刚刚】（唯一回应范围）\n  {fallback}")
     return "\n".join(section for section in sections if section is not None)
 
 
@@ -172,30 +166,6 @@ def _grenade_card_label(name: str) -> str:
 def _section(name: str, facts: Iterable[str]) -> str | None:
     content = " ".join(fact for fact in facts if fact)
     return f"【{name}】{content}" if content else None
-
-
-def _required_facts_section(facts: Iterable[str]) -> str | None:
-    """Render mandatory atoms as peers instead of privileging sentence-like prose."""
-    items = [
-        fact
-        for fact in facts
-        if fact and fact != "仅覆盖以上事实" and not fact.startswith(_DROPPED_REQUIRED_PREFIX)
-    ]
-    dropped = next(
-        (
-            fact.removeprefix(_DROPPED_REQUIRED_PREFIX)
-            for fact in facts
-            if fact.startswith(_DROPPED_REQUIRED_PREFIX)
-        ),
-        None,
-    )
-    if not items:
-        return None
-    numbered = "｜".join(
-        f"〔必答{index}〕{fact}" for index, fact in enumerate(items, start=1)
-    )
-    suffix = f"｜〔因字数丢弃〕{dropped}" if dropped else ""
-    return f"【事件必答】{numbered}｜〔边界〕仅覆盖以上事实{suffix}"
 
 
 def _match_sections(
@@ -342,20 +312,20 @@ def _held_weapon_fact(weapon: WeaponSlot) -> str:
     return fact
 
 
-def _timeline_section(
+def _timeline_sections(
     entries: tuple[TimelineEntry, ...],
     *,
     self_team: str | None,
     death_after_kill_max_seconds: float,
     event: GameEvent,
-) -> tuple[str | None, bool]:
+) -> tuple[str | None, str | None]:
     if not entries:
-        return None, False
+        return None, None
     observed_live = any(entry.kind == "round_live" for entry in entries)
-    lines = [
-        "【本回合】（秒数从正式开打算起）"
+    history_lines = [
+        "【本回合历史】（仅供校验，禁止回应；秒数从正式开打算起）"
         if observed_live
-        else "【本回合】（未观测到开打时刻，秒数从回合起点算起）"
+        else "【本回合历史】（仅供校验，禁止回应；未观测到开打时刻，秒数从回合起点算起）"
     ]
     stages = _timeline_stages(
         entries,
@@ -412,18 +382,22 @@ def _timeline_section(
         annotations_by_index.append(tuple(annotations))
 
     focus_index = _focus_entry_index(entries, event)
+    focus_line: str | None = None
     for indexes in _continuous_event_groups(entries):
-        lines.append(
-            _timeline_group_line(
-                entries,
-                indexes,
-                stages,
-                annotations_by_index,
-                event=event,
-                focus_index=focus_index,
-            )
+        line = _timeline_group_line(
+            entries,
+            indexes,
+            stages,
+            annotations_by_index,
+            event=event,
+            focus_index=focus_index,
         )
-    return "\n".join(lines), focus_index is not None
+        if focus_index is not None and focus_index in indexes:
+            focus_line = line
+        else:
+            history_lines.append(line)
+    history = "\n".join(history_lines) if len(history_lines) > 1 else None
+    return history, focus_line
 
 
 def _required_event_facts(
@@ -1274,8 +1248,6 @@ def _timeline_group_line(
     last = entries[indexes[-1]]
     focused = focus_index is not None and focus_index in indexes
     marker_facts: list[str] = []
-    if focused:
-        marker_facts.append("刚刚")
     if len(indexes) >= 2:
         duration = max(0.0, last.seconds - entries[indexes[0]].seconds)
         if duration >= 0.05:
@@ -1343,6 +1315,22 @@ def _deduplicated_group_indexes(
     if focus_index is None or focus_index not in indexes:
         return indexes
     method_label = WIN_METHOD_LABELS.get(str(event.facts.get("method")))
+    if event.type in {"round_win", "round_loss"}:
+        allowed_kinds = {"mvp", "round_result"}
+        if method_label is None:
+            allowed_kinds.add("bomb")
+        focused_result = tuple(
+            index
+            for index in indexes
+            if entries[index].kind in allowed_kinds
+        )
+        return focused_result or (focus_index,)
+    if event.type in {"death", "death_after_kill", "death_thrown_away"}:
+        without_ambiguous_grenade = tuple(
+            index for index in indexes if entries[index].kind != "grenade_used"
+        )
+        if without_ambiguous_grenade:
+            indexes = without_ambiguous_grenade
     duplicate_bomb_detail = {
         "炸弹拆除": "已拆除",
         "炸弹引爆": "已爆炸",

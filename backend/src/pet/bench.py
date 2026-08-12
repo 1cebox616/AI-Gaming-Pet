@@ -956,7 +956,7 @@ def render_stream_analysis_report(
         ),
         f"- 上游实际返回型号：{_join_or_unavailable(actual_models)}",
         f"- 实际上游：{_join_or_unavailable(actual_providers)}",
-        "- 提示词：正式 B 方案（编号必答清单，措辞自由）",
+        "- 提示词：只响应【刚刚】事件或连续事件",
         f"- 事件/完整截止时间：{result.event_timeout_seconds:g}s / "
         f"{result.full_timeout_seconds:g}s",
         f"- 温度 / 完成上限：{ANALYSIS_TEMPERATURE:g} / "
