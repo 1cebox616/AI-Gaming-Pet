@@ -1,5 +1,20 @@
 """Shared factual checks for static and model-generated commentary."""
 
+WIN_METHOD_LABELS: dict[str, str] = {
+    "elimination": "灭队",
+    "bomb": "炸弹引爆",
+    "defuse": "炸弹拆除",
+    "time": "时间耗尽",
+    "ct_win_elimination": "灭队",
+    "t_win_elimination": "灭队",
+    "ct_win_bomb": "炸弹引爆",
+    "t_win_bomb": "炸弹引爆",
+    "ct_win_defuse": "炸弹拆除",
+    "t_win_defuse": "炸弹拆除",
+    "ct_win_time": "时间耗尽",
+    "t_win_time": "时间耗尽",
+}
+
 CALLOUT_TERMS: tuple[str, ...] = (
     "A点",
     "B点",

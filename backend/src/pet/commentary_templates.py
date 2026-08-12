@@ -46,21 +46,6 @@ SURVIVAL_DETAIL_FORMAT = "存活了 {seconds} 秒，"
 EQUIP_DETAIL_FORMAT = "还带着 {equip_value} 的装备，"
 SCORE_DETAIL_FORMAT = "比分来到 {score_ct}:{score_t}，"
 
-WIN_METHOD_LABELS: dict[str, str] = {
-    "elimination": "灭队",
-    "bomb": "炸弹引爆",
-    "defuse": "炸弹拆除",
-    "time": "时间耗尽",
-    "ct_win_elimination": "灭队",
-    "t_win_elimination": "灭队",
-    "ct_win_bomb": "炸弹引爆",
-    "t_win_bomb": "炸弹引爆",
-    "ct_win_defuse": "炸弹拆除",
-    "t_win_defuse": "炸弹拆除",
-    "ct_win_time": "时间耗尽",
-    "t_win_time": "时间耗尽",
-}
-
 METHOD_CATEGORY_BY_LABEL: dict[str, Literal["elimination", "bomb", "defuse", "time"]] = {
     "灭队": "elimination",
     "炸弹引爆": "bomb",

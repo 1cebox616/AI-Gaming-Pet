@@ -13,10 +13,10 @@ from pet.commentary_templates import (
     METHOD_CATEGORY_BY_LABEL,
     SCORE_DETAIL_FORMAT,
     SURVIVAL_DETAIL_FORMAT,
-    WIN_METHOD_LABELS,
     CommentaryCategory,
     CommentaryTemplate,
 )
+from pet.commentary_rules import WIN_METHOD_LABELS
 from pet.config import PersonalityStyle
 from pet.events import EventType, GameEvent
 from pet.lines import Utterance

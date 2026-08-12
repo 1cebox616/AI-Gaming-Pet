@@ -87,6 +87,7 @@ _HAN_CHARACTER_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]"
 _ANALYSIS_REPORT_CASE_ID_PATTERN = re.compile(
     r"^### \d+\. `([^`]+)`$", re.MULTILINE
 )
+_ANALYSIS_REPORT_EVENT_LINE_PATTERN = re.compile(r"^事件：(.*)$", re.MULTILINE)
 
 _EVENT_LABELS: dict[EventType, str] = {
     "kill": "普通击杀",
@@ -322,6 +323,50 @@ class EventAnswerKeyFile(BaseModel):
         if len(case_ids) != len(set(case_ids)):
             raise ValueError("answer key 包含重复 case_id")
         return self
+
+
+class UniversalForbiddenFile(BaseModel):
+    """Project-wide unsupported claims applied to every event answer key."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    a_gsi_unavailable: tuple[str, ...] = Field(min_length=1)
+    b_inference_or_causality: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def terms_are_nonempty_and_unique(self) -> Self:
+        terms = self.terms
+        if any(not term.strip() for term in terms):
+            raise ValueError("通用禁项不得包含空词条")
+        if len(terms) != len(set(terms)):
+            raise ValueError("通用禁项不得包含重复词条")
+        return self
+
+    @property
+    def terms(self) -> tuple[str, ...]:
+        """Return both factual categories in stable matching order."""
+        return self.a_gsi_unavailable + self.b_inference_or_causality
+
+
+@dataclass(frozen=True, slots=True)
+class ForbiddenViolation:
+    """One generated event line that contains project-wide unsupported claims."""
+
+    case_id: str
+    event_text: str
+    matched_terms: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ForbiddenRescoreResult:
+    """Old and adjusted human scores for one immutable model report."""
+
+    report_path: Path
+    scores_path: Path
+    original_scores: AnalysisScoreFile
+    adjusted_scores: AnalysisScoreFile
+    violations: tuple[ForbiddenViolation, ...]
+    event_texts: tuple[str, ...]
 
 
 def calculate_length_statistics(texts: Sequence[str]) -> LengthStatistics:
@@ -997,9 +1042,225 @@ def load_event_answer_keys(path: Path) -> EventAnswerKeyFile:
     return EventAnswerKeyFile.model_validate_json(path.read_text(encoding="utf-8"))
 
 
+def load_universal_forbidden(path: Path) -> UniversalForbiddenFile:
+    """Load project-wide unsupported claims without accepting unknown fields."""
+    return UniversalForbiddenFile.model_validate_json(path.read_text(encoding="utf-8"))
+
+
 def answer_key_sha256(path: Path) -> str:
     """Return the digest used to bind manual scores to an immutable rubric."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def extract_analysis_event_lines(report_text: str) -> dict[str, str]:
+    """Extract successful event outputs from a completed Markdown report."""
+    headings = tuple(_ANALYSIS_REPORT_CASE_ID_PATTERN.finditer(report_text))
+    event_lines: dict[str, str] = {}
+    for index, heading in enumerate(headings):
+        case_id = heading.group(1)
+        block_end = (
+            headings[index + 1].start()
+            if index + 1 < len(headings)
+            else len(report_text)
+        )
+        block = report_text[heading.end() : block_end]
+        event_match = _ANALYSIS_REPORT_EVENT_LINE_PATTERN.search(block)
+        if event_match is not None:
+            event_lines[case_id] = event_match.group(1).strip()
+    return event_lines
+
+
+def apply_universal_forbidden(
+    report_text: str,
+    scores: AnalysisScoreFile,
+    forbidden: UniversalForbiddenFile,
+) -> tuple[AnalysisScoreFile, tuple[ForbiddenViolation, ...]]:
+    """Mark literal forbidden-term hits wrong while preserving required-fact atoms."""
+    event_lines = extract_analysis_event_lines(report_text)
+    expected_ids = tuple(case.case_id for case in scores.cases)
+    if set(event_lines) != set(expected_ids):
+        missing = sorted(set(expected_ids) - set(event_lines))
+        extra = sorted(set(event_lines) - set(expected_ids))
+        raise ValueError(
+            f"报告事件行与评分 case_id 不一致：缺少 {missing}；多出 {extra}"
+        )
+
+    violations: list[ForbiddenViolation] = []
+    adjusted_cases: list[CaseScore] = []
+    for case in scores.cases:
+        event_text = event_lines[case.case_id]
+        matched_terms = tuple(term for term in forbidden.terms if term in event_text)
+        if not matched_terms:
+            adjusted_cases.append(case)
+            continue
+        violations.append(
+            ForbiddenViolation(
+                case_id=case.case_id,
+                event_text=event_text,
+                matched_terms=matched_terms,
+            )
+        )
+        error = "通用禁项：" + "、".join(matched_terms)
+        adjusted_event = case.event.model_copy(
+            update={
+                "whole_correct": False,
+                "errors": (*case.event.errors, error),
+            }
+        )
+        adjusted_cases.append(case.model_copy(update={"event": adjusted_event}))
+
+    return (
+        scores.model_copy(update={"cases": tuple(adjusted_cases)}),
+        tuple(violations),
+    )
+
+
+def rescore_existing_analysis_report(
+    report_path: Path,
+    scores_path: Path,
+    forbidden: UniversalForbiddenFile,
+    *,
+    expected_answer_key_sha256: str,
+) -> ForbiddenRescoreResult:
+    """Apply universal forbidden terms to an existing report without model access."""
+    report_text = report_path.read_text(encoding="utf-8")
+    scores = load_analysis_scores(scores_path)
+    if scores.scope != "event_only":
+        raise ValueError("通用禁项重评分只接受 event_only 评分")
+    if scores.answer_key_sha256 != expected_answer_key_sha256:
+        raise ValueError("评分文件绑定的 answer key SHA-256 与当前基准不一致")
+    adjusted, violations = apply_universal_forbidden(report_text, scores, forbidden)
+    return ForbiddenRescoreResult(
+        report_path=report_path,
+        scores_path=scores_path,
+        original_scores=scores,
+        adjusted_scores=adjusted,
+        violations=violations,
+        event_texts=tuple(extract_analysis_event_lines(report_text).values()),
+    )
+
+
+def render_forbidden_rescore_report(
+    results: Sequence[ForbiddenRescoreResult],
+    forbidden: UniversalForbiddenFile,
+    *,
+    forbidden_path: Path,
+    answer_key_path: Path,
+) -> str:
+    """Render a self-contained comparison of old and forbidden-aware scores."""
+    if not results:
+        raise ValueError("通用禁项重评分至少需要一份报告")
+    digest = answer_key_sha256(answer_key_path)
+    event_texts = tuple(text for result in results for text in result.event_texts)
+    lengths = calculate_length_statistics(event_texts)
+    lines = [
+        "# M3-T5.9 通用禁项离线重评分",
+        "",
+        "## 输入与方法",
+        "",
+        f"- 通用禁项：`{forbidden_path}`",
+        f"- Answer key：`{answer_key_path}`",
+        f"- Answer key SHA-256：`{digest}`",
+        "- 执行方式：只读取既有 Markdown 事件行与人工评分 JSON，"
+        "按字面命中通用禁项后调整整句判定；未构造 OpenRouter 客户端，未调用模型。",
+        "- 原子事实分数保持原人工评分；命中任一通用禁项时，整句强制判错。",
+        "",
+        "## 通用禁项",
+        "",
+        "- A 类（GSI 完全不提供）：" + "、".join(forbidden.a_gsi_unavailable),
+        "- B 类（推测语气与因果）："
+        + "、".join(forbidden.b_inference_or_causality),
+        "",
+        "## 新旧结果",
+        "",
+        "| 报告 | 旧标准 | 新标准 | 新增错题 |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for result in results:
+        total = len(result.original_scores.cases)
+        old_correct = sum(
+            case.event.whole_correct for case in result.original_scores.cases
+        )
+        new_correct = sum(
+            case.event.whole_correct for case in result.adjusted_scores.cases
+        )
+        newly_wrong = sum(
+            old.event.whole_correct and not new.event.whole_correct
+            for old, new in zip(
+                result.original_scores.cases,
+                result.adjusted_scores.cases,
+                strict=True,
+            )
+        )
+        lines.append(
+            f"| `{result.report_path.name}` | {old_correct}/{total} "
+            f"({old_correct / total:.1%}) | {new_correct}/{total} "
+            f"({new_correct / total:.1%}) | {newly_wrong} |"
+        )
+
+    lines.extend(("", "## 禁项命中明细", ""))
+    all_violations = tuple(
+        (result.report_path.name, violation)
+        for result in results
+        for violation in result.violations
+    )
+    if not all_violations:
+        lines.append("- 无命中；三份报告准确率不变。")
+    else:
+        for report_name, violation in all_violations:
+            lines.append(
+                f"- `{report_name}` / `{violation.case_id}`："
+                f"命中「{'、'.join(violation.matched_terms)}」；"
+                f"事件行「{violation.event_text}」"
+            )
+
+    if all_violations:
+        lines.extend(
+            (
+                "",
+                "## 与架构师预期的差异",
+                "",
+                "- 架构师预期三份准确率不变，但字面重评分得到下降。",
+                "- 原因是规格 A 类明确列出「包点」，而既有事件行多次包含"
+                "「反攻包点」；原扫描列举的搜索词中没有「包点」，因此漏掉了这些命中。",
+                "- 本报告未为迎合预期而删除词条、增加豁免或改写既有输出。",
+            )
+        )
+
+    lines.extend(
+        (
+            "",
+            "## 事件行汉字数分布",
+            "",
+            f"- 样本：{len(event_texts)} 条",
+            f"- 最小：{lengths.minimum}",
+            f"- 中位：{lengths.median:g}",
+            f"- P90：{lengths.p90}",
+            f"- 最大：{lengths.maximum}",
+        )
+    )
+    return "\n".join(lines) + "\n"
+
+
+def write_forbidden_rescore_report(
+    results: Sequence[ForbiddenRescoreResult],
+    forbidden: UniversalForbiddenFile,
+    *,
+    forbidden_path: Path,
+    answer_key_path: Path,
+    output_path: Path,
+) -> None:
+    """Write a forbidden-aware comparison report without any model client."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        render_forbidden_rescore_report(
+            results,
+            forbidden,
+            forbidden_path=forbidden_path,
+            answer_key_path=answer_key_path,
+        ),
+        encoding="utf-8",
+    )
 
 
 def write_analysis_score_template(

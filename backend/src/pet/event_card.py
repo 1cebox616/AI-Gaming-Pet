@@ -7,7 +7,7 @@ from collections.abc import Iterable
 import re
 from typing import Any
 
-from pet.commentary_templates import WIN_METHOD_LABELS
+from pet.commentary_rules import WIN_METHOD_LABELS
 from pet.events import EventType, GameEvent
 from pet.gsi import GameSnapshot, WeaponSlot, human_round_number
 from pet.session import GameState

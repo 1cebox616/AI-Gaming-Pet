@@ -15,17 +15,21 @@ from pet.bench import (
     BenchResult,
     CaseScore,
     FieldScore,
+    UniversalForbiddenFile,
+    apply_universal_forbidden,
     answer_key_sha256,
     calculate_length_statistics,
     check_output,
     commentary_length_statistics,
     load_analysis_scores,
     load_event_answer_keys,
+    load_universal_forbidden,
     main,
     render_latency_report,
     render_report,
     render_scored_analysis_report,
     render_stream_analysis_report,
+    rescore_existing_analysis_report,
     run_bench,
     run_latency_experiment,
     run_stream_analysis,
@@ -42,6 +46,11 @@ ANSWER_KEY_PATH = (
     Path(__file__).parents[1]
     / "bench-reports"
     / "m3-t5.6-event-answer-keys.json"
+)
+UNIVERSAL_FORBIDDEN_PATH = (
+    Path(__file__).parents[1]
+    / "bench-reports"
+    / "m3-t5.9-universal-forbidden.json"
 )
 
 
@@ -789,3 +798,92 @@ def test_existing_analysis_report_can_be_scored_without_rerunning_model(
     loaded = load_analysis_scores(score_path)
     with pytest.raises(ValueError, match="已经包含人工事实评分"):
         render_scored_analysis_report(scored, loaded)
+
+
+def test_universal_forbidden_file_has_both_factual_categories() -> None:
+    forbidden = load_universal_forbidden(UNIVERSAL_FORBIDDEN_PATH)
+
+    assert "队友" in forbidden.a_gsi_unavailable
+    assert "对手的钱" in forbidden.a_gsi_unavailable
+    assert "可能" in forbidden.b_inference_or_causality
+    assert "导致" in forbidden.b_inference_or_causality
+    assert len(forbidden.terms) == len(set(forbidden.terms))
+
+
+def test_universal_forbidden_hit_forces_whole_sentence_wrong() -> None:
+    scores = AnalysisScoreFile(
+        scope="event_only",
+        answer_key_sha256="0" * 64,
+        cases=(
+            CaseScore(
+                case_id="case-a",
+                event=FieldScore(
+                    whole_correct=True,
+                    correct_atoms=3,
+                    total_atoms=3,
+                ),
+            ),
+        ),
+    )
+    report = """# report
+
+### 1. `case-a`
+
+事件：可能有队友掩护，完成击杀
+场面：省略
+"""
+    forbidden = UniversalForbiddenFile(
+        a_gsi_unavailable=("队友", "掩护"),
+        b_inference_or_causality=("可能",),
+    )
+
+    adjusted, violations = apply_universal_forbidden(report, scores, forbidden)
+
+    assert adjusted.cases[0].event.whole_correct is False
+    assert adjusted.cases[0].event.correct_atoms == 3
+    assert adjusted.cases[0].event.errors == ("通用禁项：队友、掩护、可能",)
+    assert violations[0].matched_terms == ("队友", "掩护", "可能")
+
+
+def test_universal_forbidden_rescore_is_offline_and_preserves_clean_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest = answer_key_sha256(ANSWER_KEY_PATH)
+    report_path = tmp_path / "existing.md"
+    report_path.write_text(
+        "### 1. `case-clean`\n\n事件：前期用AK47完成爆头击杀\n场面：省略\n",
+        encoding="utf-8",
+    )
+    scores_path = tmp_path / "scores.json"
+    scores_path.write_text(
+        json.dumps(
+            {
+                "scope": "event_only",
+                "answer_key_sha256": digest,
+                "cases": [
+                    {
+                        "case_id": "case-clean",
+                        "event": {
+                            "whole_correct": True,
+                            "correct_atoms": 3,
+                            "total_atoms": 3,
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    result = rescore_existing_analysis_report(
+        report_path,
+        scores_path,
+        load_universal_forbidden(UNIVERSAL_FORBIDDEN_PATH),
+        expected_answer_key_sha256=digest,
+    )
+
+    assert result.violations == ()
+    assert result.adjusted_scores.cases[0].event.whole_correct is True
