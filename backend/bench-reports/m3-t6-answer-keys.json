@@ -1,0 +1,418 @@
+[
+  {
+    "case_id": "rare_reload_then_kill",
+    "expected_summary": "换弹完成后用 M4A1-S 击杀并进入回合结算",
+    "required_facts": [
+      "换弹",
+      "M4A1-S",
+      "击杀",
+      "回合失败"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "rare_ammo_low_death",
+    "expected_summary": "弹匣打空后阵亡",
+    "required_facts": [
+      "弹匣打空",
+      "阵亡",
+      "回合失败"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "rare_mvp_round_win",
+    "expected_summary": "本回合取胜并获得 MVP",
+    "required_facts": [
+      "获得MVP",
+      "回合胜利"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "rare_assist_round_win",
+    "expected_summary": "回合中新增一次助攻并获胜",
+    "required_facts": [
+      "助攻",
+      "回合胜利"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "rare_grenade_pickup",
+    "expected_summary": "中途捡到一颗闪光弹后完成回合",
+    "required_facts": [
+      "捡到闪光弹",
+      "回合胜利"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "rare_primary_switch",
+    "expected_summary": "从 M4A1-S 换到 AK47 后结束回合",
+    "required_facts": [
+      "换枪",
+      "AK47",
+      "回合胜利"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "rare_flash_interrupted_by_death",
+    "expected_summary": "被闪状态尚未结束便阵亡",
+    "required_facts": [
+      "被闪",
+      "未结束",
+      "阵亡",
+      "回合失败"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "triple_kill_same_stage",
+    "expected_summary": "反攻包点阶段用 M4A1-S 完成三杀",
+    "required_facts": [
+      "反攻包点",
+      "M4A1-S",
+      "三杀",
+      "回合失败"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "triple_kill_cross_stage",
+    "expected_summary": "前期先杀一人，反攻包点时再连杀两人完成三杀",
+    "required_facts": [
+      "前期",
+      "反攻包点",
+      "M4A1-S",
+      "三杀"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "triple_kill_headshot_finish",
+    "expected_summary": "三杀的最后一次击杀为爆头",
+    "required_facts": [
+      "三杀",
+      "爆头",
+      "M4A1-S",
+      "回合失败"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "weapon_switch_double_kill",
+    "expected_summary": "先用 M4A1-S 击杀，换到 AK47 后再杀一人",
+    "required_facts": [
+      "M4A1-S",
+      "换枪",
+      "AK47",
+      "双杀"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "last_bullet_triple",
+    "expected_summary": "最后一发子弹完成第三次击杀",
+    "required_facts": [
+      "弹匣仅剩1发",
+      "三杀",
+      "M4A1-S"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "empty_mag_after_triple",
+    "expected_summary": "完成三杀后把弹匣打空并阵亡",
+    "required_facts": [
+      "三杀",
+      "弹匣打空",
+      "阵亡",
+      "回合失败"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "low_health_triple",
+    "expected_summary": "残血状态下完成本回合三杀",
+    "required_facts": [
+      "剩41血",
+      "三杀",
+      "M4A1-S",
+      "阵亡"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "flash_kill",
+    "expected_summary": "被闪期间用 M4A1-S 击杀一人",
+    "required_facts": [
+      "被闪",
+      "M4A1-S",
+      "击杀"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "flash_death",
+    "expected_summary": "被闪期间阵亡",
+    "required_facts": [
+      "被闪",
+      "阵亡",
+      "回合失败"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "flash_double_kill",
+    "expected_summary": "被闪期间连续完成两次击杀",
+    "required_facts": [
+      "被闪",
+      "连续事件",
+      "双杀",
+      "M4A1-S"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "long_smoke_then_kill",
+    "expected_summary": "在烟中停留较久后用 M4A1-S 击杀",
+    "required_facts": [
+      "进烟",
+      "M4A1-S",
+      "击杀"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "smoke_exit_death",
+    "expected_summary": "离开烟雾后很快阵亡",
+    "required_facts": [
+      "出烟",
+      "阵亡",
+      "回合失败"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "four_grenades_then_kill",
+    "expected_summary": "一回合连续投出四颗道具后击杀",
+    "required_facts": [
+      "闪光弹×2",
+      "烟雾弹×1",
+      "手雷×1",
+      "M4A1-S",
+      "击杀"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "double_flash_then_kill",
+    "expected_summary": "连续被闪两次后完成击杀",
+    "required_facts": [
+      "玩家被闪",
+      "闪光影响结束",
+      "M4A1-S",
+      "击杀"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "smoke_flash_kill",
+    "expected_summary": "烟中又被闪时完成击杀",
+    "required_facts": [
+      "烟雾",
+      "被闪",
+      "M4A1-S",
+      "击杀"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "bomb_pickup_then_death",
+    "expected_summary": "拿到炸弹后阵亡，死亡不额外记作主动丢包",
+    "required_facts": [
+      "拿到包",
+      "阵亡"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "bomb_drop_repickup",
+    "expected_summary": "主动丢包后又重新捡回，随后阵亡",
+    "required_facts": [
+      "丢了包",
+      "拿到包",
+      "阵亡"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "postplant_defuse_win",
+    "expected_summary": "炸弹安放后由 CT 拆除并获胜",
+    "required_facts": [
+      "炸弹已安放",
+      "拆除",
+      "回合胜利"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "postplant_counterattack_loss",
+    "expected_summary": "下包后反攻阶段阵亡并输掉回合",
+    "required_facts": [
+      "反攻包点",
+      "阵亡",
+      "回合失败"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "postplant_triple_loss",
+    "expected_summary": "下包后反攻阶段完成三杀但最终回合失败",
+    "required_facts": [
+      "反攻包点",
+      "三杀",
+      "回合失败"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "bomb_pickup_kill",
+    "expected_summary": "拿到炸弹后用 AK47 最后一发击杀",
+    "required_facts": [
+      "拿到包",
+      "弹匣仅剩1发",
+      "AK47",
+      "击杀"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  },
+  {
+    "case_id": "bomb_planted_then_death",
+    "expected_summary": "炸弹安放后玩家阵亡，回合随后失败",
+    "required_facts": [
+      "炸弹已安放",
+      "阵亡",
+      "回合失败"
+    ],
+    "forbidden_claims": [
+      "不得出现队友或敌人身份",
+      "不得声称玩家所在位置",
+      "不得编造伤害来源"
+    ]
+  }
+]

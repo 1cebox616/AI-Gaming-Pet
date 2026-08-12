@@ -1,0 +1,851 @@
+"""Build offline synthetic GSI regression scenarios from real recordings."""
+
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+import json
+from pathlib import Path
+import re
+from typing import Any, Literal, TypeAlias, cast
+
+from pet.bench import BenchEvent, run_bench
+from pet.events import EventType
+from pet.gsi import GSI_SILENCE_SECONDS
+from pet.replay import load_recording
+from pet.session import GameSessionTracker, MatchLifecycleTracker
+from pet.situation import SituationTracker, TimelineKind
+
+JsonScalar: TypeAlias = str | int | float | bool | None
+ScenarioCategory = Literal["甲", "乙", "丙", "丁"]
+MutationOperation = Literal["set", "delete"]
+
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+RECORDINGS_DIRECTORY = BACKEND_ROOT / "recordings"
+SCENARIOS_DIRECTORY = BACKEND_ROOT / "scenarios"
+REPORTS_DIRECTORY = BACKEND_ROOT / "bench-reports"
+INVENTORY_PATHS = (
+    REPORTS_DIRECTORY / "m3-t2-data-inventory.md",
+    REPORTS_DIRECTORY / "m3-t2-inventory2.md",
+)
+SYNTHETIC_STEAMID = "SYNTHETIC_PLAYER_STEAMID"
+SYNTHETIC_NAME = "Synthetic Player"
+
+# The task's eighteen action/status kinds. The current implementation also has
+# round_live and bought anchors plus two burn kinds. Burn is intentionally
+# excluded because every real inventory value is zero.
+REPORTED_TIMELINE_KINDS: tuple[TimelineKind, ...] = (
+    "flash_start",
+    "flash_end",
+    "smoke_start",
+    "smoke_end",
+    "kill",
+    "damage",
+    "primary_weapon",
+    "ammo_low",
+    "reload",
+    "grenade_used",
+    "grenade_pickup",
+    "bomb",
+    "bomb_pickup",
+    "bomb_drop",
+    "assist",
+    "mvp",
+    "death",
+    "round_result",
+)
+
+_TABLE_ROW = re.compile(r"^\| `([^`]+)` \| (\d+) \| (.*?) \|")
+_NUMBER_RANGE = re.compile(
+    r"最小\s+(-?\d+(?:\.\d+)?)\s*/\s*最大\s+(-?\d+(?:\.\d+)?)"
+)
+_QUOTED_VALUE = re.compile(r'"([^"]+)"')
+_WEAPON_KEY = re.compile(r"(?<=\.weapons\.)weapon_\d+(?=\.)")
+_TEMPLATE_SOURCE = re.compile(r"^(.+\.jsonl) 第 (\d+)–(\d+) 行$")
+_INVENTORY_RECORDING = re.compile(r"^- 录制文件：`([^`]+)`$")
+
+
+@dataclass(frozen=True, slots=True)
+class Mutation:
+    """One scalar change at an absolute source line."""
+
+    line_number: int
+    path: str
+    operation: MutationOperation
+    value: JsonScalar = None
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioSpec:
+    """One synthetic scenario and its independently declared answer key."""
+
+    scenario_id: str
+    category: ScenarioCategory
+    description: str
+    template_source: str
+    mutations: tuple[Mutation, ...]
+    expected_event_type: EventType
+    required_facts: tuple[str, ...]
+    forbidden_claims: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PathConstraint:
+    """Union of values observed for one raw field in the two inventories."""
+
+    minimum: float | None = None
+    maximum: float | None = None
+    values: frozenset[str] = frozenset()
+
+    def merge(self, other: "PathConstraint") -> "PathConstraint":
+        minimums = tuple(
+            value for value in (self.minimum, other.minimum) if value is not None
+        )
+        maximums = tuple(
+            value for value in (self.maximum, other.maximum) if value is not None
+        )
+        return PathConstraint(
+            minimum=min(minimums) if minimums else None,
+            maximum=max(maximums) if maximums else None,
+            values=self.values | other.values,
+        )
+
+
+def _set(line_number: int, path: str, value: JsonScalar) -> Mutation:
+    return Mutation(line_number, path, "set", value)
+
+
+def _delete(line_number: int, path: str) -> Mutation:
+    return Mutation(line_number, path, "delete")
+
+
+def _span(
+    start: int, end: int, path: str, value: JsonScalar
+) -> tuple[Mutation, ...]:
+    return tuple(_set(line, path, value) for line in range(start, end + 1))
+
+
+BASE_CT = "gsi-20260810-154052-044137.jsonl 第 18–73 行"
+BASE_CT_SHORT = "gsi-20260810-154052-044137.jsonl 第 104–132 行"
+BASE_CT_DEFUSE = "gsi-20260810-154052-044137.jsonl 第 3–16 行"
+BASE_T_C4 = "gsi-20260810-114649-321103.jsonl 第 65–100 行"
+COMMON_FORBIDDEN = (
+    "不得出现队友或敌人身份",
+    "不得声称玩家所在位置",
+    "不得编造伤害来源",
+)
+
+
+def _ct_spec(
+    scenario_id: str,
+    category: ScenarioCategory,
+    description: str,
+    mutations: Sequence[Mutation],
+    required_facts: Sequence[str],
+    *,
+    expected_event_type: EventType = "round_loss",
+    source: str = BASE_CT,
+    forbidden_claims: Sequence[str] = COMMON_FORBIDDEN,
+) -> ScenarioSpec:
+    return ScenarioSpec(
+        scenario_id,
+        category,
+        description,
+        source,
+        tuple(mutations),
+        expected_event_type,
+        tuple(required_facts),
+        tuple(forbidden_claims),
+    )
+
+
+# Every entry below is still declarative: helpers only expand repeated scalar
+# assignments into the immutable mutation tuple stored on ScenarioSpec.
+SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
+    _ct_spec(
+        "rare_reload_then_kill",
+        "甲",
+        "换弹完成后用 M4A1-S 击杀并进入回合结算",
+        (),
+        ("换弹", "M4A1-S", "击杀", "回合失败"),
+    ),
+    _ct_spec(
+        "rare_ammo_low_death",
+        "甲",
+        "弹匣打空后阵亡",
+        (),
+        ("弹匣打空", "阵亡", "回合失败"),
+    ),
+    _ct_spec(
+        "rare_mvp_round_win",
+        "甲",
+        "本回合取胜并获得 MVP",
+        (_set(132, "player.match_stats.mvps", 1),),
+        ("获得MVP", "回合胜利"),
+        expected_event_type="round_win",
+        source=BASE_CT_SHORT,
+    ),
+    _ct_spec(
+        "rare_assist_round_win",
+        "甲",
+        "回合中新增一次助攻并获胜",
+        (
+            _set(131, "player.match_stats.assists", 1),
+            _set(132, "player.match_stats.assists", 1),
+        ),
+        ("助攻", "回合胜利"),
+        expected_event_type="round_win",
+        source=BASE_CT_SHORT,
+    ),
+    _ct_spec(
+        "rare_grenade_pickup",
+        "甲",
+        "中途捡到一颗闪光弹后完成回合",
+        (
+            _set(124, "player.weapons.weapon_5.name", "weapon_flashbang"),
+            _set(124, "player.weapons.weapon_5.type", "Grenade"),
+            _set(124, "player.weapons.weapon_5.state", "holstered"),
+        ),
+        ("捡到闪光弹", "回合胜利"),
+        expected_event_type="round_win",
+        source=BASE_CT_SHORT,
+    ),
+    _ct_spec(
+        "rare_primary_switch",
+        "甲",
+        "从 M4A1-S 换到 AK47 后结束回合",
+        (),
+        ("换枪", "AK47", "回合胜利"),
+        expected_event_type="round_win",
+        source=BASE_CT_SHORT,
+    ),
+    _ct_spec(
+        "rare_flash_interrupted_by_death",
+        "甲",
+        "被闪状态尚未结束便阵亡",
+        (*_span(71, 73, "player.state.flashed", 1),),
+        ("被闪", "未结束", "阵亡", "回合失败"),
+    ),
+    _ct_spec(
+        "triple_kill_same_stage",
+        "乙",
+        "反攻包点阶段用 M4A1-S 完成三杀",
+        (),
+        ("反攻包点", "M4A1-S", "三杀", "回合失败"),
+    ),
+    _ct_spec(
+        "triple_kill_cross_stage",
+        "乙",
+        "前期先杀一人，反攻包点时再连杀两人完成三杀",
+        (),
+        ("前期", "反攻包点", "M4A1-S", "三杀"),
+    ),
+    _ct_spec(
+        "triple_kill_headshot_finish",
+        "乙",
+        "三杀的最后一次击杀为爆头",
+        (*_span(67, 73, "player.state.round_killhs", 1),),
+        ("三杀", "爆头", "M4A1-S", "回合失败"),
+    ),
+    _ct_spec(
+        "weapon_switch_double_kill",
+        "乙",
+        "先用 M4A1-S 击杀，换到 AK47 后再杀一人",
+        (
+            *_span(122, 123, "player.state.round_kills", 1),
+            *_span(124, 132, "player.state.round_kills", 2),
+        ),
+        ("M4A1-S", "换枪", "AK47", "双杀"),
+        expected_event_type="round_win",
+        source=BASE_CT_SHORT,
+    ),
+    _ct_spec(
+        "last_bullet_triple",
+        "乙",
+        "最后一发子弹完成第三次击杀",
+        (*_span(67, 71, "player.weapons.weapon_2.ammo_clip", 1),),
+        ("弹匣仅剩1发", "三杀", "M4A1-S"),
+    ),
+    _ct_spec(
+        "empty_mag_after_triple",
+        "乙",
+        "完成三杀后把弹匣打空并阵亡",
+        (),
+        ("三杀", "弹匣打空", "阵亡", "回合失败"),
+    ),
+    _ct_spec(
+        "low_health_triple",
+        "乙",
+        "残血状态下完成本回合三杀",
+        (*_span(62, 73, "player.state.health", 41), _set(73, "player.state.health", 0)),
+        ("剩41血", "三杀", "M4A1-S", "阵亡"),
+    ),
+    _ct_spec(
+        "flash_kill",
+        "丙",
+        "被闪期间用 M4A1-S 击杀一人",
+        (*_span(40, 41, "player.state.flashed", 1), _set(42, "player.state.flashed", 0)),
+        ("被闪", "M4A1-S", "击杀"),
+    ),
+    _ct_spec(
+        "flash_death",
+        "丙",
+        "被闪期间阵亡",
+        (*_span(71, 73, "player.state.flashed", 1),),
+        ("被闪", "阵亡", "回合失败"),
+    ),
+    _ct_spec(
+        "flash_double_kill",
+        "丙",
+        "被闪期间连续完成两次击杀",
+        (
+            *_span(62, 67, "player.state.flashed", 1),
+            _set(68, "player.state.flashed", 0),
+            *_span(62, 66, "player.state.round_kills", 1),
+            *_span(67, 73, "player.state.round_kills", 2),
+        ),
+        ("被闪", "连续事件", "双杀", "M4A1-S"),
+    ),
+    _ct_spec(
+        "long_smoke_then_kill",
+        "丙",
+        "在烟中停留较久后用 M4A1-S 击杀",
+        (*_span(32, 41, "player.state.smoked", 255), _set(42, "player.state.smoked", 0)),
+        ("进烟", "M4A1-S", "击杀"),
+    ),
+    _ct_spec(
+        "smoke_exit_death",
+        "丙",
+        "离开烟雾后很快阵亡",
+        (*_span(68, 71, "player.state.smoked", 255), _set(72, "player.state.smoked", 0)),
+        ("出烟", "阵亡", "回合失败"),
+    ),
+    _ct_spec(
+        "four_grenades_then_kill",
+        "丙",
+        "一回合连续投出四颗道具后击杀",
+        (
+            _set(120, "player.weapons.weapon_5.name", "weapon_flashbang"),
+            _set(120, "player.weapons.weapon_5.type", "Grenade"),
+            _set(120, "player.weapons.weapon_5.state", "holstered"),
+            _delete(121, "player.weapons.weapon_5.name"),
+            _delete(121, "player.weapons.weapon_5.type"),
+            _delete(121, "player.weapons.weapon_5.state"),
+        ),
+        ("闪光弹×2", "烟雾弹×1", "手雷×1", "M4A1-S", "击杀"),
+        expected_event_type="round_win",
+        source=BASE_CT_SHORT,
+    ),
+    _ct_spec(
+        "double_flash_then_kill",
+        "丙",
+        "连续被闪两次后完成击杀",
+        (
+            *_span(28, 29, "player.state.flashed", 1),
+            _set(30, "player.state.flashed", 0),
+            *_span(39, 40, "player.state.flashed", 1),
+            _set(41, "player.state.flashed", 0),
+        ),
+        ("玩家被闪", "闪光影响结束", "M4A1-S", "击杀"),
+    ),
+    _ct_spec(
+        "smoke_flash_kill",
+        "丙",
+        "烟中又被闪时完成击杀",
+        (
+            *_span(36, 41, "player.state.smoked", 255),
+            *_span(40, 41, "player.state.flashed", 1),
+            _set(42, "player.state.smoked", 0),
+            _set(42, "player.state.flashed", 0),
+        ),
+        ("烟雾", "被闪", "M4A1-S", "击杀"),
+    ),
+    _ct_spec(
+        "bomb_pickup_then_death",
+        "丁",
+        "拿到炸弹后阵亡，死亡不额外记作主动丢包",
+        (),
+        ("拿到包", "阵亡"),
+        expected_event_type="death",
+        source=BASE_T_C4,
+    ),
+    _ct_spec(
+        "bomb_drop_repickup",
+        "丁",
+        "主动丢包后又重新捡回，随后阵亡",
+        (
+            _delete(90, "player.weapons.weapon_4.name"),
+            _delete(90, "player.weapons.weapon_4.type"),
+            _delete(90, "player.weapons.weapon_4.state"),
+            _set(91, "player.weapons.weapon_4.name", "weapon_c4"),
+            _set(91, "player.weapons.weapon_4.type", "C4"),
+            _set(91, "player.weapons.weapon_4.state", "holstered"),
+        ),
+        ("丢了包", "拿到包", "阵亡"),
+        expected_event_type="death",
+        source=BASE_T_C4,
+    ),
+    _ct_spec(
+        "postplant_defuse_win",
+        "丁",
+        "炸弹安放后由 CT 拆除并获胜",
+        (),
+        ("炸弹已安放", "拆除", "回合胜利"),
+        expected_event_type="round_win",
+        source=BASE_CT_DEFUSE,
+    ),
+    _ct_spec(
+        "postplant_counterattack_loss",
+        "丁",
+        "下包后反攻阶段阵亡并输掉回合",
+        (),
+        ("反攻包点", "阵亡", "回合失败"),
+    ),
+    _ct_spec(
+        "postplant_triple_loss",
+        "丁",
+        "下包后反攻阶段完成三杀但最终回合失败",
+        (),
+        ("反攻包点", "三杀", "回合失败"),
+    ),
+    _ct_spec(
+        "bomb_pickup_kill",
+        "丁",
+        "拿到炸弹后用 AK47 最后一发击杀",
+        (
+            *_span(65, 96, "player.state.round_kills", 0),
+            *_span(97, 100, "player.state.round_kills", 1),
+        ),
+        ("拿到包", "弹匣仅剩1发", "AK47", "击杀"),
+        expected_event_type="kill",
+        source=BASE_T_C4,
+    ),
+    _ct_spec(
+        "bomb_planted_then_death",
+        "丁",
+        "炸弹安放后玩家阵亡，回合随后失败",
+        (),
+        ("炸弹已安放", "阵亡", "回合失败"),
+    ),
+)
+
+SKIPPED_SCENARIOS: tuple[tuple[str, str], ...] = (
+    (
+        "four_kill",
+        "两个数据清单均只观测到 player.state.round_kills 最大为 3",
+    ),
+    (
+        "ace",
+        "ace 需要 round_kills=5，超出数据清单观测范围 0–3",
+    ),
+    (
+        "bomb_explosion",
+        "round.bomb 只观测到 planted/defused，从未观测到 exploded",
+    ),
+    (
+        "extreme_defuse",
+        "真实模板最晚只观测到下包后 27.4 秒拆除，不足以冒充极限拆包",
+    ),
+    (
+        "burning_combo",
+        "player.state.burning 的观测范围为 0–0，规格明确禁止合成非零值",
+    ),
+)
+
+
+def load_inventory_constraints(
+    paths: Sequence[Path] = INVENTORY_PATHS,
+) -> dict[str, PathConstraint]:
+    """Parse the committed inventories into a union field/value whitelist."""
+    constraints: dict[str, PathConstraint] = {}
+    inventory_recordings: list[Path] = []
+    for path in paths:
+        report_lines = path.read_text(encoding="utf-8").splitlines()
+        for line in report_lines:
+            recording_match = _INVENTORY_RECORDING.match(line)
+            if recording_match is not None:
+                inventory_recordings.append(
+                    RECORDINGS_DIRECTORY / recording_match.group(1)
+                )
+            match = _TABLE_ROW.match(line)
+            if match is None or int(match.group(2)) <= 0:
+                continue
+            raw_path, summary = match.group(1), match.group(3)
+            range_match = _NUMBER_RANGE.search(summary)
+            candidate = PathConstraint(
+                minimum=float(range_match.group(1)) if range_match else None,
+                maximum=float(range_match.group(2)) if range_match else None,
+                values=frozenset(_QUOTED_VALUE.findall(summary)),
+            )
+            if "true" in summary:
+                candidate = candidate.merge(PathConstraint(values=frozenset({"true"})))
+            if "false" in summary:
+                candidate = candidate.merge(PathConstraint(values=frozenset({"false"})))
+            constraints[raw_path] = constraints.get(raw_path, PathConstraint()).merge(
+                candidate
+            )
+    # Markdown deliberately abbreviates long string sample sets. Revisit only
+    # the two real recordings named by those reports to recover the complete
+    # observed set; the report remains the authority for which paths exist.
+    for recording_path in inventory_recordings:
+        for raw_line in recording_path.read_text(encoding="utf-8").splitlines():
+            wrapper = json.loads(raw_line)
+            payload = wrapper.get("payload")
+            if isinstance(payload, dict):
+                _merge_observed_payload_values(
+                    cast(dict[str, Any], payload), constraints
+                )
+    return constraints
+
+
+def _merge_observed_payload_values(
+    payload: Mapping[str, Any], constraints: dict[str, PathConstraint]
+) -> None:
+    for raw_path, value in _iter_scalar_paths(payload):
+        normalized = normalize_inventory_path(raw_path)
+        if normalized not in constraints:
+            continue
+        if isinstance(value, bool):
+            observed = PathConstraint(values=frozenset({str(value).lower()}))
+        elif isinstance(value, (int, float)):
+            observed = PathConstraint(minimum=float(value), maximum=float(value))
+        elif isinstance(value, str):
+            observed = PathConstraint(values=frozenset({value}))
+        else:
+            continue
+        constraints[normalized] = constraints[normalized].merge(observed)
+
+
+def _iter_scalar_paths(
+    value: object, prefix: str = ""
+) -> Iterable[tuple[str, JsonScalar]]:
+    if isinstance(value, dict):
+        for key, child in cast(dict[str, Any], value).items():
+            child_path = f"{prefix}.{key}" if prefix else key
+            yield from _iter_scalar_paths(child, child_path)
+    elif isinstance(value, (str, int, float, bool)) or value is None:
+        yield prefix, cast(JsonScalar, value)
+
+
+def normalize_inventory_path(path: str) -> str:
+    """Normalize concrete weapon slots to the inventory wildcard form."""
+    return _WEAPON_KEY.sub("*", path)
+
+
+def validate_mutation(
+    mutation: Mutation, constraints: Mapping[str, PathConstraint]
+) -> None:
+    """Reject unknown paths and values outside the observed inventory range."""
+    normalized = normalize_inventory_path(mutation.path)
+    if normalized not in constraints:
+        raise ValueError(f"字段路径不在数据清单白名单中：{mutation.path}")
+    if mutation.operation == "delete":
+        return
+    value = mutation.value
+    constraint = constraints[normalized]
+    if isinstance(value, bool):
+        token = str(value).lower()
+        if constraint.values and token not in constraint.values:
+            raise ValueError(f"{mutation.path}={value!r} 未在数据清单中观测到")
+        return
+    if isinstance(value, (int, float)):
+        if constraint.minimum is None or constraint.maximum is None:
+            raise ValueError(f"{mutation.path} 没有可验证的数值范围")
+        if not constraint.minimum <= float(value) <= constraint.maximum:
+            raise ValueError(
+                f"{mutation.path}={value!r} 超出观测范围 "
+                f"{constraint.minimum:g}–{constraint.maximum:g}"
+            )
+        return
+    if isinstance(value, str) and constraint.values and value not in constraint.values:
+        raise ValueError(f"{mutation.path}={value!r} 未在数据清单中观测到")
+
+
+def _parse_template_source(source: str) -> tuple[str, int, int]:
+    match = _TEMPLATE_SOURCE.fullmatch(source)
+    if match is None:
+        raise ValueError(f"无效模板来源：{source}")
+    return match.group(1), int(match.group(2)), int(match.group(3))
+
+
+def _navigate_parent(root: dict[str, Any], path: str) -> tuple[dict[str, Any], str]:
+    parts = path.split(".")
+    current = root
+    for part in parts[:-1]:
+        child = current.get(part)
+        if child is None:
+            child = {}
+            current[part] = child
+        if not isinstance(child, dict):
+            raise ValueError(f"字段父级不是对象：{path}")
+        current = cast(dict[str, Any], child)
+    return current, parts[-1]
+
+
+def _scrub_identity(value: object, path: tuple[str, ...] = ()) -> None:
+    if isinstance(value, dict):
+        mapping = cast(dict[str, Any], value)
+        for key, child in tuple(mapping.items()):
+            child_path = (*path, key)
+            if key == "steamid" and path and path[-1] in {"player", "provider"}:
+                mapping[key] = SYNTHETIC_STEAMID
+            elif key == "name" and path and path[-1] == "player":
+                mapping[key] = SYNTHETIC_NAME
+            else:
+                _scrub_identity(child, child_path)
+    elif isinstance(value, list):
+        for child in value:
+            _scrub_identity(child, path)
+
+
+def synthesize_scenario(
+    spec: ScenarioSpec,
+    *,
+    recordings_directory: Path = RECORDINGS_DIRECTORY,
+    constraints: Mapping[str, PathConstraint] | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Apply validated scalar mutations to a real JSONL slice and anonymize it."""
+    active_constraints = constraints or load_inventory_constraints()
+    filename, start_line, end_line = _parse_template_source(spec.template_source)
+    source_path = recordings_directory / filename
+    source_lines = source_path.read_text(encoding="utf-8").splitlines()
+    rows = [
+        cast(dict[str, Any], json.loads(source_lines[index - 1]))
+        for index in range(start_line, end_line + 1)
+    ]
+    by_line = {line: rows[line - start_line] for line in range(start_line, end_line + 1)}
+    for mutation in spec.mutations:
+        validate_mutation(mutation, active_constraints)
+        if mutation.line_number not in by_line:
+            raise ValueError(
+                f"{spec.scenario_id} 的改造行 {mutation.line_number} 不在模板区间内"
+            )
+        payload = by_line[mutation.line_number].get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError(f"模板第 {mutation.line_number} 行没有 payload 对象")
+        parent, key = _navigate_parent(cast(dict[str, Any], payload), mutation.path)
+        if mutation.operation == "delete":
+            parent.pop(key, None)
+        else:
+            parent[key] = mutation.value
+    for row in rows:
+        _scrub_identity(row)
+    return tuple(rows)
+
+
+def write_scenario(
+    spec: ScenarioSpec,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    scenarios_directory: Path = SCENARIOS_DIRECTORY,
+) -> Path:
+    """Write one deterministic compact JSONL scenario."""
+    scenarios_directory.mkdir(parents=True, exist_ok=True)
+    output = scenarios_directory / f"{spec.scenario_id}.jsonl"
+    output.write_text(
+        "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+    return output
+
+
+def _selected_card(path: Path, event_type: EventType) -> BenchEvent:
+    result = run_bench(
+        path,
+        model=None,
+        provider=None,
+        personality_style="inference",
+        client=None,
+        max_events=40,
+        cards_only=True,
+    )
+    matches = tuple(event for event in result.events if event.event.type == event_type)
+    if not matches:
+        observed = ", ".join(event.event.type for event in result.events) or "无"
+        raise ValueError(f"{path.name} 未选中 {event_type}；实际为：{observed}")
+    return matches[-1]
+
+
+def _timeline_kind_counts(paths: Iterable[Path]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for path in paths:
+        session = GameSessionTracker(GSI_SILENCE_SECONDS)
+        lifecycle = MatchLifecycleTracker()
+        tracker = SituationTracker()
+        seen: set[tuple[int, int | None, float, str, str | None]] = set()
+        segment = 0
+        for snapshot in load_recording(path):
+            game = session.observe(snapshot)
+            if lifecycle.observe(game):
+                tracker.reset()
+                segment += 1
+            situation = tracker.observe(snapshot, game)
+            for entry in situation.timeline:
+                fingerprint = (
+                    segment,
+                    situation.round_number,
+                    entry.seconds,
+                    entry.kind,
+                    entry.detail,
+                )
+                if fingerprint not in seen:
+                    seen.add(fingerprint)
+                    counts[entry.kind] += 1
+    return counts
+
+
+def _scenario_report(specs: Sequence[ScenarioSpec]) -> str:
+    lines = ["# M3-T6 合成场景定义", ""]
+    for spec in specs:
+        lines.extend(
+            (
+                f"### {spec.scenario_id} —— {spec.description}",
+                f"- 分类：{spec.category}类",
+                f"- 模板来源：{spec.template_source}",
+                "- 改造："
+                + (
+                    "；".join(
+                        f"第{item.line_number}行 {item.operation} {item.path}"
+                        + (f"={item.value!r}" if item.operation == "set" else "")
+                        for item in spec.mutations
+                    )
+                    if spec.mutations
+                    else "沿用模板中的已观测状态变化，不额外改值"
+                ),
+                "- 必答：" + "、".join(spec.required_facts),
+                "- 禁项：" + "；".join(spec.forbidden_claims),
+                "",
+            )
+        )
+    lines.extend(("## 未生成的越界场景", ""))
+    lines.extend(f"- `{scenario_id}`：{reason}" for scenario_id, reason in SKIPPED_SCENARIOS)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _cards_report(
+    specs: Sequence[ScenarioSpec], cards: Mapping[str, BenchEvent]
+) -> str:
+    lines = [
+        "# M3-T6 合成场景事件卡（cards-only）",
+        "",
+        "- 模型调用次数：0（cards-only）",
+        "- 本报告仅复用生产 EventDetector、SpeechPolicy 与事件卡渲染器。",
+        "",
+    ]
+    for spec in specs:
+        event = cards[spec.scenario_id]
+        lines.extend(
+            (
+                f"## `{spec.scenario_id}`",
+                "",
+                f"场景：{spec.description}",
+                f"预期事件：`{spec.expected_event_type}`",
+                "必答清单：" + "、".join(spec.required_facts),
+                "",
+                "```text",
+                event.event_card,
+                "```",
+                "",
+            )
+        )
+    return "\n".join(lines)
+
+
+def _answer_keys(specs: Sequence[ScenarioSpec]) -> str:
+    data = [
+        {
+            "case_id": spec.scenario_id,
+            "expected_summary": spec.description,
+            "required_facts": list(spec.required_facts),
+            "forbidden_claims": list(spec.forbidden_claims),
+        }
+        for spec in specs
+    ]
+    return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+
+def generate_all(
+    *,
+    specs: Sequence[ScenarioSpec] = SCENARIO_SPECS,
+    scenarios_directory: Path = SCENARIOS_DIRECTORY,
+    reports_directory: Path = REPORTS_DIRECTORY,
+) -> tuple[Path, ...]:
+    """Generate all scenarios and zero-call review artifacts."""
+    constraints = load_inventory_constraints()
+    scenarios_directory.mkdir(parents=True, exist_ok=True)
+    expected_names = {f"{spec.scenario_id}.jsonl" for spec in specs}
+    for stale_path in scenarios_directory.glob("*.jsonl"):
+        if stale_path.name not in expected_names:
+            stale_path.unlink()
+    paths: list[Path] = []
+    cards: dict[str, BenchEvent] = {}
+    for spec in specs:
+        rows = synthesize_scenario(spec, constraints=constraints)
+        output = write_scenario(spec, rows, scenarios_directory=scenarios_directory)
+        paths.append(output)
+        cards[spec.scenario_id] = _selected_card(output, spec.expected_event_type)
+
+    reports_directory.mkdir(parents=True, exist_ok=True)
+    (reports_directory / "m3-t6-scenarios.md").write_text(
+        _scenario_report(specs), encoding="utf-8"
+    )
+    (reports_directory / "m3-t6-cards-only.md").write_text(
+        _cards_report(specs, cards), encoding="utf-8"
+    )
+    (reports_directory / "m3-t6-answer-keys.json").write_text(
+        _answer_keys(specs), encoding="utf-8"
+    )
+
+    real_paths = tuple(
+        path
+        for path in RECORDINGS_DIRECTORY.glob("*.jsonl")
+        if path.stat().st_size > 0
+    )
+    real_counts = _timeline_kind_counts(real_paths)
+    synthetic_counts = _timeline_kind_counts(paths)
+    coverage_lines = [
+        "# M3-T6 时间线覆盖统计",
+        "",
+        "当前代码共有 22 个 TimelineKind。本任务按规格统计其中 18 个动作/状态 kind；",
+        "另有 round_live、bought 两个锚点，burn_start、burn_end 因实测始终为 0 而禁止合成。",
+        "",
+        "| kind | 全部真实录制 | 合成集 |",
+        "|---|---:|---:|",
+    ]
+    coverage_lines.extend(
+        f"| `{kind}` | {real_counts[kind]} | {synthetic_counts[kind]} |"
+        for kind in REPORTED_TIMELINE_KINDS
+    )
+    coverage_lines.extend(
+        (
+            "",
+            f"- 场景数：{len(specs)}",
+            f"- 合成录制总大小：{sum(path.stat().st_size for path in paths)} bytes",
+            "- 模型调用次数：0",
+            "",
+        )
+    )
+    (reports_directory / "m3-t6-timeline-coverage.md").write_text(
+        "\n".join(coverage_lines), encoding="utf-8"
+    )
+    return tuple(paths)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--generate", action="store_true", help="生成全部合成录制与 cards-only 报告"
+    )
+    args = parser.parse_args(argv)
+    if not args.generate:
+        parser.error("请指定 --generate")
+    paths = generate_all()
+    print(f"generated {len(paths)} scenarios; model calls: 0")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
