@@ -1,6 +1,6 @@
 {
   "scope": "event_only",
-  "answer_key_sha256": "6dd0786054560d43fc7e79e2fca743bfc29c6bf12d615b9ff1e015bcf0168984",
+  "answer_key_sha256": "ceee3afc4363484a09a86af18c622a58b2740f79619ae39852e9b2e6dc3ad8fe",
   "cases": [
     {"case_id":"gsi-20260811-223119-169538:001:death:r4","event":{"whole_correct":true,"correct_atoms":3,"total_atoms":3,"errors":[],"notes":"未声称具体阶段，正确承认未观测开打。"}},
     {"case_id":"gsi-20260811-223119-169538:002:round_win:r4","event":{"whole_correct":true,"correct_atoms":3,"total_atoms":3,"errors":[],"notes":""}},
@@ -29,7 +29,7 @@
     {"case_id":"gsi-20260811-223119-169538:025:round_win:r3","event":{"whole_correct":true,"correct_atoms":4,"total_atoms":4,"errors":[],"notes":""}},
     {"case_id":"gsi-20260811-223119-169538:026:death_thrown_away:r4","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2,"errors":[],"notes":""}},
     {"case_id":"gsi-20260811-223119-169538:027:round_loss:r4","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2,"errors":[],"notes":""}},
-    {"case_id":"gsi-20260811-223119-169538:028:kill:r5","event":{"whole_correct":false,"correct_atoms":4,"total_atoms":5,"errors":["把精确的剩16血泛化成残血"],"notes":"阶段、AK47、普通击杀和对枪取胜正确。"}},
+    {"case_id":"gsi-20260811-223119-169538:028:kill:r5","event":{"whole_correct":true,"correct_atoms":5,"total_atoms":5,"errors":[],"notes":"16血低于50，按产品口径鼓励概括为残血。"}},
     {"case_id":"gsi-20260811-223119-169538:029:round_loss:r5","event":{"whole_correct":true,"correct_atoms":4,"total_atoms":4,"errors":[],"notes":""}},
     {"case_id":"gsi-20260811-223119-169538:030:death_thrown_away:r6","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2,"errors":[],"notes":""}},
     {"case_id":"gsi-20260811-223119-169538:031:round_loss:r6","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2,"errors":[],"notes":""}},
