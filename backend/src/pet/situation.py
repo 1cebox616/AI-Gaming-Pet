@@ -71,6 +71,8 @@ TimelineKind = Literal[
     "flash_end",
     "smoke_start",
     "smoke_end",
+    "burn_start",
+    "burn_end",
     "kill",
     "damage",
     "primary_weapon",
@@ -82,7 +84,9 @@ TimelineKind = Literal[
     "bomb_pickup",
     "bomb_drop",
     "assist",
+    "mvp",
     "death",
+    "round_result",
 ]
 RoundStage = Literal["开局", "前期", "中期", "后期", "守包", "反攻包点", "下包后"]
 
@@ -114,6 +118,7 @@ class RoundSituation:
     bought_equipment: bool
     bomb_planted_at_ts: float | None
     seconds_since_bomb_planted: float | None
+    grenades_used: tuple[tuple[str, int], ...] = ()
     # Deliberate GameSnapshot duplication: spectating replaces snapshot.team with
     # the teammate's team, while round-result cards still need the player's team.
     self_team: str | None = None
@@ -136,6 +141,8 @@ class SituationTracker:
             return self._current
         if game.subject_is_self is not True:
             self._close_effect_intervals()
+            self._record_bomb_state(snapshot)
+            self._record_round_result(snapshot)
             return self._current
 
         round_number = human_round_number(snapshot)
@@ -170,13 +177,19 @@ class SituationTracker:
         primary_weapons_used, new_primary_weapons = self._observe_primary_weapons(
             snapshot
         )
-        for weapon_name in new_primary_weapons:
+        had_primary_weapon = bool(self._current.primary_weapons_used)
+        for index, weapon_name in enumerate(new_primary_weapons):
+            label = weapon_display_name(weapon_name)
             timeline = _append_timeline(
                 timeline,
                 TimelineEntry(
                     seconds=relative_seconds,
                     kind="primary_weapon",
-                    detail=weapon_display_name(weapon_name),
+                    detail=(
+                        f"换枪 {label}"
+                        if had_primary_weapon or index > 0
+                        else label
+                    ),
                 ),
             )
 
@@ -202,7 +215,9 @@ class SituationTracker:
             self._last_bought_at_seconds = relative_seconds
 
         used_grenades, picked_up_grenades = self._observe_grenades(snapshot)
+        grenades_used = Counter(dict(self._current.grenades_used))
         for grenade_name in used_grenades:
+            grenades_used[grenade_name] += 1
             timeline = _append_timeline(
                 timeline,
                 TimelineEntry(
@@ -221,13 +236,13 @@ class SituationTracker:
                 ),
             )
 
-        ammo_detail, reload_detail = self._observe_ammo(snapshot)
+        ammo_detail = self._observe_ammo(snapshot)
         if ammo_detail is not None:
             timeline = _append_timeline(
                 timeline,
                 TimelineEntry(relative_seconds, "ammo_low", ammo_detail),
             )
-        if reload_detail is not None:
+        for reload_detail in self._observe_reload(snapshot, relative_seconds):
             timeline = _append_timeline(
                 timeline,
                 TimelineEntry(relative_seconds, "reload", reload_detail),
@@ -286,11 +301,24 @@ class SituationTracker:
                 else max(max_smoke_intensity, snapshot.smoked)
             )
 
-        burn_count = self._current.burn_count
-        if (self._previous_burning is None or self._previous_burning == 0) and (
-            snapshot.burning is not None and snapshot.burning > 0
-        ):
-            burn_count += 1
+        burn_count, burn_transition, burn_duration, burn_interrupted = (
+            self._observe_burn(snapshot)
+        )
+        if burn_transition is not None:
+            timeline = _append_timeline(
+                timeline,
+                TimelineEntry(
+                    relative_seconds,
+                    burn_transition,
+                    (
+                        _unfinished_duration_detail(burn_duration)
+                        if burn_interrupted
+                        else _duration_detail(burn_duration)
+                    )
+                    if burn_transition == "burn_end"
+                    else None,
+                ),
+            )
 
         round_kills_increase = _positive_increase(
             self._previous_round_kills, snapshot.round_kills
@@ -341,26 +369,11 @@ class SituationTracker:
         if snapshot.health == 0 and self._last_nonzero_health is not None:
             health_before_death = self._last_nonzero_health
 
-        bomb_planted_at_ts = self._current.bomb_planted_at_ts
-        if bomb_planted_at_ts is None and snapshot.bomb_state == "planted":
-            bomb_planted_at_ts = snapshot.ts
-        seconds_since_bomb_planted = (
-            max(0.0, snapshot.ts - bomb_planted_at_ts)
-            if bomb_planted_at_ts is not None
-            else None
-        )
-        if (
-            snapshot.bomb_state is not None
-            and snapshot.bomb_state != self._previous_bomb_state
-        ):
-            timeline = _append_timeline(
-                timeline,
-                TimelineEntry(
-                    relative_seconds,
-                    "bomb",
-                    _bomb_detail(snapshot.bomb_state),
-                ),
-            )
+        (
+            timeline,
+            bomb_planted_at_ts,
+            seconds_since_bomb_planted,
+        ) = self._bomb_state_update(snapshot, timeline, relative_seconds)
 
         carrying_bomb = is_carrying_bomb(snapshot)
         if self._previous_carrying_bomb is False and carrying_bomb is True:
@@ -388,6 +401,22 @@ class SituationTracker:
                 TimelineEntry(relative_seconds, "assist", None),
             )
 
+        mvps_increase = _positive_increase(
+            self._previous_match_mvps, snapshot.match_mvps
+        )
+        if mvps_increase > 0:
+            previous_round_prefix = (
+                "上回合 " if snapshot.round_phase == "freezetime" else ""
+            )
+            timeline = _append_timeline(
+                timeline,
+                TimelineEntry(
+                    relative_seconds,
+                    "mvp",
+                    f"{previous_round_prefix}MVP+{mvps_increase}",
+                ),
+            )
+
         if (
             self._previous_health is not None
             and self._previous_health > 0
@@ -406,6 +435,20 @@ class SituationTracker:
                 timeline=timeline,
                 relative_seconds=relative_seconds,
             )
+
+        if (
+            snapshot.round_win_team is not None
+            and snapshot.round_win_team != self._previous_round_win_team
+        ):
+            timeline = _append_timeline(
+                timeline,
+                TimelineEntry(
+                    relative_seconds,
+                    "round_result",
+                    snapshot.round_win_team,
+                ),
+            )
+            self._previous_round_win_team = snapshot.round_win_team
 
         self_team = (
             snapshot.team if snapshot.team is not None else self._current.self_team
@@ -426,10 +469,10 @@ class SituationTracker:
             bought_equipment=bought_equipment,
             bomb_planted_at_ts=bomb_planted_at_ts,
             seconds_since_bomb_planted=seconds_since_bomb_planted,
+            grenades_used=tuple(sorted(grenades_used.items())),
             self_team=self_team,
             timeline=tuple(timeline),
         )
-        self._previous_burning = snapshot.burning
         self._previous_health = snapshot.health
         if snapshot.health is not None and snapshot.health > 0:
             self._last_nonzero_health = snapshot.health
@@ -438,7 +481,8 @@ class SituationTracker:
         self._previous_round_kills = snapshot.round_kills
         self._previous_round_killhs = snapshot.round_killhs
         self._previous_match_assists = snapshot.match_assists
-        self._previous_bomb_state = snapshot.bomb_state
+        if snapshot.match_mvps is not None:
+            self._previous_match_mvps = snapshot.match_mvps
         if carrying_bomb is not None:
             self._previous_carrying_bomb = carrying_bomb
         self._previous_round_phase = snapshot.round_phase
@@ -453,6 +497,68 @@ class SituationTracker:
         )
         self._current = replace(self._current, timeline=tuple(timeline))
         return self._current
+
+    def _record_round_result(self, snapshot: GameSnapshot) -> None:
+        round_number = human_round_number(snapshot)
+        if (
+            round_number != self._current.round_number
+            or snapshot.round_win_team is None
+            or snapshot.round_win_team == self._previous_round_win_team
+        ):
+            return
+        timeline = _append_timeline(
+            list(self._current.timeline),
+            TimelineEntry(
+                self._relative_seconds(snapshot.ts),
+                "round_result",
+                snapshot.round_win_team,
+            ),
+        )
+        self._current = replace(self._current, timeline=tuple(timeline))
+        self._previous_round_win_team = snapshot.round_win_team
+
+    def _record_bomb_state(self, snapshot: GameSnapshot) -> None:
+        if human_round_number(snapshot) != self._current.round_number:
+            return
+        timeline, planted_at, elapsed = self._bomb_state_update(
+            snapshot,
+            list(self._current.timeline),
+            self._relative_seconds(snapshot.ts),
+        )
+        self._current = replace(
+            self._current,
+            bomb_planted_at_ts=planted_at,
+            seconds_since_bomb_planted=elapsed,
+            timeline=tuple(timeline),
+        )
+
+    def _bomb_state_update(
+        self,
+        snapshot: GameSnapshot,
+        timeline: list[TimelineEntry],
+        relative_seconds: float,
+    ) -> tuple[list[TimelineEntry], float | None, float | None]:
+        planted_at = self._current.bomb_planted_at_ts
+        if planted_at is None and snapshot.bomb_state == "planted":
+            planted_at = snapshot.ts
+        elapsed = (
+            max(0.0, snapshot.ts - planted_at) if planted_at is not None else None
+        )
+        if (
+            snapshot.bomb_state is not None
+            and snapshot.bomb_state != self._previous_bomb_state
+        ):
+            timeline = _append_timeline(
+                timeline,
+                TimelineEntry(
+                    relative_seconds,
+                    "bomb",
+                    _bomb_detail(snapshot.bomb_state),
+                ),
+            )
+        if snapshot.bomb_state is not None:
+            self._previous_bomb_state = snapshot.bomb_state
+        return timeline, planted_at, elapsed
 
     def reset(self) -> None:
         """Clear all accumulations at a match boundary."""
@@ -471,13 +577,18 @@ class SituationTracker:
             bought_equipment=False,
             bomb_planted_at_ts=None,
             seconds_since_bomb_planted=None,
+            grenades_used=(),
             self_team=None,
             timeline=(),
         )
         self._reset_baselines()
 
     def _start_round(self, round_number: int, started_at: float) -> None:
+        previous_match_mvps = self._previous_match_mvps
         self.reset()
+        # GSI commonly publishes MVP+1 in the next round's freeze time. Keep the
+        # match-level baseline across a round reset so that late update is visible.
+        self._previous_match_mvps = previous_match_mvps
         self._current = replace(self._current, round_number=round_number)
         self._round_started_at = started_at
 
@@ -486,7 +597,8 @@ class SituationTracker:
         self._active_flash_seconds = 0.0
         self._smoke_active = False
         self._active_smoke_seconds = 0.0
-        self._previous_burning: int | None = None
+        self._burn_active = False
+        self._active_burn_seconds = 0.0
         self._previous_health: int | None = None
         self._last_nonzero_health: int | None = None
         self._previous_money: int | None = None
@@ -494,12 +606,16 @@ class SituationTracker:
         self._previous_round_kills: int | None = None
         self._previous_round_killhs: int | None = None
         self._previous_match_assists: int | None = None
+        self._previous_match_mvps: int | None = None
         self._previous_bomb_state: str | None = None
         self._previous_carrying_bomb: bool | None = None
         self._previous_grenades: Counter[str] | None = None
+        self._previous_weapon_states: dict[str, str | None] | None = None
         self._previous_held_weapon_name: str | None = None
         self._previous_held_ammo: int | None = None
-        self._previous_held_reserve: int | None = None
+        self._reload_weapon_name: str | None = None
+        self._reload_started_at_seconds: float | None = None
+        self._previous_round_win_team: str | None = None
         self._previous_round_phase: str | None = None
         self._round_is_live = False
         self._last_bought_at_seconds: float | None = None
@@ -581,6 +697,39 @@ class SituationTracker:
             transition = "smoke_start"
         return total, transition, duration, interrupted
 
+    def _observe_burn(
+        self, snapshot: GameSnapshot
+    ) -> tuple[
+        int,
+        Literal["burn_start", "burn_end"] | None,
+        float | None,
+        bool,
+    ]:
+        count = self._current.burn_count
+        transition: Literal["burn_start", "burn_end"] | None = None
+        duration: float | None = None
+        interrupted = False
+        if self._burn_active:
+            if snapshot.burning is None:
+                transition = "burn_end"
+                duration = self._active_burn_seconds
+                interrupted = True
+                self._burn_active = False
+                self._active_burn_seconds = 0.0
+            else:
+                self._active_burn_seconds += self._elapsed_since_last_self(snapshot.ts)
+                if snapshot.burning <= 0:
+                    transition = "burn_end"
+                    duration = self._active_burn_seconds
+                    self._burn_active = False
+                    self._active_burn_seconds = 0.0
+        elif snapshot.burning is not None and snapshot.burning > 0:
+            count += 1
+            self._burn_active = True
+            self._active_burn_seconds = 0.0
+            transition = "burn_start"
+        return count, transition, duration, interrupted
+
     def _observe_primary_weapons(
         self, snapshot: GameSnapshot
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -621,16 +770,14 @@ class SituationTracker:
         self._previous_grenades = current
         return tuple(used), tuple(picked_up)
 
-    def _observe_ammo(self, snapshot: GameSnapshot) -> tuple[str | None, str | None]:
-        weapon = held_weapon(snapshot)
+    def _observe_ammo(self, snapshot: GameSnapshot) -> str | None:
+        weapon = _operated_weapon(snapshot)
         if weapon is None or weapon.ammo_clip is None:
             self._previous_held_weapon_name = None
             self._previous_held_ammo = None
-            self._previous_held_reserve = None
-            return None, None
+            return None
 
         detail: str | None = None
-        reload_detail: str | None = None
         if (
             weapon.name == self._previous_held_weapon_name
             and self._previous_held_ammo is not None
@@ -643,19 +790,62 @@ class SituationTracker:
                 if weapon.ammo_clip == 0
                 else f"弹匣仅剩{weapon.ammo_clip}发 {label}"
             )
-        if (
-            weapon.name == self._previous_held_weapon_name
-            and self._previous_held_ammo is not None
-            and self._previous_held_reserve is not None
-            and weapon.ammo_reserve is not None
-            and weapon.ammo_clip > self._previous_held_ammo
-            and weapon.ammo_reserve < self._previous_held_reserve
-        ):
-            reload_detail = f"换弹 {weapon_display_name(weapon.name)}"
         self._previous_held_weapon_name = weapon.name
         self._previous_held_ammo = weapon.ammo_clip
-        self._previous_held_reserve = weapon.ammo_reserve
-        return detail, reload_detail
+        return detail
+
+    def _observe_reload(
+        self,
+        snapshot: GameSnapshot,
+        relative_seconds: float,
+    ) -> tuple[str, ...]:
+        current_states = {
+            weapon.name: weapon.state for weapon in snapshot.weapons or ()
+        }
+        reloading = next(
+            (
+                weapon
+                for weapon in snapshot.weapons or ()
+                if weapon.state == "reloading"
+            ),
+            None,
+        )
+        details: list[str] = []
+
+        if self._reload_weapon_name is not None and (
+            reloading is None or reloading.name != self._reload_weapon_name
+        ):
+            if self._reload_started_at_seconds is not None:
+                duration = max(
+                    0.0,
+                    relative_seconds - self._reload_started_at_seconds,
+                )
+                label = weapon_display_name(self._reload_weapon_name)
+                if current_states.get(self._reload_weapon_name) == "active":
+                    details.append(f"换弹 {label} 用时约{duration:.1f}秒")
+                else:
+                    details.append(
+                        f"换弹 {label} 未完成 已持续{duration:.1f}秒"
+                    )
+            self._reload_weapon_name = None
+            self._reload_started_at_seconds = None
+
+        if reloading is not None and self._reload_weapon_name is None:
+            previous_state = (
+                self._previous_weapon_states.get(reloading.name)
+                if self._previous_weapon_states is not None
+                else None
+            )
+            self._reload_weapon_name = reloading.name
+            self._reload_started_at_seconds = (
+                relative_seconds
+                if self._previous_weapon_states is not None
+                and previous_state != "reloading"
+                else None
+            )
+
+        self._previous_weapon_states = current_states
+        return tuple(details)
 
     def _relative_seconds(self, ts: float | None) -> float:
         if ts is None:
@@ -699,10 +889,21 @@ class SituationTracker:
                     f"未结束 已持续{self._active_smoke_seconds:.1f}秒",
                 ),
             )
+        if self._burn_active:
+            result = _append_timeline(
+                result,
+                TimelineEntry(
+                    seconds,
+                    "burn_end",
+                    f"未结束 已持续{self._active_burn_seconds:.1f}秒",
+                ),
+            )
         self._flash_active = False
         self._active_flash_seconds = 0.0
         self._smoke_active = False
         self._active_smoke_seconds = 0.0
+        self._burn_active = False
+        self._active_burn_seconds = 0.0
         if timeline is None:
             self._current = replace(self._current, timeline=tuple(result))
         return result
@@ -854,7 +1055,8 @@ def _merge_damage_entries(
     combined_damage = int(first_match.group(1)) + int(second_match.group(1))
     remaining_health = int(second_match.group(2))
     return TimelineEntry(
-        seconds=first.seconds,
+        # A collapsed entry is timestamped at its final observed change.
+        seconds=second.seconds,
         kind="damage",
         detail=_damage_detail(combined_damage, remaining_health),
     )
@@ -905,6 +1107,20 @@ def held_weapon(snapshot: GameSnapshot) -> WeaponSlot | None:
     if snapshot.weapons is None:
         return None
     return next((weapon for weapon in snapshot.weapons if weapon.state == "active"), None)
+
+
+def _operated_weapon(snapshot: GameSnapshot) -> WeaponSlot | None:
+    """Return the weapon currently active or being reloaded."""
+    if snapshot.weapons is None:
+        return None
+    return next(
+        (
+            weapon
+            for weapon in snapshot.weapons
+            if weapon.state in {"active", "reloading"}
+        ),
+        None,
+    )
 
 
 def is_low_ammo(snapshot: GameSnapshot) -> bool | None:

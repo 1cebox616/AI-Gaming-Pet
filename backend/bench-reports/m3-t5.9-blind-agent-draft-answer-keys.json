@@ -1,0 +1,211 @@
+{
+  "cases": [
+    {
+      "case_id": "gsi-20260811-223119-169538:001:death:r4",
+      "expected_summary": "普通死亡；未观测到正式开打时刻，不判断阶段。",
+      "required_facts": ["普通死亡", "未观测正式开打", "不判断阶段"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:002:round_win:r4",
+      "expected_summary": "灭队拿下回合胜利；未观测到正式开打时刻。",
+      "required_facts": ["灭队", "回合胜利", "未观测正式开打"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:003:kill:r5",
+      "expected_summary": "中期剩28血，用AK47赢下对枪完成普通击杀。",
+      "required_facts": ["中期", "剩28血", "AK47", "对枪取胜", "普通击杀"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:004:death_after_kill:r5",
+      "expected_summary": "中期剩28血用AK47赢下对枪，随后被补枪。",
+      "required_facts": ["中期", "剩28血", "AK47对枪取胜", "随后被补枪"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:005:round_loss:r5",
+      "expected_summary": "灭队导致回合失败；中期用AK47赢下对枪一杀后马上被补枪。",
+      "required_facts": ["灭队", "回合失败", "中期AK47对枪一杀", "马上被补枪"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:006:death:r6",
+      "expected_summary": "前期普通死亡。",
+      "required_facts": ["前期", "普通死亡"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:007:round_loss:r6",
+      "expected_summary": "灭队导致回合失败。",
+      "required_facts": ["灭队", "回合失败"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:008:death:r7",
+      "expected_summary": "中期普通死亡。",
+      "required_facts": ["中期", "普通死亡"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:009:round_loss:r7",
+      "expected_summary": "灭队导致回合失败。",
+      "required_facts": ["灭队", "回合失败"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:010:death_thrown_away:r8",
+      "expected_summary": "开局白给。",
+      "required_facts": ["开局", "白给"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:011:round_loss:r8",
+      "expected_summary": "灭队导致回合失败。",
+      "required_facts": ["灭队", "回合失败"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:012:kill:r9",
+      "expected_summary": "开局用MP7赢下对枪完成普通击杀。",
+      "required_facts": ["开局", "MP7", "对枪取胜", "普通击杀"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:013:round_loss:r9",
+      "expected_summary": "炸弹拆除，回合失败；早期击杀后被补不是后续结算重点。",
+      "required_facts": ["炸弹拆除", "回合失败"],
+      "forbidden_claims": ["用早期个人击杀替代回合结算重点"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:014:death:r10",
+      "expected_summary": "中期普通死亡。",
+      "required_facts": ["中期", "普通死亡"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:015:round_win:r10",
+      "expected_summary": "灭队拿下回合胜利。",
+      "required_facts": ["灭队", "回合胜利"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:016:round_win:r11",
+      "expected_summary": "灭队拿下回合胜利。",
+      "required_facts": ["灭队", "回合胜利"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:017:kill:r12",
+      "expected_summary": "前期用AK47完成普通击杀。",
+      "required_facts": ["前期", "AK47", "普通击杀"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:018:death:r12",
+      "expected_summary": "前期用AK47击杀一人，中期普通死亡。",
+      "required_facts": ["前期AK47一杀", "中期", "普通死亡"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:019:death:r1",
+      "expected_summary": "开局普通死亡。",
+      "required_facts": ["开局", "普通死亡"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:020:death:r1",
+      "expected_summary": "前期普通死亡。",
+      "required_facts": ["前期", "普通死亡"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:021:round_loss:r1",
+      "expected_summary": "灭队导致回合失败。",
+      "required_facts": ["灭队", "回合失败"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:022:death_thrown_away:r2",
+      "expected_summary": "开局白给。",
+      "required_facts": ["开局", "白给"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:023:round_loss:r2",
+      "expected_summary": "灭队导致回合失败。",
+      "required_facts": ["灭队", "回合失败"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:024:kill_headshot:r3",
+      "expected_summary": "前期用沙鹰爆头完成击杀。",
+      "required_facts": ["前期", "沙鹰", "爆头击杀"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:025:round_win:r3",
+      "expected_summary": "灭队拿下回合胜利，玩家存活并在前期用沙鹰爆头击杀一人。",
+      "required_facts": ["灭队", "回合胜利", "存活", "前期沙鹰爆头一杀"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:026:death_thrown_away:r4",
+      "expected_summary": "开局白给。",
+      "required_facts": ["开局", "白给"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:027:round_loss:r4",
+      "expected_summary": "灭队导致回合失败。",
+      "required_facts": ["灭队", "回合失败"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:028:kill:r5",
+      "expected_summary": "中期剩16血，用AK47完成普通击杀；卡片没有对枪标签。",
+      "required_facts": ["中期", "剩16血", "AK47", "普通击杀"],
+      "forbidden_claims": ["没有近同时掉血标签却声称赢下对枪"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:029:round_loss:r5",
+      "expected_summary": "炸弹拆除，回合失败；中期用AK47赢下对枪一杀后被补枪。",
+      "required_facts": ["炸弹拆除", "回合失败", "中期AK47对枪一杀", "随后被补枪"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:030:death_thrown_away:r6",
+      "expected_summary": "开局白给。",
+      "required_facts": ["开局", "白给"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:031:round_loss:r6",
+      "expected_summary": "炸弹拆除，回合失败。",
+      "required_facts": ["炸弹拆除", "回合失败"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:032:kill_headshot:r7",
+      "expected_summary": "前期用AK47爆头赢下对枪。",
+      "required_facts": ["前期", "AK47", "爆头", "对枪取胜"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:033:death:r7",
+      "expected_summary": "前期用AK47爆头赢下对枪，中期普通死亡；距击杀13秒，不算被补枪。",
+      "required_facts": ["前期AK47爆头对枪", "中期普通死亡"],
+      "forbidden_claims": ["超过8秒仍声称被补枪"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:034:round_loss:r7",
+      "expected_summary": "灭队导致回合失败；前期用AK47爆头赢下对枪，中期阵亡。",
+      "required_facts": ["灭队", "回合失败", "前期AK47爆头对枪", "中期阵亡"],
+      "forbidden_claims": ["只有一杀却声称有显著贡献"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:035:kill_headshot:r8",
+      "expected_summary": "前期满血用AK47爆头击杀；卡片没有对枪标签。",
+      "required_facts": ["前期", "满血", "AK47", "爆头击杀"],
+      "forbidden_claims": ["没有近同时掉血标签却声称赢下对枪"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:036:multi_kill:r8",
+      "expected_summary": "前期满血用AK47爆头一杀，中期赢下对枪再杀一人后马上被补，累计双杀。",
+      "required_facts": ["前期满血AK47爆头一杀", "中期对枪再杀一人", "本回合双杀", "马上被补枪"],
+      "forbidden_claims": ["把跨阶段累计双杀说成中期双杀", "把未知的第二杀武器写成AK47"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:037:round_loss:r8",
+      "expected_summary": "灭队导致回合失败；前期满血用AK47爆头一杀，中期赢下对枪再杀一人后被补，累计双杀且有显著贡献。",
+      "required_facts": ["灭队", "回合失败", "前期满血AK47爆头一杀", "中期对枪再杀一人", "本回合双杀", "随后被补枪", "有显著贡献"],
+      "forbidden_claims": ["把跨阶段累计双杀说成中期双杀", "把未知的第二杀武器写成AK47"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:038:death:r9",
+      "expected_summary": "前期普通死亡。",
+      "required_facts": ["前期", "普通死亡"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:039:death:r1",
+      "expected_summary": "前期普通死亡。",
+      "required_facts": ["前期", "普通死亡"]
+    },
+    {
+      "case_id": "gsi-20260811-223119-169538:040:round_loss:r1",
+      "expected_summary": "灭队导致回合失败。",
+      "required_facts": ["灭队", "回合失败"]
+    }
+  ]
+}

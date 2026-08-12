@@ -43,6 +43,7 @@ def _snapshot(
     money: int | None = 4000,
     equip_value: int | None = 2000,
     active_weapon: str | None = "weapon_ak47",
+    weapon_state: str = "active",
     ammo_clip: int | None = 30,
     ammo_reserve: int | None = 90,
     weapon_slots: tuple[tuple[str, str | None, str], ...] | None = None,
@@ -50,6 +51,7 @@ def _snapshot(
     round_kills: int | None = 0,
     round_killhs: int | None = 0,
     match_assists: int | None = 0,
+    match_mvps: int | None = 0,
     team: str = "CT",
     has_defusekit: bool | None = None,
 ) -> GameSnapshot:
@@ -82,7 +84,7 @@ def _snapshot(
         weapon: dict[str, object] = {
             "name": active_weapon,
             "type": "Rifle",
-            "state": "active",
+            "state": weapon_state,
         }
         if ammo_clip is not None:
             weapon["ammo_clip"] = ammo_clip
@@ -110,9 +112,10 @@ def _snapshot(
             "team": team,
             "state": state,
             "weapons": weapons,
-            "match_stats": (
-                {"assists": match_assists} if match_assists is not None else {}
-            ),
+            "match_stats": {
+                **({"assists": match_assists} if match_assists is not None else {}),
+                **({"mvps": match_mvps} if match_mvps is not None else {}),
+            },
         },
     }
     return parse_snapshot(payload, received_at=ts)
@@ -132,7 +135,7 @@ def _observe_all(snapshots: tuple[GameSnapshot, ...]) -> RoundSituation:
     return current
 
 
-def test_timeline_kind_contract_contains_exactly_eighteen_values() -> None:
+def test_timeline_kind_contract_contains_exactly_twenty_two_values() -> None:
     assert get_args(TimelineKind) == (
         "bought",
         "round_live",
@@ -140,6 +143,8 @@ def test_timeline_kind_contract_contains_exactly_eighteen_values() -> None:
         "flash_end",
         "smoke_start",
         "smoke_end",
+        "burn_start",
+        "burn_end",
         "kill",
         "damage",
         "primary_weapon",
@@ -151,7 +156,9 @@ def test_timeline_kind_contract_contains_exactly_eighteen_values() -> None:
         "bomb_pickup",
         "bomb_drop",
         "assist",
+        "mvp",
         "death",
+        "round_result",
     )
 
 
@@ -312,10 +319,47 @@ def test_burn_count_tracks_zero_or_missing_to_positive_transitions() -> None:
             _snapshot(2.0, burning=45),
             _snapshot(3.0, burning=0),
             _snapshot(4.0, burning=80),
+            _snapshot(6.0, burning=0),
         )
     )
 
     assert result.burn_count == 2
+    assert tuple(
+        entry for entry in result.timeline if entry.kind in {"burn_start", "burn_end"}
+    ) == (
+        TimelineEntry(1.0, "burn_start", None),
+        TimelineEntry(2.0, "burn_end", "持续1.0秒"),
+        TimelineEntry(3.0, "burn_start", None),
+        TimelineEntry(5.0, "burn_end", "持续2.0秒"),
+    )
+
+
+def test_match_mvp_increase_is_recorded_in_the_timeline() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, match_mvps=1),
+            _snapshot(12.0, match_mvps=2),
+        )
+    )
+
+    assert tuple(entry for entry in result.timeline if entry.kind == "mvp") == (
+        TimelineEntry(2.0, "mvp", "MVP+1"),
+    )
+
+
+def test_mvp_update_published_in_next_freezetime_is_kept_as_previous_round_fact() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, map_round=0, round_phase="live", match_mvps=0),
+            _snapshot(18.0, map_round=1, round_phase="over", match_mvps=None),
+            _snapshot(20.0, map_round=1, round_phase="freezetime", match_mvps=1),
+        )
+    )
+
+    assert result.round_number == 2
+    assert tuple(entry for entry in result.timeline if entry.kind == "mvp") == (
+        TimelineEntry(0.0, "mvp", "上回合 MVP+1"),
+    )
 
 
 def test_total_damage_taken_sums_only_health_drops() -> None:
@@ -391,6 +435,10 @@ def test_primary_weapons_used_filters_deduplicates_and_preserves_first_order() -
     )
 
     assert result.primary_weapons_used == ("weapon_ak47", "weapon_awp")
+    assert result.timeline[0] == TimelineEntry(0.0, "primary_weapon", "AK47")
+    assert result.timeline[1] == TimelineEntry(
+        1.0, "primary_weapon", "换枪 AWP"
+    )
 
 
 def test_unknown_weapon_type_warns_once_and_is_not_primary(
@@ -506,6 +554,35 @@ def test_bomb_plant_time_and_elapsed_seconds_use_first_planted_snapshot() -> Non
     assert result.seconds_since_bomb_planted == 8.0
 
 
+def test_bomb_clock_continues_during_teammate_spectating() -> None:
+    tracker = SituationTracker()
+    session = GameSessionTracker(GSI_SILENCE_SECONDS)
+    own = _snapshot(10.0, bomb_state=None)
+    tracker.observe(own, session.observe(own))
+    planted_while_spectating = _snapshot(
+        20.0,
+        player_id=TEAMMATE_ID,
+        health=80,
+        bomb_state="planted",
+    )
+    tracker.observe(
+        planted_while_spectating,
+        session.observe(planted_while_spectating),
+    )
+    later = _snapshot(
+        27.5,
+        player_id=TEAMMATE_ID,
+        health=80,
+        bomb_state="planted",
+    )
+
+    result = tracker.observe(later, session.observe(later))
+
+    assert result.bomb_planted_at_ts == 20.0
+    assert result.seconds_since_bomb_planted == 7.5
+    assert TimelineEntry(10.0, "bomb", "已安放") in result.timeline
+
+
 def test_timeline_records_state_changes_in_time_order_with_human_details() -> None:
     result = _observe_all(
         (
@@ -578,7 +655,10 @@ def test_timeline_records_state_changes_in_time_order_with_human_details() -> No
         "death",
     )
     assert result.timeline[0] == TimelineEntry(0.0, "primary_weapon", "AK47")
-    assert result.timeline[4] == TimelineEntry(1.0, "damage", "掉了20血 剩80血")
+    assert result.timeline[5] == TimelineEntry(
+        2.0, "primary_weapon", "换枪 AWP"
+    )
+    assert result.timeline[4] == TimelineEntry(1.5, "damage", "掉了20血 剩80血")
     assert result.timeline[6] == TimelineEntry(2.0, "flash_end", "持续1.0秒")
     assert result.timeline[7] == TimelineEntry(2.0, "smoke_end", "持续1.0秒")
     assert result.timeline[8] == TimelineEntry(2.0, "kill", "AWP 爆头")
@@ -696,6 +776,7 @@ def test_grenade_disappearance_records_only_after_live_and_not_on_death() -> Non
 
     grenades = tuple(entry for entry in result.timeline if entry.kind == "grenade_used")
     assert grenades == (TimelineEntry(1.0, "grenade_used", "扔了烟雾弹"),)
+    assert result.grenades_used == (("weapon_smokegrenade", 1),)
 
 
 def test_grenade_pickup_records_only_after_round_is_live() -> None:
@@ -740,23 +821,50 @@ def test_ammo_low_rearms_after_weapon_switch_and_reload() -> None:
     )
 
 
-def test_reload_requires_clip_up_and_reserve_down_on_same_held_weapon() -> None:
-    reloaded = _observe_all(
+def test_reload_duration_uses_reloading_state_transitions() -> None:
+    completed = _observe_all(
         (
             _snapshot(10.0, ammo_clip=3, ammo_reserve=60),
-            _snapshot(11.0, ammo_clip=30, ammo_reserve=33),
+            _snapshot(
+                11.0,
+                weapon_state="reloading",
+                ammo_clip=3,
+                ammo_reserve=60,
+            ),
+            _snapshot(
+                12.4,
+                weapon_state="reloading",
+                ammo_clip=30,
+                ammo_reserve=33,
+            ),
+            _snapshot(13.0, ammo_clip=30, ammo_reserve=33),
         )
     )
-    reserve_unchanged = _observe_all(
+    interrupted = _observe_all(
         (
             _snapshot(10.0, ammo_clip=3, ammo_reserve=60),
-            _snapshot(11.0, ammo_clip=30, ammo_reserve=60),
+            _snapshot(
+                11.0,
+                weapon_state="reloading",
+                ammo_clip=3,
+                ammo_reserve=60,
+            ),
+            _snapshot(12.0, active_weapon="weapon_knife", ammo_clip=None),
         )
     )
 
-    reloads = tuple(entry for entry in reloaded.timeline if entry.kind == "reload")
-    assert reloads == (TimelineEntry(1.0, "reload", "换弹 AK47"),)
-    assert all(entry.kind != "reload" for entry in reserve_unchanged.timeline)
+    completed_reloads = tuple(
+        entry for entry in completed.timeline if entry.kind == "reload"
+    )
+    interrupted_reloads = tuple(
+        entry for entry in interrupted.timeline if entry.kind == "reload"
+    )
+    assert completed_reloads == (
+        TimelineEntry(3.0, "reload", "换弹 AK47 用时约2.0秒"),
+    )
+    assert interrupted_reloads == (
+        TimelineEntry(2.0, "reload", "换弹 AK47 未完成 已持续1.0秒"),
+    )
 
 
 def test_kill_detail_includes_low_ammo_at_that_snapshot() -> None:
@@ -782,7 +890,7 @@ def test_damage_detail_omits_armor_and_merges_health_loss() -> None:
 
     damage = tuple(entry for entry in result.timeline if entry.kind == "damage")
     assert damage == (
-        TimelineEntry(1.0, "damage", "掉了50血 剩50血"),
+        TimelineEntry(1.5, "damage", "掉了50血 剩50血"),
     )
 
 
@@ -813,6 +921,24 @@ def test_bomb_pickup_and_alive_drop_are_recorded_but_death_is_not_a_drop() -> No
         TimelineEntry(2.0, "bomb_drop", None),
     )
     assert all(entry.kind != "bomb_drop" for entry in death.timeline)
+
+
+def test_spectating_teammate_still_records_global_round_result() -> None:
+    tracker = SituationTracker()
+    session = GameSessionTracker(GSI_SILENCE_SECONDS)
+    live = _snapshot(10.0, map_round=0)
+    tracker.observe(live, session.observe(live))
+    result_snapshot = _snapshot(
+        52.0,
+        map_round=1,
+        round_phase="over",
+        player_id=TEAMMATE_ID,
+        health=80,
+    ).model_copy(update={"round_win_team": "T"})
+
+    result = tracker.observe(result_snapshot, session.observe(result_snapshot))
+
+    assert result.timeline[-1] == TimelineEntry(42.0, "round_result", "T")
 
 
 def test_assist_records_each_match_assist_increase() -> None:
