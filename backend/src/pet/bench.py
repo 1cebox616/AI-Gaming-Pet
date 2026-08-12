@@ -61,6 +61,18 @@ _CHECKLIST_INFERENCE_RULE = (
     "下列事实必须全部出现，措辞由你决定。\n"
     "不得删除清单中的阶段、武器归属、累计杀数、结算方式、对枪、摸烟、被补等确定性关系。"
 )
+_RARE_FACT_PRIORITY_RULE = """## 事件必答覆盖规则（优先级高于下文所有“只能写”和“到此结束”）
+
+程序已经把与本次焦点直接相关的罕见关系（被闪/烟雾/燃烧、换弹与弹匣、残血、道具、
+MVP/助攻、拿包与炸弹计时等）算进【事件必答】。事件行必须覆盖其中每一项；
+推荐骨架只是同一清单的压缩顺序，不是逐字模板。【本回合】时间线用于核对先后与措辞，
+不要把未列入【事件必答】的旁支事件自行升级成必答项。
+
+【事件必答】已按保留优先级从左到右排列。30 字冲突时，必须先保住左边的场景核心事实，
+不得为了复述右边的通用击杀细节而漏掉左边事实。
+
+不得补执行者、位置、敌人或伤害来源。若 30 字装不下，先删“满血”和重复阶段等
+非必答修饰，不得删除罕见关系、武器、最终多杀数、“有显著贡献”或回合结果。"""
 _LIGHT_PERSONALITY_PREFIX = """你是陪朋友打 CS2 的中文游戏搭子，说话短、随口、像个懂行的老玩家。
 可以损但不刻薄。不要用书面语，不要像解说员报幕。
 但下面的事实要求高于一切：宁可说得平淡，也不能说错或说出卡上没有的事。"""
@@ -732,6 +744,8 @@ def build_analysis_system_prompt(
         if checklist_prompt.count(old) != 1:
             raise ValueError("骨架逐字复制规则未恰好出现一次，拒绝生成不可比提示词")
         checklist_prompt = checklist_prompt.replace(old, new, 1)
+
+    checklist_prompt = f"{_RARE_FACT_PRIORITY_RULE}\n\n{checklist_prompt}"
 
     if variant == "checklist":
         return checklist_prompt

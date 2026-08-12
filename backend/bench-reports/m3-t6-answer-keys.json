@@ -1,12 +1,11 @@
 [
   {
     "case_id": "rare_reload_then_kill",
-    "expected_summary": "换弹完成后用 M4A1-S 击杀并进入回合结算",
+    "expected_summary": "换弹完成后立即用 M4A1-S 击杀",
     "required_facts": [
       "换弹",
       "M4A1-S",
-      "击杀",
-      "回合失败"
+      "击杀"
     ],
     "forbidden_claims": [
       "不得出现队友或敌人身份",
@@ -19,8 +18,7 @@
     "expected_summary": "弹匣打空后阵亡",
     "required_facts": [
       "弹匣打空",
-      "阵亡",
-      "回合失败"
+      "阵亡"
     ],
     "forbidden_claims": [
       "不得出现队友或敌人身份",
@@ -87,8 +85,7 @@
     "required_facts": [
       "被闪",
       "未结束",
-      "阵亡",
-      "回合失败"
+      "阵亡"
     ],
     "forbidden_claims": [
       "不得出现队友或敌人身份",
@@ -102,8 +99,7 @@
     "required_facts": [
       "反攻包点",
       "M4A1-S",
-      "三杀",
-      "回合失败"
+      "三杀"
     ],
     "forbidden_claims": [
       "不得出现队友或敌人身份",
@@ -132,8 +128,7 @@
     "required_facts": [
       "三杀",
       "爆头",
-      "M4A1-S",
-      "回合失败"
+      "M4A1-S"
     ],
     "forbidden_claims": [
       "不得出现队友或敌人身份",
@@ -192,7 +187,8 @@
       "剩41血",
       "三杀",
       "M4A1-S",
-      "阵亡"
+      "阵亡",
+      "回合失败"
     ],
     "forbidden_claims": [
       "不得出现队友或敌人身份",
@@ -215,7 +211,7 @@
   },
   {
     "case_id": "ace",
-    "expected_summary": "用 M4A1-S 连续完成第四杀和第五杀",
+    "expected_summary": "用 M4A1-S 完成本回合五杀",
     "required_facts": [
       "M4A1-S",
       "五杀"
@@ -245,8 +241,7 @@
     "expected_summary": "被闪期间阵亡",
     "required_facts": [
       "被闪",
-      "阵亡",
-      "回合失败"
+      "阵亡"
     ],
     "forbidden_claims": [
       "不得出现队友或敌人身份",
@@ -261,7 +256,8 @@
       "被闪",
       "连续事件",
       "双杀",
-      "M4A1-S"
+      "M4A1-S",
+      "回合失败"
     ],
     "forbidden_claims": [
       "不得出现队友或敌人身份",
@@ -288,8 +284,7 @@
     "expected_summary": "离开烟雾后很快阵亡",
     "required_facts": [
       "出烟",
-      "阵亡",
-      "回合失败"
+      "阵亡"
     ],
     "forbidden_claims": [
       "不得出现队友或敌人身份",
@@ -444,11 +439,10 @@
   },
   {
     "case_id": "bomb_planted_then_death",
-    "expected_summary": "炸弹安放后玩家阵亡，回合随后失败",
+    "expected_summary": "炸弹安放后玩家阵亡",
     "required_facts": [
       "炸弹已安放",
-      "阵亡",
-      "回合失败"
+      "阵亡"
     ],
     "forbidden_claims": [
       "不得出现队友或敌人身份",
@@ -473,12 +467,12 @@
   },
   {
     "case_id": "bomb_explosion_win",
-    "expected_summary": "T方守包到炸弹爆炸并赢下回合",
+    "expected_summary": "CT阵亡观战期间炸弹爆炸并输掉回合",
     "required_facts": [
-      "我方T",
+      "我方CT",
       "炸弹已安放",
       "炸弹引爆",
-      "回合胜利"
+      "回合失败"
     ],
     "forbidden_claims": [
       "不得出现队友或敌人身份",

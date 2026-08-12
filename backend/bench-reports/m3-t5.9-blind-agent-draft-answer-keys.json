@@ -12,13 +12,13 @@
     },
     {
       "case_id": "gsi-20260811-223119-169538:003:kill:r5",
-      "expected_summary": "中期剩28血，用AK47赢下对枪完成普通击杀。",
-      "required_facts": ["中期", "剩28血", "AK47", "对枪取胜", "普通击杀"]
+      "expected_summary": "中期残血，用AK47赢下对枪完成普通击杀。",
+      "required_facts": ["中期", "低于50血（鼓励写残血，也允许具体血量）", "AK47", "对枪取胜", "普通击杀"]
     },
     {
       "case_id": "gsi-20260811-223119-169538:004:death_after_kill:r5",
-      "expected_summary": "中期剩28血用AK47赢下对枪，随后被补枪。",
-      "required_facts": ["中期", "剩28血", "AK47对枪取胜", "随后被补枪"]
+      "expected_summary": "中期残血用AK47赢下对枪，随后被补枪。",
+      "required_facts": ["中期", "低于50血（鼓励写残血，也允许具体血量）", "AK47对枪取胜", "随后被补枪"]
     },
     {
       "case_id": "gsi-20260811-223119-169538:005:round_loss:r5",

@@ -31,8 +31,10 @@ INVENTORY_PATHS = (
     REPORTS_DIRECTORY / "m3-t2-data-inventory.md",
     REPORTS_DIRECTORY / "m3-t2-inventory2.md",
 )
-SYNTHETIC_STEAMID = "SYNTHETIC_PLAYER_STEAMID"
-SYNTHETIC_NAME = "Synthetic Player"
+SYNTHETIC_SELF_STEAMID = "SYNTHETIC_SELF_STEAMID"
+SYNTHETIC_OTHER_STEAMID = "SYNTHETIC_OTHER_STEAMID"
+SYNTHETIC_SELF_NAME = "Synthetic Self"
+SYNTHETIC_OTHER_NAME = "Synthetic Other"
 
 # The task's eighteen action/status kinds. The current implementation also has
 # round_live and bought anchors plus two burn kinds. Burn is intentionally
@@ -133,11 +135,28 @@ BASE_CT_DEFUSE = "gsi-20260810-154052-044137.jsonl 第 3–16 行"
 BASE_T_C4 = "gsi-20260810-114649-321103.jsonl 第 65–100 行"
 BASE_BURN = "gsi-20260811-223119-169538.jsonl 第 440–476 行"
 BASE_LATE_DEFUSE = "gsi-20260809-112213.jsonl 第 40–72 行"
-BASE_EXPLOSION = "gsi-20260811-223119-169538.jsonl 第 1470–1493 行"
+BASE_EXPLOSION = "gsi-20260811-223119-169538.jsonl 第 1413–1493 行"
 COMMON_FORBIDDEN = (
     "不得出现队友或敌人身份",
     "不得声称玩家所在位置",
     "不得编造伤害来源",
+)
+DEATH_WITHOUT_ROUND_RESULT = (
+    # Keep the final death in the same human round.  The source's settlement
+    # snapshot advances map.round, which would otherwise reset the timeline.
+    _set(73, "map.round", 1),
+    _set(73, "round.phase", "live"),
+    _delete(73, "round.win_team"),
+)
+
+TRIPLE_SAME_STAGE = (
+    *_span(18, 66, "player.state.round_kills", 0),
+    *_span(67, 73, "player.state.round_kills", 3),
+)
+TRIPLE_CROSS_STAGE = (
+    *_span(18, 40, "player.state.round_kills", 0),
+    *_span(41, 66, "player.state.round_kills", 1),
+    *_span(67, 73, "player.state.round_kills", 3),
 )
 
 
@@ -170,16 +189,28 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
     _ct_spec(
         "rare_reload_then_kill",
         "甲",
-        "换弹完成后用 M4A1-S 击杀并进入回合结算",
-        (),
-        ("换弹", "M4A1-S", "击杀", "回合失败"),
+        "换弹完成后立即用 M4A1-S 击杀",
+        (
+            *_span(18, 40, "player.state.round_kills", 0),
+            *_span(41, 73, "player.state.round_kills", 1),
+            _set(39, "player.weapons.weapon_2.state", "reloading"),
+            _set(40, "player.weapons.weapon_2.state", "reloading"),
+            _set(41, "player.weapons.weapon_2.state", "active"),
+        ),
+        ("换弹", "M4A1-S", "击杀"),
+        expected_event_type="kill",
     ),
     _ct_spec(
         "rare_ammo_low_death",
         "甲",
         "弹匣打空后阵亡",
-        (),
-        ("弹匣打空", "阵亡", "回合失败"),
+        (
+            *_span(18, 73, "player.state.round_kills", 0),
+            *_span(18, 73, "player.state.round_killhs", 0),
+            *DEATH_WITHOUT_ROUND_RESULT,
+        ),
+        ("弹匣打空", "阵亡"),
+        expected_event_type="death",
     ),
     _ct_spec(
         "rare_mvp_round_win",
@@ -228,29 +259,41 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         "rare_flash_interrupted_by_death",
         "甲",
         "被闪状态尚未结束便阵亡",
-        (*_span(71, 73, "player.state.flashed", 1),),
-        ("被闪", "未结束", "阵亡", "回合失败"),
+        (
+            *_span(18, 73, "player.state.round_kills", 0),
+            *_span(18, 73, "player.state.round_killhs", 0),
+            *_span(71, 73, "player.state.flashed", 1),
+            *DEATH_WITHOUT_ROUND_RESULT,
+        ),
+        ("被闪", "未结束", "阵亡"),
+        expected_event_type="death",
     ),
     _ct_spec(
         "triple_kill_same_stage",
         "乙",
         "反攻包点阶段用 M4A1-S 完成三杀",
-        (),
-        ("反攻包点", "M4A1-S", "三杀", "回合失败"),
+        TRIPLE_SAME_STAGE,
+        ("反攻包点", "M4A1-S", "三杀"),
+        expected_event_type="multi_kill",
     ),
     _ct_spec(
         "triple_kill_cross_stage",
         "乙",
         "前期先杀一人，反攻包点时再连杀两人完成三杀",
-        (),
+        TRIPLE_CROSS_STAGE,
         ("前期", "反攻包点", "M4A1-S", "三杀"),
+        expected_event_type="multi_kill",
     ),
     _ct_spec(
         "triple_kill_headshot_finish",
         "乙",
         "三杀的最后一次击杀为爆头",
-        (*_span(67, 73, "player.state.round_killhs", 1),),
-        ("三杀", "爆头", "M4A1-S", "回合失败"),
+        (
+            *_span(18, 66, "player.state.round_killhs", 0),
+            *_span(67, 73, "player.state.round_killhs", 1),
+        ),
+        ("三杀", "爆头", "M4A1-S"),
+        expected_event_type="round_loss",
     ),
     _ct_spec(
         "weapon_switch_double_kill",
@@ -270,6 +313,7 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         "最后一发子弹完成第三次击杀",
         (*_span(67, 71, "player.weapons.weapon_2.ammo_clip", 1),),
         ("弹匣仅剩1发", "三杀", "M4A1-S"),
+        expected_event_type="round_loss",
     ),
     _ct_spec(
         "empty_mag_after_triple",
@@ -282,8 +326,11 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         "low_health_triple",
         "乙",
         "残血状态下完成本回合三杀",
-        (*_span(62, 73, "player.state.health", 41), _set(73, "player.state.health", 0)),
-        ("剩41血", "三杀", "M4A1-S", "阵亡"),
+        (
+            *_span(62, 73, "player.state.health", 41),
+            _set(73, "player.state.health", 0),
+        ),
+        ("剩41血", "三杀", "M4A1-S", "阵亡", "回合失败"),
     ),
     _ct_spec(
         "four_kill",
@@ -296,7 +343,7 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
     _ct_spec(
         "ace",
         "乙",
-        "用 M4A1-S 连续完成第四杀和第五杀",
+        "用 M4A1-S 完成本回合五杀",
         (
             *_span(41, 54, "player.state.round_kills", 2),
             *_span(55, 66, "player.state.round_kills", 3),
@@ -310,15 +357,27 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         "flash_kill",
         "丙",
         "被闪期间用 M4A1-S 击杀一人",
-        (*_span(40, 41, "player.state.flashed", 1), _set(42, "player.state.flashed", 0)),
+        (
+            *_span(18, 40, "player.state.round_kills", 0),
+            *_span(41, 73, "player.state.round_kills", 1),
+            *_span(40, 41, "player.state.flashed", 1),
+            _set(42, "player.state.flashed", 0),
+        ),
         ("被闪", "M4A1-S", "击杀"),
+        expected_event_type="kill",
     ),
     _ct_spec(
         "flash_death",
         "丙",
         "被闪期间阵亡",
-        (*_span(71, 73, "player.state.flashed", 1),),
-        ("被闪", "阵亡", "回合失败"),
+        (
+            *_span(18, 73, "player.state.round_kills", 0),
+            *_span(18, 73, "player.state.round_killhs", 0),
+            *_span(71, 73, "player.state.flashed", 1),
+            *DEATH_WITHOUT_ROUND_RESULT,
+        ),
+        ("被闪", "阵亡"),
+        expected_event_type="death",
     ),
     _ct_spec(
         "flash_double_kill",
@@ -327,24 +386,38 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         (
             *_span(62, 67, "player.state.flashed", 1),
             _set(68, "player.state.flashed", 0),
-            *_span(62, 66, "player.state.round_kills", 1),
+            *_span(18, 62, "player.state.round_kills", 0),
+            *_span(63, 66, "player.state.round_kills", 1),
             *_span(67, 73, "player.state.round_kills", 2),
         ),
-        ("被闪", "连续事件", "双杀", "M4A1-S"),
+        ("被闪", "连续事件", "双杀", "M4A1-S", "回合失败"),
     ),
     _ct_spec(
         "long_smoke_then_kill",
         "丙",
         "在烟中停留较久后用 M4A1-S 击杀",
-        (*_span(32, 41, "player.state.smoked", 255), _set(42, "player.state.smoked", 0)),
+        (
+            *_span(18, 40, "player.state.round_kills", 0),
+            *_span(41, 73, "player.state.round_kills", 1),
+            *_span(32, 41, "player.state.smoked", 255),
+            _set(42, "player.state.smoked", 0),
+        ),
         ("进烟", "M4A1-S", "击杀"),
+        expected_event_type="kill",
     ),
     _ct_spec(
         "smoke_exit_death",
         "丙",
         "离开烟雾后很快阵亡",
-        (*_span(68, 71, "player.state.smoked", 255), _set(72, "player.state.smoked", 0)),
-        ("出烟", "阵亡", "回合失败"),
+        (
+            *_span(18, 73, "player.state.round_kills", 0),
+            *_span(18, 73, "player.state.round_killhs", 0),
+            *_span(68, 71, "player.state.smoked", 255),
+            _set(72, "player.state.smoked", 0),
+            *DEATH_WITHOUT_ROUND_RESULT,
+        ),
+        ("出烟", "阵亡"),
+        expected_event_type="death",
     ),
     _ct_spec(
         "four_grenades_then_kill",
@@ -359,7 +432,7 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
             _delete(121, "player.weapons.weapon_5.state"),
         ),
         ("闪光弹×2", "烟雾弹×1", "手雷×1", "M4A1-S", "击杀"),
-        expected_event_type="round_win",
+        expected_event_type="kill_headshot",
         source=BASE_CT_SHORT,
     ),
     _ct_spec(
@@ -367,24 +440,30 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         "丙",
         "连续被闪两次后完成击杀",
         (
+            *_span(18, 40, "player.state.round_kills", 0),
+            *_span(41, 73, "player.state.round_kills", 1),
             *_span(28, 29, "player.state.flashed", 1),
             _set(30, "player.state.flashed", 0),
             *_span(39, 40, "player.state.flashed", 1),
             _set(41, "player.state.flashed", 0),
         ),
         ("玩家被闪", "闪光影响结束", "M4A1-S", "击杀"),
+        expected_event_type="kill",
     ),
     _ct_spec(
         "smoke_flash_kill",
         "丙",
         "烟中又被闪时完成击杀",
         (
+            *_span(18, 40, "player.state.round_kills", 0),
+            *_span(41, 73, "player.state.round_kills", 1),
             *_span(36, 41, "player.state.smoked", 255),
             *_span(40, 41, "player.state.flashed", 1),
             _set(42, "player.state.smoked", 0),
             _set(42, "player.state.flashed", 0),
         ),
         ("烟雾", "被闪", "M4A1-S", "击杀"),
+        expected_event_type="kill",
     ),
     _ct_spec(
         "burning_kill",
@@ -436,7 +515,10 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         "postplant_counterattack_loss",
         "丁",
         "下包后反攻阶段阵亡并输掉回合",
-        (),
+        (
+            *_span(18, 73, "player.state.round_kills", 0),
+            *_span(18, 73, "player.state.round_killhs", 0),
+        ),
         ("反攻包点", "阵亡", "回合失败"),
     ),
     _ct_spec(
@@ -461,15 +543,20 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
     _ct_spec(
         "bomb_planted_then_death",
         "丁",
-        "炸弹安放后玩家阵亡，回合随后失败",
-        (),
-        ("炸弹已安放", "阵亡", "回合失败"),
+        "炸弹安放后玩家阵亡",
+        (
+            *_span(18, 73, "player.state.round_kills", 0),
+            *_span(18, 73, "player.state.round_killhs", 0),
+            *DEATH_WITHOUT_ROUND_RESULT,
+        ),
+        ("炸弹已安放", "阵亡"),
+        expected_event_type="death",
     ),
     _ct_spec(
         "late_defuse",
         "丁",
         "炸弹安放 33.4 秒后完成拆除",
-        (*_span(66, 72, "player.team", "CT"),),
+        (),
         ("炸弹已安放", "33.4", "炸弹已拆除", "回合胜利"),
         expected_event_type="round_win",
         source=BASE_LATE_DEFUSE,
@@ -477,10 +564,10 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
     _ct_spec(
         "bomb_explosion_win",
         "丁",
-        "T方守包到炸弹爆炸并赢下回合",
+        "CT阵亡观战期间炸弹爆炸并输掉回合",
         (),
-        ("我方T", "炸弹已安放", "炸弹引爆", "回合胜利"),
-        expected_event_type="round_win",
+        ("我方CT", "炸弹已安放", "炸弹引爆", "回合失败"),
+        expected_event_type="round_loss",
         source=BASE_EXPLOSION,
     ),
 )
@@ -642,20 +729,35 @@ def _navigate_parent(root: dict[str, Any], path: str) -> tuple[dict[str, Any], s
     return current, parts[-1]
 
 
-def _scrub_identity(value: object, path: tuple[str, ...] = ()) -> None:
+def _scrub_identity(
+    value: object,
+    self_steamids: frozenset[str],
+    path: tuple[str, ...] = (),
+) -> None:
     if isinstance(value, dict):
         mapping = cast(dict[str, Any], value)
+        section = path[-1] if path else None
+        if section == "provider" and isinstance(mapping.get("steamid"), str):
+            mapping["steamid"] = SYNTHETIC_SELF_STEAMID
+        elif section == "player":
+            raw_steamid = mapping.get("steamid")
+            is_self = isinstance(raw_steamid, str) and raw_steamid in self_steamids
+            if isinstance(raw_steamid, str):
+                mapping["steamid"] = (
+                    SYNTHETIC_SELF_STEAMID
+                    if is_self
+                    else SYNTHETIC_OTHER_STEAMID
+                )
+            if isinstance(mapping.get("name"), str):
+                mapping["name"] = (
+                    SYNTHETIC_SELF_NAME if is_self else SYNTHETIC_OTHER_NAME
+                )
         for key, child in tuple(mapping.items()):
             child_path = (*path, key)
-            if key == "steamid" and path and path[-1] in {"player", "provider"}:
-                mapping[key] = SYNTHETIC_STEAMID
-            elif key == "name" and path and path[-1] == "player":
-                mapping[key] = SYNTHETIC_NAME
-            else:
-                _scrub_identity(child, child_path)
+            _scrub_identity(child, self_steamids, child_path)
     elif isinstance(value, list):
         for child in value:
-            _scrub_identity(child, path)
+            _scrub_identity(child, self_steamids, path)
 
 
 def synthesize_scenario(
@@ -673,6 +775,18 @@ def synthesize_scenario(
         cast(dict[str, Any], json.loads(source_lines[index - 1]))
         for index in range(start_line, end_line + 1)
     ]
+    self_steamids = frozenset(
+        steamid
+        for row in rows
+        for payload in (row.get("payload"),)
+        if isinstance(payload, dict)
+        for provider in (payload.get("provider"),)
+        if isinstance(provider, dict)
+        for steamid in (provider.get("steamid"),)
+        if isinstance(steamid, str)
+    )
+    if not self_steamids:
+        raise ValueError(f"{spec.scenario_id} 的模板没有 provider.steamid")
     by_line = {line: rows[line - start_line] for line in range(start_line, end_line + 1)}
     for mutation in spec.mutations:
         validate_mutation(mutation, active_constraints)
@@ -689,7 +803,7 @@ def synthesize_scenario(
         else:
             parent[key] = mutation.value
     for row in rows:
-        _scrub_identity(row)
+        _scrub_identity(row, self_steamids)
     return tuple(rows)
 
 

@@ -796,6 +796,57 @@ def test_round_result_multikill_skeleton_keeps_method_and_contribution() -> None
     assert "灭队，回合失败" in card
 
 
+def test_required_facts_promote_rare_focus_relations_without_model_arithmetic() -> None:
+    snapshot = _real_snapshot()
+    entries = (
+        TimelineEntry(0.0, "round_live", None),
+        TimelineEntry(20.0, "flash_start", None),
+        TimelineEntry(20.5, "reload", "换弹 AK47 用时约2.1秒"),
+        TimelineEntry(21.0, "ammo_low", "弹匣仅剩1发 AK47"),
+        TimelineEntry(21.0, "damage", "掉了55血 剩45血"),
+        TimelineEntry(21.0, "kill", "AK47 击杀时剩45血"),
+        TimelineEntry(22.0, "flash_end", "持续2.0秒"),
+    )
+
+    card = render_event_card(
+        snapshot,
+        _game(snapshot),
+        replace(_situation(), flash_count=1, timeline=entries),
+        _event(snapshot),
+    )
+
+    required = card.split("【事件必答】", 1)[1]
+    assert "被闪期间完成击杀" in required
+    assert "换弹完成后0.5秒完成击杀" in required
+    assert "弹匣仅剩1发 AK47时完成击杀" in required
+    assert "残血（剩45血）完成击杀" in required
+    assert required.index("被闪期间完成击杀") < required.index("第1杀")
+
+
+def test_round_result_without_kills_keeps_death_stage_in_required_facts() -> None:
+    snapshot = _real_snapshot()
+    entries = (
+        TimelineEntry(0.0, "round_live", None),
+        TimelineEntry(45.0, "bomb", "已安放"),
+        TimelineEntry(52.0, "death", None),
+        TimelineEntry(60.0, "round_result", "T"),
+    )
+    event = _event(snapshot).model_copy(
+        update={"type": "round_loss", "facts": {"method": "t_win_elimination"}}
+    )
+
+    card = render_event_card(
+        snapshot,
+        _game(snapshot),
+        replace(_situation(), self_team="CT", timeline=entries),
+        event,
+    )
+
+    required = card.split("【事件必答】", 1)[1]
+    assert "灭队，回合失败" in required
+    assert "反攻包点、普通死亡" in required
+
+
 def test_timeline_code_labels_split_stage_multi_kills_without_model_arithmetic() -> None:
     snapshot = _real_snapshot()
     entries = (

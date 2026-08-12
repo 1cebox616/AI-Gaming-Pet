@@ -15,8 +15,10 @@ from pet.scenario_synth import (
     OBSERVED_CONSTRAINTS_PATH,
     SCENARIO_SPECS,
     SCENARIOS_DIRECTORY,
-    SYNTHETIC_NAME,
-    SYNTHETIC_STEAMID,
+    SYNTHETIC_OTHER_NAME,
+    SYNTHETIC_OTHER_STEAMID,
+    SYNTHETIC_SELF_NAME,
+    SYNTHETIC_SELF_STEAMID,
     Mutation,
     load_inventory_constraints,
     validate_mutation,
@@ -67,8 +69,13 @@ def test_synthetic_products_scrub_all_source_identities() -> None:
         for path in SCENARIOS_DIRECTORY.glob("*.jsonl")
     )
     assert "76561" not in combined
-    assert SYNTHETIC_STEAMID in combined
-    assert SYNTHETIC_NAME in combined
+    assert SYNTHETIC_SELF_STEAMID in combined
+    assert SYNTHETIC_SELF_NAME in combined
+    explosion = (SCENARIOS_DIRECTORY / "bomb_explosion_win.jsonl").read_text(
+        encoding="utf-8"
+    )
+    assert SYNTHETIC_SELF_STEAMID in explosion
+    assert SYNTHETIC_OTHER_STEAMID in explosion
     for path in SCENARIOS_DIRECTORY.glob("*.jsonl"):
         for line in path.read_text(encoding="utf-8").splitlines():
             _assert_placeholder_identities(json.loads(line))
@@ -138,9 +145,12 @@ def _assert_placeholder_identities(value: object) -> None:
         mapping = value
         steamid = mapping.get("steamid")
         if isinstance(steamid, str):
-            assert steamid == SYNTHETIC_STEAMID
+            assert steamid in {
+                SYNTHETIC_SELF_STEAMID,
+                SYNTHETIC_OTHER_STEAMID,
+            }
         if "observer_slot" in mapping and isinstance(mapping.get("name"), str):
-            assert mapping["name"] == SYNTHETIC_NAME
+            assert mapping["name"] in {SYNTHETIC_SELF_NAME, SYNTHETIC_OTHER_NAME}
         for child in mapping.values():
             _assert_placeholder_identities(child)
     elif isinstance(value, list):

@@ -839,6 +839,13 @@ def test_analysis_prompt_variants_change_only_the_skeleton_contract() -> None:
     assert "事件行逐字复制 X" not in checklist
     assert "推断评测必须原样复制" not in checklist
     assert "下列事实必须全部出现，措辞由你决定" in checklist
+    assert "事件必答覆盖规则" not in baseline
+    assert "事件必答覆盖规则" in checklist
+    assert "被闪/烟雾/燃烧" in checklist
+    assert "不要把未列入【事件必答】的旁支事件自行升级成必答项" in checklist
+    assert "已按保留优先级从左到右排列" in checklist
+    assert "不得删除罕见关系、武器、最终多杀数、“有显著贡献”或回合结果" in checklist
+    assert "事件必答覆盖规则" in personality
     assert personality.startswith(
         "你是陪朋友打 CS2 的中文游戏搭子，说话短、随口、像个懂行的老玩家。\n"
         "可以损但不刻薄。不要用书面语，不要像解说员报幕。\n"
