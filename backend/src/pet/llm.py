@@ -100,6 +100,7 @@ class LlmAnalysisClientProtocol(Protocol):
         event_timeout_seconds: float,
         full_timeout_seconds: float,
         seed: int | None = None,
+        reasoning_effort: str = "none",
     ) -> LlmAnalysisResult:
         """Return the first event line and complete scene without retrying."""
         ...
@@ -223,6 +224,7 @@ class OpenRouterClient:
         event_timeout_seconds: float,
         full_timeout_seconds: float,
         seed: int | None = None,
+        reasoning_effort: str = "none",
     ) -> LlmAnalysisResult:
         """Stream one strict event/scene response and never retry failures."""
         if event_timeout_seconds <= 0:
@@ -231,6 +233,8 @@ class OpenRouterClient:
             raise ValueError("full timeout must be at least the event timeout")
 
         started_at = self._clock()
+        if reasoning_effort not in {"none", "minimal", "low", "medium", "high"}:
+            raise ValueError("unsupported reasoning effort")
         request_body: dict[str, object] = {
             "model": model,
             "messages": [
@@ -240,7 +244,7 @@ class OpenRouterClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,
-            "reasoning": {"effort": "none"},
+            "reasoning": {"effort": reasoning_effort},
         }
         if provider is not None:
             request_body["provider"] = {

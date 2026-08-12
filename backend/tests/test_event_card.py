@@ -342,7 +342,7 @@ def test_burn_transitions_and_mvp_increase_render_as_timeline_facts() -> None:
     assert "22.4s 玩家燃烧结束 持续2.4秒" in card
     assert (
         "80.0s【刚刚】 玩家获得MVP（MVP+1） + "
-        "灭队（本次焦点：回合胜利）"
+        "灭队（本次焦点：回合胜利｜结算：灭队）"
     ) in card
 
 
@@ -517,8 +517,11 @@ def test_round_result_is_the_integrated_focus_instead_of_a_separate_section() ->
 
     card = render_event_card(snapshot, _game(snapshot), situation, event)
 
-    assert "57.4s【刚刚】 灭队（本次焦点：回合失败）" in card
-    assert card.count("回合失败") == 1
+    assert (
+        "57.4s【刚刚】 灭队"
+        "（本次焦点：回合失败｜结算：灭队）"
+    ) in card
+    assert card.count("回合失败") == 2
     assert "\n【刚刚】" not in card
 
 
@@ -541,9 +544,12 @@ def test_round_result_deduplicates_matching_global_bomb_transition() -> None:
 
     card = render_event_card(snapshot, _game(snapshot), situation, event)
 
-    assert "57.4s【刚刚】 炸弹拆除（本次焦点：回合失败）" in card
+    assert (
+        "57.4s【刚刚】 炸弹拆除"
+        "（本次焦点：回合失败｜结算：炸弹拆除）"
+    ) in card
     assert "炸弹已拆除" not in card
-    assert card.count("炸弹拆除") == 1
+    assert card.count("炸弹拆除") == 3
 
 
 def test_same_snapshot_uses_plus_without_a_redundant_zero_second_marker() -> None:
@@ -727,6 +733,67 @@ def test_timeline_relations_are_calculated_before_the_model_reads_the_card() -> 
         "阵亡（本次焦点：普通死亡｜本回合3杀｜"
         "击杀后被补枪，距击杀0.5秒）"
     ) in card
+
+
+def test_multikill_required_facts_include_a_scoped_compact_skeleton() -> None:
+    snapshot = _real_snapshot()
+    entries = (
+        TimelineEntry(0.0, "round_live", None),
+        TimelineEntry(22.0, "kill", "AK47 爆头 击杀时满血"),
+        TimelineEntry(40.0, "damage", "掉了62血 剩38血"),
+        TimelineEntry(40.2, "kill", None),
+        TimelineEntry(41.0, "death", None),
+    )
+    event = _event(snapshot).model_copy(
+        update={"type": "multi_kill", "facts": {"count": 2}}
+    )
+
+    card = render_event_card(
+        snapshot,
+        _game(snapshot),
+        replace(_situation(), timeline=entries),
+        event,
+    )
+
+    assert (
+        "推荐骨架：前期满血AK47爆头一杀，"
+        "中期剩38血对枪再杀，双杀被补"
+    ) in card
+    assert "仅覆盖以上事实" in card
+    assert "第2杀必须单独写" not in card
+    assert "中期AK47" not in card.split("推荐骨架：", 1)[1].split(" ", 1)[0]
+
+
+def test_round_result_multikill_skeleton_keeps_method_and_contribution() -> None:
+    snapshot = _real_snapshot()
+    entries = (
+        TimelineEntry(0.0, "round_live", None),
+        TimelineEntry(22.0, "kill", "AK47 爆头 击杀时满血"),
+        TimelineEntry(40.0, "damage", "掉了62血 剩38血"),
+        TimelineEntry(40.2, "kill", None),
+        TimelineEntry(41.0, "death", None),
+        TimelineEntry(42.0, "round_result", "T"),
+    )
+    event = _event(snapshot).model_copy(
+        update={
+            "type": "round_loss",
+            "facts": {"method": "t_win_elimination"},
+        }
+    )
+
+    card = render_event_card(
+        snapshot,
+        _game(snapshot),
+        replace(_situation(), self_team="CT", timeline=entries),
+        event,
+    )
+
+    assert (
+        "推荐骨架：灭队，回合失败，前期满血AK47爆头一杀，"
+        "中期对枪再杀，双杀被补，有显著贡献"
+    ) in card
+    assert "第2杀必须单独写" not in card
+    assert "灭队，回合失败" in card
 
 
 def test_timeline_code_labels_split_stage_multi_kills_without_model_arithmetic() -> None:

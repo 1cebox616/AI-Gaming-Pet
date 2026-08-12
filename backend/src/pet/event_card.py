@@ -110,6 +110,17 @@ def render_event_card(
             event=event,
         )
         sections.append(timeline)
+        sections.append(
+            _section(
+                "事件必答",
+                _required_event_facts(
+                    round_situation.timeline,
+                    event,
+                    self_team=round_situation.self_team,
+                    death_after_kill_max_seconds=death_after_kill_max_seconds,
+                ),
+            )
+        )
     if not focus_integrated:
         # Incomplete or stale timelines cannot host a truthful focus marker.
         sections.append(_section("刚刚", _event_facts(event)))
@@ -385,6 +396,248 @@ def _timeline_section(
     return "\n".join(lines), focus_index is not None
 
 
+def _required_event_facts(
+    entries: tuple[TimelineEntry, ...],
+    event: GameEvent,
+    *,
+    self_team: str | None,
+    death_after_kill_max_seconds: float,
+) -> list[str]:
+    """List mandatory existing atoms without composing commentary prose."""
+    if not entries:
+        return _event_facts(event)
+    observed_live = any(entry.kind == "round_live" for entry in entries)
+    stages = _timeline_stages(entries, self_team=self_team, observed_live=observed_live)
+    kill_facts: list[str] = []
+    kill_seconds: list[float] = []
+    round_kills = 0
+    for index, (entry, stage) in enumerate(zip(entries, stages)):
+        if entry.kind != "kill":
+            continue
+        round_kills += _timeline_kill_increase(entry)
+        kill_seconds.append(entry.seconds)
+        parts = [f"第{round_kills}杀", _required_stage(stage, observed_live)]
+        health = _kill_health_fact(entries, index)
+        if health is not None:
+            parts.append(health)
+        weapon = _kill_weapon(entry.detail)
+        if weapon is not None:
+            parts.append(weapon_display_name(weapon))
+        parts.append("爆头击杀" if "爆头" in (entry.detail or "") else "普通击杀")
+        if _nearest_entry_gap(
+            entries,
+            index,
+            kind="damage",
+            maximum_seconds=_NEARBY_COMBAT_SECONDS,
+        ) is not None:
+            parts.append("赢下对枪")
+        smoke_gap = _previous_entry_gap(entries, index, kind="smoke_end")
+        if smoke_gap is not None and smoke_gap <= _NEARBY_COMBAT_SECONDS:
+            parts.append("摸烟击杀")
+        kill_facts.append("、".join(parts))
+
+    death_index = next(
+        (i for i in range(len(entries) - 1, -1, -1) if entries[i].kind == "death"),
+        None,
+    )
+    death_fact: str | None = None
+    death_after_kill = False
+    if death_index is not None:
+        death = entries[death_index]
+        death_after_kill = bool(
+            kill_seconds
+            and death.seconds - kill_seconds[-1] <= death_after_kill_max_seconds
+        )
+        death_label = "被补枪" if death_after_kill else "普通死亡"
+        if event.type == "death_thrown_away":
+            death_label = "白给"
+        death_fact = (
+            f"{_required_stage(stages[death_index], observed_live)}、{death_label}"
+        )
+
+    if event.type in {"round_win", "round_loss"}:
+        result = _EVENT_LABELS[event.type]
+        method = event.facts.get("method")
+        method_label = WIN_METHOD_LABELS.get(str(method)) if method else None
+        required = [f"{method_label}，{result}" if method_label else result]
+        if not observed_live and round_kills == 0:
+            return [f"{required[0]}；未观测开打时刻", "仅覆盖以上事实"]
+        if round_kills == 0:
+            return [required[0], "仅覆盖以上事实"]
+        if (
+            method_label in {"炸弹拆除", "炸弹引爆"}
+            and round_kills == 1
+            and death_after_kill
+            and kill_facts
+            and "、开局、" in kill_facts[0]
+        ):
+            return [required[0], "仅覆盖以上事实"]
+        required.extend(
+            _scoped_multikill_facts(kill_facts)
+            if round_kills >= 2
+            else kill_facts
+        )
+        if round_kills >= 2:
+            required.append(f"本回合累计{_kill_count_label(round_kills)}")
+            if death_fact is not None:
+                required.append(death_fact)
+            required.append("有显著贡献")
+            skeleton = _multikill_event_skeleton(
+                kill_facts,
+                result=required[0],
+                death_after_kill=death_after_kill,
+                significant_contribution=True,
+            )
+            if skeleton is not None:
+                return [f"推荐骨架：{skeleton}", "仅覆盖以上事实"]
+        elif death_fact is None:
+            required.append("存活到结算")
+        else:
+            required.append(death_fact)
+        return required
+
+    if event.type in {"kill", "kill_headshot"}:
+        return kill_facts[-1:] or _event_facts(event)
+    if event.type == "multi_kill":
+        required = [
+            *_scoped_multikill_facts(kill_facts),
+            f"本回合累计{_kill_count_label(max(round_kills, 2))}",
+        ]
+        if death_fact is not None:
+            required.append(death_fact)
+        skeleton = _multikill_event_skeleton(
+            kill_facts,
+            death_after_kill=death_after_kill,
+        )
+        if skeleton is not None:
+            return [f"推荐骨架：{skeleton}", "仅覆盖以上事实"]
+        return required
+    if round_kills == 0:
+        stage = (
+            _required_stage(stages[death_index], observed_live)
+            if death_index is not None
+            else "未观测开打时刻"
+        )
+        return [f"{stage}、{_EVENT_LABELS[event.type]}", "仅覆盖以上事实"]
+    required = [*kill_facts]
+    if death_fact is not None:
+        required.append(death_fact)
+    return required
+
+
+def _required_stage(stage: str | None, observed_live: bool) -> str:
+    if stage is not None and stage != "阶段不可判断":
+        return stage
+    return "未观测开打时刻" if not observed_live else "阶段不可判断"
+
+
+def _scoped_multikill_facts(kill_facts: list[str]) -> list[str]:
+    scoped: list[str] = []
+    for index, fact in enumerate(kill_facts, 1):
+        prefix = "首杀必须单独写" if index == 1 else f"第{index}杀必须单独写"
+        scoped.append(f"{prefix}：{fact}")
+    scoped.append("不得把后一次击杀写成该阶段双杀")
+    return scoped
+
+
+def _multikill_event_skeleton(
+    kill_facts: list[str],
+    *,
+    result: str | None = None,
+    death_after_kill: bool,
+    significant_contribution: bool = False,
+) -> str | None:
+    """Compress deterministic multi-kill facts without inventing missing fields."""
+    if len(kill_facts) < 2:
+        return None
+    descriptions: list[str] = []
+    for index, fact in enumerate(kill_facts):
+        atoms = fact.split("、")
+        if len(atoms) < 3:
+            return None
+        stage = atoms[1]
+        details = atoms[2:]
+        health = next(
+            (item for item in details if item == "满血" or item.startswith("剩")),
+            "",
+        )
+        weapon = next(
+            (
+                item
+                for item in details
+                if item
+                not in {
+                    health,
+                    "普通击杀",
+                    "爆头击杀",
+                    "赢下对枪",
+                    "摸烟击杀",
+                }
+            ),
+            "",
+        )
+        smoke = "摸烟" if "摸烟击杀" in details else ""
+        duel = "对枪" if "赢下对枪" in details else ""
+        headshot = "爆头" if "爆头击杀" in details else ""
+        action = "一杀" if index == 0 else "再杀"
+        # A result event has more mandatory atoms. Preserve the first-kill
+        # health, then omit later health before dropping any event identity.
+        included_health = health if index == 0 or result is None else ""
+        descriptions.append(
+            f"{stage}{included_health}{smoke}{weapon}{duel}{headshot}{action}"
+        )
+    parts = [*descriptions, _kill_count_label(len(kill_facts))]
+    if death_after_kill:
+        parts[-1] += "被补"
+    if significant_contribution:
+        parts.append("有显著贡献")
+    body = "，".join(parts)
+    return f"{result}，{body}" if result is not None else body
+
+
+def _kill_health_fact(
+    entries: tuple[TimelineEntry, ...], index: int
+) -> str | None:
+    detail = entries[index].detail or ""
+    explicit = re.search(r"击杀时(满血|剩\d+血)", detail)
+    if explicit is not None:
+        return explicit.group(1)
+    nearest: tuple[float, str] | None = None
+    for other_index in range(index - 1, -1, -1):
+        other = entries[other_index]
+        if other.kind != "damage":
+            continue
+        gap = entries[index].seconds - other.seconds
+        if gap > _NEARBY_COMBAT_SECONDS:
+            break
+        remaining = re.search(r"剩(\d+)血", other.detail or "")
+        if remaining is not None and (nearest is None or gap < nearest[0]):
+            nearest = (gap, f"剩{remaining.group(1)}血")
+    if nearest is None:
+        for other in entries[index + 1 :]:
+            if other.seconds != entries[index].seconds:
+                break
+            if other.kind != "damage":
+                continue
+            remaining = re.search(r"剩(\d+)血", other.detail or "")
+            if remaining is not None:
+                nearest = (0.0, f"剩{remaining.group(1)}血")
+                break
+    return nearest[1] if nearest is not None else None
+
+
+def _kill_weapon(detail: str | None) -> str | None:
+    if not detail:
+        return None
+    marker = re.search(
+        r"(?:^| )(?=(?:爆头|\d+个爆头|增加\d+杀|击杀时满血|"
+        r"击杀时剩\d+血|弹匣仅剩\d+发))",
+        detail,
+    )
+    weapon = detail[: marker.start()].strip() if marker is not None else detail.strip()
+    return weapon or None
+
+
 def _focus_entry_index(
     entries: tuple[TimelineEntry, ...], event: GameEvent
 ) -> int | None:
@@ -467,11 +720,14 @@ def _timeline_group_line(
     stage_index = (
         focus_index
         if focused
+        and focus_index is not None
+        and stages[focus_index] is not None
         else next(
             (
                 index
                 for index in reversed(indexes)
                 if entries[index].kind in _CONTINUOUS_EVENT_ANCHORS
+                and stages[index] is not None
             ),
             None,
         )
@@ -567,7 +823,13 @@ def _focused_annotations(
     # 【刚刚】 identifies the containing line. A <=3-second line may carry
     # several independently classified actions, so mark the exact action that
     # policy selected as well. This is factual routing metadata, not emphasis.
-    return (f"本次焦点：{_EVENT_LABELS[event.type]}", *annotations)
+    focus_facts = [f"本次焦点：{_EVENT_LABELS[event.type]}"]
+    if entry.kind == "round_result":
+        method = event.facts.get("method")
+        method_label = WIN_METHOD_LABELS.get(str(method)) if method else None
+        if method_label is not None:
+            focus_facts.append(f"结算：{method_label}")
+    return (*focus_facts, *annotations)
 
 
 def _timeline_stages(

@@ -105,7 +105,9 @@ class FakeAnalysisClient:
         self.event_text = event_text
         self.scene_text = scene_text
         self.calls: list[
-            tuple[str | None, str, str, int, float, float, float, int | None]
+            tuple[
+                str | None, str, str, int, float, float, float, int | None, str
+            ]
         ] = []
 
     def analyze_stream(
@@ -120,6 +122,7 @@ class FakeAnalysisClient:
         event_timeout_seconds: float,
         full_timeout_seconds: float,
         seed: int | None = None,
+        reasoning_effort: str = "none",
     ) -> LlmAnalysisResult:
         self.calls.append(
             (
@@ -131,6 +134,7 @@ class FakeAnalysisClient:
                 event_timeout_seconds,
                 full_timeout_seconds,
                 seed,
+                reasoning_effort,
             )
         )
         if self.fail:
@@ -456,9 +460,17 @@ def test_stream_analysis_uses_strict_protocol_settings_and_split_metrics(
     assert result.selected_event_count == 1
     assert len(result.events) == 1
     assert len(client.calls) == 1
-    provider, prompt, card, max_tokens, temperature, event_timeout, full_timeout, seed = (
-        client.calls[0]
-    )
+    (
+        provider,
+        prompt,
+        card,
+        max_tokens,
+        temperature,
+        event_timeout,
+        full_timeout,
+        seed,
+        reasoning_effort,
+    ) = client.calls[0]
     assert provider == "provider-under-test"
     assert prompt == "共享读卡指南\n\n只复述事实，不限制字数"
     assert card == result.events[0].event_card
@@ -468,6 +480,7 @@ def test_stream_analysis_uses_strict_protocol_settings_and_split_metrics(
     assert event_timeout == pytest.approx(10.0)
     assert full_timeout == pytest.approx(10.0)
     assert seed == 43
+    assert reasoning_effort == "none"
     assert "事件：爆头击杀" in report
     assert "核对：类型=爆头击杀；方式=无；武器=AK47" in report
     assert "场面：掉血后紧接着完成击杀" in report

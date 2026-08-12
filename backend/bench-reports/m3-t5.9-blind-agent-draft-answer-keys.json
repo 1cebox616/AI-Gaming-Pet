@@ -138,9 +138,8 @@
     },
     {
       "case_id": "gsi-20260811-223119-169538:028:kill:r5",
-      "expected_summary": "中期剩16血，用AK47完成普通击杀；卡片没有对枪标签。",
-      "required_facts": ["中期", "剩16血", "AK47", "普通击杀"],
-      "forbidden_claims": ["没有近同时掉血标签却声称赢下对枪"]
+      "expected_summary": "中期剩16血，用AK47赢下对枪完成普通击杀。",
+      "required_facts": ["中期", "剩16血", "AK47", "普通击杀", "对枪取胜"]
     },
     {
       "case_id": "gsi-20260811-223119-169538:029:round_loss:r5",

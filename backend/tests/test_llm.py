@@ -264,12 +264,13 @@ def test_streamed_analysis_parses_three_fields_usage_and_event_line_latency() ->
             event_timeout_seconds=3.0,
             full_timeout_seconds=6.0,
             seed=42,
+            reasoning_effort="low",
         )
     finally:
         client.close()
 
     assert request_body["stream"] is True
-    assert request_body["reasoning"] == {"effort": "none"}
+    assert request_body["reasoning"] == {"effort": "low"}
     assert request_body["seed"] == 42
     assert request_body["provider"] == {
         "only": ["fast-provider"],

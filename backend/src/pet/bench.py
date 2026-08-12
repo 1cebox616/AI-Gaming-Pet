@@ -245,6 +245,8 @@ class AnalysisBenchResult:
     truncated_event_count: int
     event_timeout_seconds: float
     full_timeout_seconds: float
+    max_completion_tokens: int
+    reasoning_effort: str
     seed: int
     events: tuple[AnalysisBenchEvent, ...]
 
@@ -573,6 +575,8 @@ def run_stream_analysis(
     max_events: int,
     event_timeout_seconds: float,
     full_timeout_seconds: float,
+    max_completion_tokens: int = ANALYSIS_MAX_COMPLETION_TOKENS,
+    reasoning_effort: str = "none",
     seed: int = ANALYSIS_SEED,
     prompts_directory: Path = PROMPTS_DIRECTORY,
 ) -> AnalysisBenchResult:
@@ -589,6 +593,8 @@ def run_stream_analysis(
         raise ValueError("event timeout must be positive")
     if full_timeout_seconds < event_timeout_seconds:
         raise ValueError("full timeout must be at least the event timeout")
+    if max_completion_tokens < 1:
+        raise ValueError("max completion tokens must be positive")
 
     system_prompt = load_system_prompt(
         "inference",
@@ -648,6 +654,8 @@ def run_stream_analysis(
                         event_card=card,
                         event_timeout_seconds=event_timeout_seconds,
                         full_timeout_seconds=full_timeout_seconds,
+                        max_completion_tokens=max_completion_tokens,
+                        reasoning_effort=reasoning_effort,
                         seed=seed,
                         client=client,
                     ),
@@ -666,6 +674,8 @@ def run_stream_analysis(
         truncated_event_count=max(0, selected_event_count - len(events)),
         event_timeout_seconds=event_timeout_seconds,
         full_timeout_seconds=full_timeout_seconds,
+        max_completion_tokens=max_completion_tokens,
+        reasoning_effort=reasoning_effort,
         seed=seed,
         events=tuple(events),
     )
@@ -679,6 +689,8 @@ def _attempt_stream_analysis(
     event_card: str,
     event_timeout_seconds: float,
     full_timeout_seconds: float,
+    max_completion_tokens: int,
+    reasoning_effort: str,
     seed: int,
     client: LlmAnalysisClientProtocol,
 ) -> AnalysisAttempt:
@@ -688,11 +700,12 @@ def _attempt_stream_analysis(
             provider=provider,
             system_prompt=system_prompt,
             user_prompt=event_card,
-            max_tokens=ANALYSIS_MAX_COMPLETION_TOKENS,
+            max_tokens=max_completion_tokens,
             temperature=ANALYSIS_TEMPERATURE,
             event_timeout_seconds=event_timeout_seconds,
             full_timeout_seconds=full_timeout_seconds,
             seed=seed,
+            reasoning_effort=reasoning_effort,
         )
     except LlmError as error:
         context = (
@@ -914,7 +927,8 @@ def render_stream_analysis_report(
         f"- 事件/完整截止时间：{result.event_timeout_seconds:g}s / "
         f"{result.full_timeout_seconds:g}s",
         f"- 温度 / 完成上限：{ANALYSIS_TEMPERATURE:g} / "
-        f"{ANALYSIS_MAX_COMPLETION_TOKENS} token",
+        f"{result.max_completion_tokens} token",
+        f"- 推理强度：{result.reasoning_effort}",
         f"- 固定随机种子：{result.seed}",
         f"- 提示词 SHA-256：`{_sha256_text(result.system_prompt)}`",
         f"- 事件卡集合 SHA-256：`{card_digest}`",
@@ -1807,6 +1821,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="stream-analysis 使用的固定随机种子",
     )
     parser.add_argument(
+        "--reasoning-effort",
+        choices=("none", "minimal", "low", "medium", "high"),
+        default="none",
+        help="stream-analysis 的 OpenRouter 推理强度",
+    )
+    parser.add_argument(
+        "--analysis-max-tokens",
+        type=_positive_int,
+        default=ANALYSIS_MAX_COMPLETION_TOKENS,
+        help="stream-analysis 的最大完成 token 数",
+    )
+    parser.add_argument(
         "--scores",
         type=Path,
         help="人工评分 JSON；与 --score-report 一起离线追加准确率汇总",
@@ -1916,6 +1942,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_events=args.max_events,
                 event_timeout_seconds=args.event_timeout_seconds,
                 full_timeout_seconds=args.full_timeout_seconds,
+                max_completion_tokens=args.analysis_max_tokens,
+                reasoning_effort=args.reasoning_effort,
                 seed=args.seed,
             )
             write_stream_analysis_report(analysis, args.out)
