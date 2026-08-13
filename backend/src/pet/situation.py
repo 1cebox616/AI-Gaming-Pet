@@ -26,6 +26,9 @@ WEAPON_SWITCH_KILL_WINDOW_SECONDS = 3.0
 FLASH_BAD_LUCK_SECONDS = 1.5
 FLASH_BAD_LUCK_COUNT = 3
 BURN_BAD_LUCK_DAMAGE = 30
+# GSI updates are event-driven and can be sparse.  Separate clip decreases more
+# than two seconds apart are distinct firing exchanges, not one kill attempt.
+AMMO_RUN_MAX_GAP_SECONDS = 2.0
 TIMELINE_MAX_ENTRIES = 25
 # Product-defined phase buckets for the roughly 110-second live round clock.
 ROUND_OPENING_END_SECONDS = 15.0
@@ -691,6 +694,9 @@ class SituationTracker:
         # through its first stable post-shot frame, where CS2 may publish the
         # kill counter after the ammo change.
         self._ammo_run_start: dict[str, int] = {}
+        # Timestamp of each run's most recent observed clip decrease.  This
+        # prevents sparse GSI updates from merging separate exchanges.
+        self._ammo_run_last_drop_at: dict[str, float] = {}
         # The kill counter can arrive one GSI frame after an AWP clip drop.
         # Keep a candidate for one frame so a delayed confirmed kill is never
         # misreported as an AWP miss.
@@ -911,12 +917,24 @@ class SituationTracker:
         for name, clip in current_ammo.items():
             previous_ammo = self._previous_weapon_ammo.get(name)
             if previous_ammo is not None and clip < previous_ammo:
-                self._ammo_run_start.setdefault(name, previous_ammo)
+                previous_drop_at = self._ammo_run_last_drop_at.get(name)
+                if (
+                    previous_drop_at is None
+                    or snapshot.ts - previous_drop_at > AMMO_RUN_MAX_GAP_SECONDS
+                ):
+                    self._ammo_run_start[name] = previous_ammo
+                self._ammo_run_last_drop_at[name] = snapshot.ts
             else:
                 self._ammo_run_start.pop(name, None)
+                self._ammo_run_last_drop_at.pop(name, None)
         self._ammo_run_start = {
             name: start
             for name, start in self._ammo_run_start.items()
+            if name in current_ammo
+        }
+        self._ammo_run_last_drop_at = {
+            name: dropped_at
+            for name, dropped_at in self._ammo_run_last_drop_at.items()
             if name in current_ammo
         }
         self._previous_weapon_ammo = current_ammo

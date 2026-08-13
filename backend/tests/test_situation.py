@@ -1079,6 +1079,20 @@ def test_kill_ammo_count_accumulates_across_contiguous_clip_drops() -> None:
     assert kill.detail is not None and "用弹8" in kill.detail
 
 
+def test_kill_ammo_count_restarts_after_two_second_clip_gap() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, ammo_clip=30),
+            _snapshot(11.0, ammo_clip=27),
+            _snapshot(13.1, ammo_clip=25),
+            _snapshot(13.2, ammo_clip=22, round_kills=1),
+        )
+    )
+
+    kill = next(entry for entry in result.timeline if entry.kind == "kill")
+    assert kill.detail is not None and "用弹5" in kill.detail
+
+
 def test_burn_damage_is_conservatively_counted_only_inside_burning_interval() -> None:
     inside = _observe_all(
         (
