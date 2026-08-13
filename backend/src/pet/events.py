@@ -56,7 +56,6 @@ class _SubjectBaseline:
     snapshot: GameSnapshot
     last_kill_at: float | None = None
     last_kill_round_number: int | None = None
-    death_latched: bool = False
 
 
 class EventDetector:
@@ -73,8 +72,6 @@ class EventDetector:
         self._live_started_at: float | None = None
         self._reported_results: set[tuple[int | None, str]] = set()
         self._result_map_name: str | None = None
-        self._death_generation = 0
-        self._reported_death_signatures: set[tuple[int | None, int, int]] = set()
 
     def reset(self) -> None:
         """Discard every per-match baseline while keeping event IDs process-unique."""
@@ -86,8 +83,6 @@ class EventDetector:
         self._live_started_at = None
         self._reported_results.clear()
         self._result_map_name = None
-        self._death_generation = 0
-        self._reported_death_signatures.clear()
 
     def observe(
         self, snapshot: GameSnapshot, game: GameState
@@ -179,7 +174,6 @@ class EventDetector:
         if round_boundary:
             baseline.last_kill_at = None
             baseline.last_kill_round_number = None
-            baseline.death_latched = False
         if not round_boundary:
             kill_events = self._detect_kills(
                 previous,
@@ -193,31 +187,8 @@ class EventDetector:
             events.extend(kill_events)
 
         if (
-            current.health is not None
-            and current.health > 0
-            and current.player_steamid == self_steamid
-            and (previous.health is None or previous.health <= 0)
-        ):
-            self._death_generation += 1
-            baseline.death_latched = False
-        elif current.health is not None and current.health > 0:
-            baseline.death_latched = False
-
-        death_signature = (
-            round_number,
-            self._death_generation,
-            current.match_deaths,
-        )
-        signature_is_duplicate = (
-            current.match_deaths is not None
-            and current.player_steamid in {self_steamid, None}
-            and death_signature in self._reported_death_signatures
-        )
-        if (
             current.round_phase != "freezetime"
-            and not baseline.death_latched
             and _is_death(previous, current)
-            and not signature_is_duplicate
         ):
             survival_seconds = (
                 max(0.0, current.ts - self._live_started_at)
@@ -264,12 +235,6 @@ class EventDetector:
                     },
                 )
             )
-            baseline.death_latched = True
-            if (
-                current.match_deaths is not None
-                and current.player_steamid in {self_steamid, None}
-            ):
-                self._reported_death_signatures.add(death_signature)
         return events
 
     def _detect_kills(

@@ -13,11 +13,6 @@ from pet.events import EventType, GameEvent
 from pet.gsi import GameSnapshot
 from pet.session import GameState
 
-# A single fixed window absorbs the short burst of a firefight without making
-# the pet wait indefinitely for a later event.  It is intentionally not a
-# configuration value: this is the product-wide speech-timing contract.
-EVENT_BUFFER_SECONDS = 1.5
-
 DecisionReason = Literal[
     "selected",
     "teammate_event",
@@ -41,80 +36,6 @@ _STATIC_PRIORITIES: dict[EventType, int] = {
     "multi_kill": 0,
 }
 _MULTI_KILL_PRIORITIES = {2: 50, 3: 80, 4: 90, 5: 100}
-
-
-@dataclass(frozen=True, slots=True)
-class BufferedEventGroup:
-    """One non-nested speech window and its policy-selected focus."""
-
-    events: tuple[GameEvent, ...]
-    focus_event: GameEvent
-    opened_at: float
-    flushed_at: float
-
-
-class SpeechBuffer:
-    """Collect policy-selected events into fixed, non-extending windows."""
-
-    def __init__(self) -> None:
-        self._events: list[GameEvent] = []
-        self._opened_at: float | None = None
-
-    @property
-    def has_pending(self) -> bool:
-        """Return whether a speech window is waiting to be flushed."""
-        return bool(self._events)
-
-    def add(self, event: GameEvent) -> tuple[BufferedEventGroup, ...]:
-        """Add one approved event, closing an already elapsed window first."""
-        flushed: tuple[BufferedEventGroup, ...] = ()
-        if (
-            self._opened_at is not None
-            and event.ts - self._opened_at >= EVENT_BUFFER_SECONDS
-        ):
-            flushed = (
-                self._flush(flushed_at=self._opened_at + EVENT_BUFFER_SECONDS),
-            )
-        if not self._events:
-            self._opened_at = event.ts
-        self._events.append(event)
-        return flushed
-
-    def flush_due(self, *, now: float) -> tuple[BufferedEventGroup, ...]:
-        """Flush once the fixed window has elapsed, without extending it."""
-        if self._opened_at is None or now - self._opened_at < EVENT_BUFFER_SECONDS:
-            return ()
-        return (
-            self._flush(flushed_at=self._opened_at + EVENT_BUFFER_SECONDS),
-        )
-
-    def flush_all(self, *, now: float) -> tuple[BufferedEventGroup, ...]:
-        """Flush immediately at a round/match/program boundary."""
-        if not self._events:
-            return ()
-        return (self._flush(flushed_at=now),)
-
-    def reset(self) -> None:
-        """Discard a pending window after its boundary has been delivered."""
-        self._events.clear()
-        self._opened_at = None
-
-    def _flush(self, *, flushed_at: float) -> BufferedEventGroup:
-        if not self._events or self._opened_at is None:
-            raise RuntimeError("cannot flush an empty speech buffer")
-        events = tuple(self._events)
-        focus_event = max(
-            enumerate(events),
-            key=lambda item: (event_priority(item[1]), -item[0]),
-        )[1]
-        group = BufferedEventGroup(
-            events=events,
-            focus_event=focus_event,
-            opened_at=self._opened_at,
-            flushed_at=flushed_at,
-        )
-        self.reset()
-        return group
 
 
 class PolicyDecision(BaseModel):

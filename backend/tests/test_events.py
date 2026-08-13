@@ -333,26 +333,6 @@ def test_death_classifications_are_mutually_exclusive_on_real_fragments(
     }
 
 
-def test_one_real_death_is_not_reemitted_after_subject_identity_switch(
-    event_samples: dict[str, Any],
-) -> None:
-    """A real death must stay latched when GSI briefly omits the subject ID."""
-    real = _snapshots(event_samples, "ordinary_death_with_trade_kill")
-    unknown_alive = real[0].model_copy(update={"player_steamid": None})
-    unknown_death = real[-1].model_copy(
-        update={"player_steamid": None, "ts": real[-1].ts + 0.1}
-    )
-    switched_back = real[-1].model_copy(update={"ts": real[-1].ts + 0.2})
-
-    events = _detect((real[0], unknown_alive, unknown_death, switched_back))
-
-    assert [
-        event.type
-        for event in events
-        if event.type in {"death", "death_after_kill", "death_thrown_away"}
-    ] == ["death_after_kill"]
-
-
 def test_death_after_kill_threshold_changes_real_fragment_classification(
     t7_samples: dict[str, Any],
 ) -> None:

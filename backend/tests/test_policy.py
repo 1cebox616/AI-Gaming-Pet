@@ -9,13 +9,7 @@ import pytest
 from pet.config import EventsConfig, PolicyConfig
 from pet.events import EventDetector
 from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, parse_snapshot
-from pet.policy import (
-    EVENT_BUFFER_SECONDS,
-    PolicyDecision,
-    SpeechBuffer,
-    SpeechPolicy,
-    event_priority,
-)
+from pet.policy import PolicyDecision, SpeechPolicy
 from pet.replay import format_decision_reason, replay_policy
 from pet.session import GameSessionTracker
 
@@ -148,77 +142,6 @@ def test_round_result_is_detected_but_excluded_from_speech_candidates(
     assert round_decisions
     assert all(not decision.selected for decision in round_decisions)
     assert all(decision.reason_code == "round_event" for decision in round_decisions)
-
-
-def test_buffer_merges_real_fixture_events_and_uses_existing_priority(
-    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
-) -> None:
-    first_decisions = _decisions(
-        _three_kill_sequence(recorded_fixtures),
-        PolicyConfig(alive_priority_threshold=0),
-    )
-    second_decisions = _decisions(
-        _event_sequence(recorded_fixtures, "ordinary_death_with_trade_kill"),
-        PolicyConfig(alive_priority_threshold=0),
-    )
-    first = next(decision.event for decision in first_decisions if decision.selected)
-    second = next(decision.event for decision in second_decisions if decision.selected)
-    second = second.model_copy(update={"ts": first.ts + 1.0})
-
-    buffer = SpeechBuffer()
-    buffer.add(first)
-    buffer.add(second)
-
-    assert buffer.flush_due(now=first.ts + EVENT_BUFFER_SECONDS - 0.01) == ()
-    groups = buffer.flush_due(now=first.ts + EVENT_BUFFER_SECONDS)
-
-    assert len(groups) == 1
-    assert groups[0].events == (first, second)
-    assert groups[0].focus_event.id == max((first, second), key=event_priority).id
-
-
-def test_buffer_flushes_pending_group_immediately_at_boundary(
-    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
-) -> None:
-    event = next(
-        decision.event
-        for decision in _decisions(
-            _event_sequence(recorded_fixtures, "ordinary_death_with_trade_kill"),
-            PolicyConfig(alive_priority_threshold=0),
-        )
-        if decision.selected
-    )
-    buffer = SpeechBuffer()
-    buffer.add(event)
-
-    groups = buffer.flush_all(now=event.ts + 0.01)
-
-    assert len(groups) == 1
-    assert groups[0].events == (event,)
-    assert buffer.has_pending is False
-
-
-def test_buffer_does_not_extend_a_window_when_a_late_real_event_arrives(
-    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
-) -> None:
-    event = next(
-        decision.event
-        for decision in _decisions(
-            _event_sequence(recorded_fixtures, "ordinary_death_with_trade_kill"),
-            PolicyConfig(alive_priority_threshold=0),
-        )
-        if decision.selected
-    )
-    late_event = event.model_copy(update={"ts": event.ts + 2.0})
-    buffer = SpeechBuffer()
-    buffer.add(event)
-
-    first_group = buffer.add(late_event)
-
-    assert len(first_group) == 1
-    assert first_group[0].events == (event,)
-    second_group = buffer.flush_all(now=late_event.ts)
-    assert second_group[0].events == (late_event,)
 
 
 def test_death_after_kill_is_not_blocked_by_alive_combat_threshold(
