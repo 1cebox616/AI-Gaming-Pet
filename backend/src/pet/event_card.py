@@ -13,6 +13,13 @@ from pet.gsi import GameSnapshot, WeaponSlot, human_round_number
 from pet.session import GameState
 from pet.situation import (
     RoundSituation,
+    BURN_BAD_LUCK_DAMAGE,
+    FLASH_BAD_LUCK_COUNT,
+    FLASH_BAD_LUCK_SECONDS,
+    RESIDUAL_KILL_HEALTH,
+    SCENE_TAGS,
+    SMOKE_DEATH_WINDOW_SECONDS,
+    WEAPON_SWITCH_KILL_WINDOW_SECONDS,
     TimelineEntry,
     armor_status,
     held_weapon,
@@ -84,6 +91,26 @@ _CONTINUOUS_EVENT_KINDS = frozenset(
     }
 )
 _CONTINUOUS_EVENT_ANCHORS = frozenset({"kill", "death", "round_result"})
+_AMMO_SCENE_WEAPONS = frozenset(
+    {
+        "ak47",
+        "m4a1",
+        "m4a1_silencer",
+        "m4a4",
+        "aug",
+        "famas",
+        "galilar",
+        "sg556",
+        "deagle",
+        "沙鹰",
+        "ak47",
+        "m4a1-s",
+        "m4a4",
+        "famas",
+        "galil ar",
+        "aug",
+    }
+)
 _KILL_INCREASE_PATTERN = re.compile(r"(?:^| )增加(\d+)杀(?: |$)")
 
 
@@ -115,8 +142,12 @@ def render_event_card(
             self_team=self_team,
             death_after_kill_max_seconds=death_after_kill_max_seconds,
             event=event,
+            round_situation=round_situation,
         )
         sections.append(timeline_history)
+        state_tags = _round_state_tags(snapshot, round_situation, game)
+        if state_tags:
+            sections.append(f"【本回合状态】{'｜'.join(state_tags)}")
         if focus_line is not None:
             sections.append(f"【刚刚】（唯一回应范围）\n{focus_line}")
             focus_rendered = True
@@ -318,6 +349,7 @@ def _timeline_sections(
     self_team: str | None,
     death_after_kill_max_seconds: float,
     event: GameEvent,
+    round_situation: RoundSituation,
 ) -> tuple[str | None, str | None]:
     if not entries:
         return None, None
@@ -362,10 +394,18 @@ def _timeline_sections(
                 maximum_seconds=_NEARBY_COMBAT_SECONDS,
             )
             if damage_gap is not None:
-                annotations.append(f"对枪胜利，间隔{_seconds(damage_gap)}秒")
+                annotations.append(f"{_scene('对枪胜利')}，间隔{_seconds(damage_gap)}秒")
             smoke_gap = _previous_entry_gap(entries, index, kind="smoke_end")
             if smoke_gap is not None and smoke_gap <= _NEARBY_COMBAT_SECONDS:
-                annotations.append(f"摸烟击杀，出烟后{_seconds(smoke_gap)}秒")
+                annotations.append(f"{_scene('摸烟击杀')}，出烟后{_seconds(smoke_gap)}秒")
+            annotations.extend(
+                _action_scene_tags(
+                    entries,
+                    index,
+                    event=event,
+                    round_situation=round_situation,
+                )
+            )
             last_kill_seconds = entry.seconds
         elif entry.kind == "death":
             if round_kills > 0:
@@ -376,9 +416,19 @@ def _timeline_sections(
                 <= death_after_kill_max_seconds
             ):
                 annotations.append(
-                    "击杀后被补枪，距击杀"
+                    f"{_scene('击杀后被补枪')}，距击杀"
                     f"{_seconds(entry.seconds - last_kill_seconds)}秒"
                 )
+            annotations.extend(
+                _action_scene_tags(
+                    entries,
+                    index,
+                    event=event,
+                    round_situation=round_situation,
+                )
+            )
+            if event.type == "death_thrown_away":
+                annotations.append(_scene("白给"))
         annotations_by_index.append(tuple(annotations))
 
     focus_index = _focus_entry_index(entries, event)
@@ -398,6 +448,138 @@ def _timeline_sections(
             history_lines.append(line)
     history = "\n".join(history_lines) if len(history_lines) > 1 else None
     return history, focus_line
+
+
+def _scene(label: str) -> str:
+    if label not in SCENE_TAGS:
+        raise AssertionError(f"scene label is not enumerated: {label}")
+    return label
+
+
+def _round_state_tags(
+    snapshot: GameSnapshot, round_situation: RoundSituation, game: GameState
+) -> tuple[str, ...]:
+    if game.subject_is_self is not True:
+        return ()
+    tags: list[str] = []
+    if (
+        round_situation.longest_flash_seconds >= FLASH_BAD_LUCK_SECONDS
+        or round_situation.flash_count >= FLASH_BAD_LUCK_COUNT
+    ):
+        tags.append(_scene("白惨了"))
+    if round_situation.burn_damage_taken >= BURN_BAD_LUCK_DAMAGE:
+        tags.append(_scene("烧惨了"))
+    if (
+        snapshot.health is not None
+        and snapshot.health > 0
+        and round_situation.lowest_health_while_alive is not None
+        and round_situation.lowest_health_while_alive <= RESIDUAL_KILL_HEALTH
+    ):
+        tags.append(_scene("血皮撑住了"))
+    if round_situation.awp_miss_count >= 2:
+        tags.append(_scene("连续空枪"))
+    return tuple(tags)
+
+
+def _action_scene_tags(
+    entries: tuple[TimelineEntry, ...],
+    index: int,
+    *,
+    event: GameEvent,
+    round_situation: RoundSituation,
+) -> tuple[str, ...]:
+    entry = entries[index]
+    tags: list[str] = []
+    if entry.kind == "kill":
+        same_group = _same_continuous_group_has_kind(entries, index, "damage")
+        health = _kill_health_value(entry.detail)
+        if health is not None and health <= RESIDUAL_KILL_HEALTH and not same_group:
+            tags.append(_scene("残血击杀"))
+        if _interval_active_at(entries, index, "flash_start", "flash_end"):
+            tags.append(_scene("白着打"))
+        if _interval_active_at(entries, index, "burn_start", "burn_end"):
+            tags.append(_scene("踩火杀"))
+        previous_weapon = _previous_primary_weapon_entry(entries, index)
+        if previous_weapon is not None:
+            gap = entry.seconds - previous_weapon.seconds
+            if gap is not None and gap <= WEAPON_SWITCH_KILL_WINDOW_SECONDS:
+                tags.append(_scene("换枪后立刻杀"))
+        ammo_drop = _ammo_drop(entry.detail)
+        weapon = _kill_weapon_name(entry.detail)
+        if (
+            ammo_drop is not None
+            and weapon is not None
+            and weapon.removeprefix("weapon_").lower() in _AMMO_SCENE_WEAPONS
+        ):
+            if ammo_drop == 1:
+                tags.append(_scene("一发命中"))
+            elif 2 <= ammo_drop <= 5:
+                tags.append(_scene("干净解决"))
+            elif ammo_drop >= 10:
+                tags.append(_scene("打了半天"))
+    elif entry.kind == "death":
+        if _interval_active_at(entries, index, "flash_start", "flash_end"):
+            tags.append(_scene("白着被打死"))
+        smoke_gap = _previous_entry_gap(entries, index, kind="smoke_end")
+        if smoke_gap is not None and 0 <= smoke_gap <= SMOKE_DEATH_WINDOW_SECONDS:
+            tags.append(_scene("出烟就没了"))
+    return tuple(tags)
+
+
+def _previous_primary_weapon_entry(
+    entries: tuple[TimelineEntry, ...], index: int
+) -> TimelineEntry | None:
+    return next(
+        (
+            entry
+            for entry in reversed(entries[:index])
+            if entry.kind == "primary_weapon"
+            and (entry.detail or "").startswith("换枪 ")
+        ),
+        None,
+    )
+
+
+def _kill_health_value(detail: str | None) -> int | None:
+    match = re.search(r"击杀时剩(\d+)血", detail or "")
+    return int(match.group(1)) if match is not None else None
+
+
+def _ammo_drop(detail: str | None) -> int | None:
+    match = re.search(r"用弹(\d+)", detail or "")
+    return int(match.group(1)) if match is not None else None
+
+
+def _kill_weapon_name(detail: str | None) -> str | None:
+    if not detail:
+        return None
+    return detail.split(" ", 1)[0]
+
+
+def _same_continuous_group_has_kind(
+    entries: tuple[TimelineEntry, ...], index: int, kind: str
+) -> bool:
+    for group in _continuous_event_groups(entries):
+        if index in group:
+            return any(entries[item].kind == kind for item in group)
+    return False
+
+
+def _interval_active_at(
+    entries: tuple[TimelineEntry, ...], index: int, start_kind: str, end_kind: str
+) -> bool:
+    current = entries[index].seconds
+    active = False
+    for entry in entries[: index + 1]:
+        if entry.seconds > current:
+            break
+        if entry.kind == start_kind:
+            active = True
+        elif entry.kind == end_kind:
+            # An interval closed by death/round end is represented as an
+            # unfinished end marker; the focus event still happened inside it.
+            active = (entry.detail or "").startswith("未结束 ")
+    return active
 
 
 def _required_event_facts(
@@ -1496,6 +1678,8 @@ def _timeline_entry_text(
         return "玩家主武器" + (f" {detail}" if detail else "")
     if entry.kind in {"ammo_low", "reload", "grenade_used", "grenade_pickup"}:
         return "玩家" + (detail or "状态变化")
+    if entry.kind == "awp_miss":
+        return "玩家" + (detail or _scene("大狙空枪"))
     if entry.kind == "bomb":
         return "炸弹" + (detail or "状态变化")
     if entry.kind == "bomb_pickup":

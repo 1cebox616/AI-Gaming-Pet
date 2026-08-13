@@ -19,6 +19,13 @@ ECO_MONEY_THRESHOLD = 1500
 ECO_EQUIP_THRESHOLD = 2000
 # One chambered round is the last-shot warning point before an empty magazine.
 LOW_AMMO_THRESHOLD = 1
+# These thresholds are product-level scene definitions, not user settings.
+RESIDUAL_KILL_HEALTH = 30
+SMOKE_DEATH_WINDOW_SECONDS = 2.0
+WEAPON_SWITCH_KILL_WINDOW_SECONDS = 3.0
+FLASH_BAD_LUCK_SECONDS = 1.5
+FLASH_BAD_LUCK_COUNT = 3
+BURN_BAD_LUCK_DAMAGE = 30
 TIMELINE_MAX_ENTRIES = 25
 # Product-defined phase buckets for the roughly 110-second live round clock.
 ROUND_OPENING_END_SECONDS = 15.0
@@ -64,6 +71,35 @@ _GRENADE_LABELS = {
     "weapon_decoy": "诱饵弹",
 }
 
+SCENE_TAGS: frozenset[str] = frozenset(
+    {
+        "对枪胜利",
+        "摸烟击杀",
+        "击杀后被补枪",
+        "白给",
+        "残血击杀",
+        "白着打",
+        "踩火杀",
+        "换枪后立刻杀",
+        "白着被打死",
+        "出烟就没了",
+        "一发命中",
+        "干净解决",
+        "打了半天",
+        "大狙空枪",
+        "连续空枪",
+        "白惨了",
+        "烧惨了",
+        "血皮撑住了",
+    }
+)
+
+
+def _scene_tag(label: str) -> str:
+    if label not in SCENE_TAGS:
+        raise AssertionError(f"scene label is not enumerated: {label}")
+    return label
+
 TimelineKind = Literal[
     "bought",
     "round_live",
@@ -87,6 +123,7 @@ TimelineKind = Literal[
     "mvp",
     "death",
     "round_result",
+    "awp_miss",
 ]
 RoundStage = Literal["开局", "前期", "中期", "后期", "守包", "反攻包点", "下包后"]
 
@@ -119,6 +156,8 @@ class RoundSituation:
     bomb_planted_at_ts: float | None
     seconds_since_bomb_planted: float | None
     grenades_used: tuple[tuple[str, int], ...] = ()
+    awp_miss_count: int = 0
+    burn_damage_taken: int = 0
     # Deliberate GameSnapshot duplication: spectating replaces snapshot.team with
     # the teammate's team, while round-result cards still need the player's team.
     self_team: str | None = None
@@ -236,11 +275,29 @@ class SituationTracker:
                 ),
             )
 
-        ammo_detail = self._observe_ammo(snapshot)
+        round_kills_increase = _positive_increase(
+            self._previous_round_kills, snapshot.round_kills
+        )
+        ammo_detail, ammo_drop, awp_miss = self._observe_ammo(
+            snapshot, kill_count=round_kills_increase
+        )
         if ammo_detail is not None:
             timeline = _append_timeline(
                 timeline,
                 TimelineEntry(relative_seconds, "ammo_low", ammo_detail),
+            )
+        awp_miss_count = self._current.awp_miss_count
+        if awp_miss:
+            awp_miss_count += 1
+            timeline = _append_timeline(
+                timeline,
+                TimelineEntry(
+                    relative_seconds,
+                    "awp_miss",
+                    _scene_tag("大狙空枪")
+                    if awp_miss_count == 1
+                    else f"{_scene_tag('大狙空枪')}又空了（累计{awp_miss_count}次）",
+                ),
             )
         for reload_detail in self._observe_reload(snapshot, relative_seconds):
             timeline = _append_timeline(
@@ -320,9 +377,6 @@ class SituationTracker:
                 ),
             )
 
-        round_kills_increase = _positive_increase(
-            self._previous_round_kills, snapshot.round_kills
-        )
         round_headshots_increase = _positive_increase(
             self._previous_round_killhs, snapshot.round_killhs
         )
@@ -336,11 +390,13 @@ class SituationTracker:
                         snapshot,
                         kill_count=round_kills_increase,
                         headshot_count=round_headshots_increase,
+                        ammo_drop=ammo_drop,
                     ),
                 ),
             )
 
         total_damage_taken = self._current.total_damage_taken
+        burn_damage_taken = self._current.burn_damage_taken
         damage_taken = 0
         if (
             self._previous_health is not None
@@ -349,6 +405,13 @@ class SituationTracker:
         ):
             damage_taken = self._previous_health - snapshot.health
             total_damage_taken += damage_taken
+            if (
+                self._previous_burning is not None
+                and self._previous_burning > 0
+                and snapshot.burning is not None
+                and snapshot.burning > 0
+            ):
+                burn_damage_taken += damage_taken
             timeline = _append_timeline(
                 timeline,
                 TimelineEntry(
@@ -470,6 +533,8 @@ class SituationTracker:
             bomb_planted_at_ts=bomb_planted_at_ts,
             seconds_since_bomb_planted=seconds_since_bomb_planted,
             grenades_used=tuple(sorted(grenades_used.items())),
+            awp_miss_count=awp_miss_count,
+            burn_damage_taken=burn_damage_taken,
             self_team=self_team,
             timeline=tuple(timeline),
         )
@@ -479,6 +544,7 @@ class SituationTracker:
         self._previous_money = snapshot.money
         self._previous_equip_value = snapshot.equip_value
         self._previous_round_kills = snapshot.round_kills
+        self._previous_burning = snapshot.burning
         self._previous_round_killhs = snapshot.round_killhs
         self._previous_match_assists = snapshot.match_assists
         if snapshot.match_mvps is not None:
@@ -578,6 +644,8 @@ class SituationTracker:
             bomb_planted_at_ts=None,
             seconds_since_bomb_planted=None,
             grenades_used=(),
+            awp_miss_count=0,
+            burn_damage_taken=0,
             self_team=None,
             timeline=(),
         )
@@ -604,6 +672,7 @@ class SituationTracker:
         self._previous_money: int | None = None
         self._previous_equip_value: int | None = None
         self._previous_round_kills: int | None = None
+        self._previous_burning: int | None = None
         self._previous_round_killhs: int | None = None
         self._previous_match_assists: int | None = None
         self._previous_match_mvps: int | None = None
@@ -770,29 +839,35 @@ class SituationTracker:
         self._previous_grenades = current
         return tuple(used), tuple(picked_up)
 
-    def _observe_ammo(self, snapshot: GameSnapshot) -> str | None:
+    def _observe_ammo(
+        self, snapshot: GameSnapshot, *, kill_count: int
+    ) -> tuple[str | None, int | None, bool]:
         weapon = _operated_weapon(snapshot)
         if weapon is None or weapon.ammo_clip is None:
             self._previous_held_weapon_name = None
             self._previous_held_ammo = None
-            return None
+            return None, None, False
 
         detail: str | None = None
+        ammo_drop: int | None = None
+        awp_miss = False
         if (
             weapon.name == self._previous_held_weapon_name
             and self._previous_held_ammo is not None
-            and self._previous_held_ammo > LOW_AMMO_THRESHOLD
-            and weapon.ammo_clip <= LOW_AMMO_THRESHOLD
+            and weapon.ammo_clip < self._previous_held_ammo
         ):
+            ammo_drop = self._previous_held_ammo - weapon.ammo_clip
+            awp_miss = weapon.name.lower() == "weapon_awp" and kill_count == 0
             label = weapon_display_name(weapon.name)
-            detail = (
-                f"弹匣打空 {label}"
-                if weapon.ammo_clip == 0
-                else f"弹匣仅剩{weapon.ammo_clip}发 {label}"
-            )
+            if self._previous_held_ammo > LOW_AMMO_THRESHOLD and weapon.ammo_clip <= LOW_AMMO_THRESHOLD:
+                detail = (
+                    f"弹匣打空 {label}"
+                    if weapon.ammo_clip == 0
+                    else f"弹匣仅剩{weapon.ammo_clip}发 {label}"
+                )
         self._previous_held_weapon_name = weapon.name
         self._previous_held_ammo = weapon.ammo_clip
-        return detail
+        return detail, ammo_drop, awp_miss
 
     def _observe_reload(
         self,
@@ -945,6 +1020,7 @@ def _kill_detail(
     *,
     kill_count: int,
     headshot_count: int,
+    ammo_drop: int | None = None,
 ) -> str | None:
     weapon = held_weapon(snapshot)
     weapon_name = weapon.name if weapon is not None else snapshot.active_weapon
@@ -955,6 +1031,9 @@ def _kill_detail(
         details.append("爆头" if headshot_count == 1 else f"{headshot_count}个爆头")
     if kill_count > 1:
         details.append(f"增加{kill_count}杀")
+    if ammo_drop is not None and ammo_drop > 0:
+        if weapon_name is not None and weapon_name.lower() != "weapon_awp":
+            details.append(f"用弹{ammo_drop}")
     if snapshot.health == 100:
         details.append("击杀时满血")
     elif snapshot.health is not None and 0 < snapshot.health <= LOW_HEALTH_THRESHOLD:

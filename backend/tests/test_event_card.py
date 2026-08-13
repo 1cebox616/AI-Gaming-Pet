@@ -886,6 +886,59 @@ def test_round_result_keeps_only_one_focus_marker_without_required_facts() -> No
     assert "本次焦点：回合失败" in card
 
 
+def test_scene_tags_cover_positive_and_negative_action_cases() -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 20})
+    kill = _event(snapshot).model_copy(update={"type": "kill"})
+    positive_entries = (
+        TimelineEntry(0.0, "round_live", None),
+        TimelineEntry(1.0, "primary_weapon", "换枪 AK47"),
+        TimelineEntry(1.5, "flash_start", None),
+        TimelineEntry(1.8, "burn_start", None),
+        TimelineEntry(2.0, "kill", "AK47 用弹1 击杀时剩20血"),
+    )
+    positive = render_event_card(
+        snapshot, _game(snapshot), replace(_situation(), timeline=positive_entries), kill
+    )
+    assert all(
+        tag in positive
+        for tag in ("残血击杀", "白着打", "踩火杀", "一发命中", "换枪后立刻杀")
+    )
+
+    ended_flash = render_event_card(
+        snapshot,
+        _game(snapshot),
+        replace(
+            _situation(),
+            timeline=(
+                TimelineEntry(0.0, "round_live", None),
+                TimelineEntry(1.0, "flash_start", None),
+                TimelineEntry(2.0, "flash_end", "持续1.0秒"),
+                TimelineEntry(3.0, "kill", "AK47 用弹0 击杀时剩20血"),
+            ),
+        ),
+        kill,
+    )
+    assert "白着打" not in ended_flash
+    assert "一发命中" not in ended_flash
+
+
+def test_scene_state_tags_require_thresholds_and_survival() -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 20})
+    event = _event(snapshot).model_copy(update={"type": "kill"})
+    state = replace(
+        _situation(),
+        flash_count=3,
+        longest_flash_seconds=1.5,
+        burn_damage_taken=30,
+        awp_miss_count=2,
+        lowest_health_while_alive=20,
+    )
+    card = render_event_card(snapshot, _game(snapshot), state, event)
+    assert all(tag in card for tag in ("白惨了", "烧惨了", "血皮撑住了", "连续空枪"))
+    dead = render_event_card(snapshot.model_copy(update={"health": 0}), _game(snapshot), state, event)
+    assert "血皮撑住了" not in dead
+
+
 def test_timeline_code_labels_split_stage_multi_kills_without_model_arithmetic() -> None:
     snapshot = _real_snapshot()
     entries = (

@@ -135,7 +135,7 @@ def _observe_all(snapshots: tuple[GameSnapshot, ...]) -> RoundSituation:
     return current
 
 
-def test_timeline_kind_contract_contains_exactly_twenty_two_values() -> None:
+def test_timeline_kind_contract_contains_exactly_twenty_three_values() -> None:
     assert get_args(TimelineKind) == (
         "bought",
         "round_live",
@@ -157,8 +157,9 @@ def test_timeline_kind_contract_contains_exactly_twenty_two_values() -> None:
         "bomb_drop",
         "assist",
         "mvp",
-        "death",
-        "round_result",
+            "death",
+            "round_result",
+            "awp_miss",
     )
 
 
@@ -876,7 +877,7 @@ def test_kill_detail_includes_low_ammo_at_that_snapshot() -> None:
     )
 
     kills = tuple(entry for entry in result.timeline if entry.kind == "kill")
-    assert kills == (TimelineEntry(1.0, "kill", "AK47 击杀时满血 弹匣仅剩2发"),)
+    assert kills == (TimelineEntry(1.0, "kill", "AK47 用弹8 击杀时满血 弹匣仅剩2发"),)
 
 
 def test_damage_detail_omits_armor_and_merges_health_loss() -> None:
@@ -1006,6 +1007,47 @@ def test_damage_entries_at_least_one_second_apart_do_not_merge() -> None:
         TimelineEntry(1.0, "damage", "掉了10血 剩90血"),
         TimelineEntry(2.0, "damage", "掉了10血 剩80血"),
     )
+
+
+def test_awp_miss_is_recorded_only_without_a_kill() -> None:
+    missed = _observe_all(
+        (
+            _snapshot(10.0, active_weapon="weapon_awp", ammo_clip=3),
+            _snapshot(11.0, active_weapon="weapon_awp", ammo_clip=2),
+        )
+    )
+    killed = _observe_all(
+        (
+            _snapshot(10.0, active_weapon="weapon_awp", ammo_clip=3),
+            _snapshot(11.0, active_weapon="weapon_awp", ammo_clip=2, round_kills=1),
+        )
+    )
+
+    assert tuple(entry.kind for entry in missed.timeline) == (
+        "primary_weapon",
+        "awp_miss",
+    )
+    assert missed.awp_miss_count == 1
+    assert all(entry.kind != "awp_miss" for entry in killed.timeline)
+
+
+def test_burn_damage_is_conservatively_counted_only_inside_burning_interval() -> None:
+    inside = _observe_all(
+        (
+            _snapshot(10.0, health=100, burning=100),
+            _snapshot(11.0, health=70, burning=100),
+            _snapshot(12.0, health=70, burning=0),
+        )
+    )
+    boundary = _observe_all(
+        (
+            _snapshot(10.0, health=100, burning=100),
+            _snapshot(11.0, health=70, burning=0),
+        )
+    )
+
+    assert inside.burn_damage_taken == 30
+    assert boundary.burn_damage_taken == 0
 
 
 def test_timeline_caps_at_25_by_dropping_earliest_damage_and_adding_note() -> None:
