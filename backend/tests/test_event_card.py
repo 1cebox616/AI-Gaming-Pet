@@ -11,7 +11,7 @@ from pet.events import GameEvent
 from pet.gsi import GameSnapshot, WeaponSlot, parse_snapshot
 from pet.session import GameState
 from pet.situation import RoundSituation, TimelineEntry
-from pet.event_card import render_event_card
+from pet.event_card import render_event_card, render_model_event_card
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 
@@ -190,6 +190,66 @@ def test_top_labels_separate_forbidden_history_from_the_only_response_scope() ->
         "连续增加",
     ):
         assert redundant not in card.split("【刚刚】", 1)[1]
+
+
+def test_model_card_contains_only_header_and_readable_current_event() -> None:
+    snapshot = _real_snapshot()
+    situation = _situation()
+    event = _event(snapshot)
+
+    full_card = render_event_card(snapshot, _game(snapshot), situation, event)
+    model_card = render_model_event_card(snapshot, _game(snapshot), situation, event)
+
+    assert full_card.startswith("【游戏模式】")
+    assert model_card.startswith("de_anubis CT 2:3 落后 连败2\n【刚刚】")
+    assert "焦点：普通死亡" in model_card
+    assert "场景标签：" in model_card
+    assert "回合时刻：89.8秒" in model_card
+    assert "【本回合历史】" not in model_card
+    assert "【我】" not in model_card
+    assert " > " not in model_card
+    assert " + " not in model_card
+    assert "｜" not in model_card
+
+
+def test_model_header_omits_zero_losses_and_missing_fields() -> None:
+    snapshot = _real_snapshot().model_copy(update={"map_name": None})
+    event = _event(snapshot).model_copy(
+        update={
+            "facts": {
+                "self_team": "CT",
+                "self_score": 4,
+                "opponent_score": 4,
+                "score_situation": "追平",
+                "team_consecutive_round_losses": 0,
+            }
+        }
+    )
+
+    model_card = render_model_event_card(snapshot, _game(snapshot), _situation(), event)
+
+    assert model_card.splitlines()[0] == "CT 4:4 追平"
+    assert "连败" not in model_card.splitlines()[0]
+
+
+def test_interrupted_smoke_observation_is_not_treated_as_smoke_exit() -> None:
+    snapshot = _real_snapshot()
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(8.0, "smoke_start", None),
+            TimelineEntry(9.0, "smoke_end", "观测中断 已确认持续0.5秒"),
+            TimelineEntry(9.5, "death", None),
+        ),
+        fire_seconds=(),
+        last_readable_held_ammo_at_seconds=9.5,
+    )
+
+    card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
+
+    assert "出烟就没了" not in card
+    assert "烟雾状态观测中断" in card
 
 
 def test_missing_fields_are_omitted_without_unknown_or_zero_substitution() -> None:

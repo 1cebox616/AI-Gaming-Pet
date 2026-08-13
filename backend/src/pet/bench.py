@@ -32,7 +32,7 @@ from pet.llm import (
 )
 from pet.prompt import PROMPTS_DIRECTORY, PromptPersonality, load_system_prompt
 from pet.replay import load_recording, replay_commentary
-from pet.event_card import render_event_card
+from pet.event_card import render_event_card, render_model_event_card
 
 TEMPERATURE = 0.9
 ANALYSIS_TEMPERATURE = 0.0
@@ -158,6 +158,7 @@ class BenchEvent:
     event: GameEvent
     category: CommentaryCategory
     event_card: str
+    model_card: str
     template_text: str
     attempt: BenchAttempt | None
 
@@ -227,6 +228,7 @@ class AnalysisBenchEvent:
     event: GameEvent
     category: CommentaryCategory
     event_card: str
+    model_card: str
     attempt: AnalysisAttempt
 
 
@@ -474,6 +476,15 @@ def run_bench(
                 configuration.events.death_after_kill_max_seconds
             ),
         )
+        model_card = render_model_event_card(
+            disposition.snapshot,
+            disposition.game,
+            disposition.round_situation,
+            event,
+            death_after_kill_max_seconds=(
+                configuration.events.death_after_kill_max_seconds
+            ),
+        )
         attempt = None
         if not cards_only:
             assert model is not None
@@ -483,7 +494,7 @@ def run_bench(
                 model=model,
                 provider=provider,
                 system_prompt=system_prompt,
-                event_card=card,
+                event_card=model_card,
                 max_chars=length_statistics.p90,
                 max_tokens=MAX_COMPLETION_TOKENS_BY_PERSONALITY[personality_style],
                 enforce_length_limit=personality_style != "inference",
@@ -494,6 +505,7 @@ def run_bench(
                 event=event,
                 category=commentary_category(event),
                 event_card=card,
+                model_card=model_card,
                 template_text=disposition.utterance.text,
                 attempt=attempt,
             )
@@ -664,6 +676,15 @@ def run_stream_analysis(
                     configuration.events.death_after_kill_max_seconds
                 ),
             )
+            model_card = render_model_event_card(
+                disposition.snapshot,
+                disposition.game,
+                disposition.round_situation,
+                event,
+                death_after_kill_max_seconds=(
+                    configuration.events.death_after_kill_max_seconds
+                ),
+            )
             case_id = (
                 recording_path.stem
                 if expected_type is not None
@@ -679,11 +700,12 @@ def run_stream_analysis(
                     event=event,
                     category=commentary_category(event),
                     event_card=card,
+                    model_card=model_card,
                     attempt=_attempt_stream_analysis(
                         model=model,
                         provider=provider,
                         system_prompt=system_prompt,
-                        event_card=card,
+                        event_card=model_card,
                         event_timeout_seconds=event_timeout_seconds,
                         full_timeout_seconds=full_timeout_seconds,
                         max_completion_tokens=max_completion_tokens,
@@ -878,7 +900,11 @@ def render_report(result: BenchResult) -> str:
                 f"### 事件 {index} —— {_EVENT_LABELS[event.type]}"
                 f"（{_CATEGORY_LABELS[item.category]}），{round_label}",
                 "",
-                "喂进去的 GSI 事件卡：",
+                "发给模型的精简事件卡：",
+                "",
+                *(f"    {line}" for line in item.model_card.splitlines()),
+                "",
+                "人工核对用完整 GSI 事件卡：",
                 "",
                 *(f"    {line}" for line in item.event_card.splitlines()),
                 "",
@@ -933,8 +959,11 @@ def render_stream_analysis_report(
     actual_providers = sorted(
         {item.provider for item in successful if item.provider is not None}
     )
-    card_digest = _sha256_text(
+    full_card_digest = _sha256_text(
         "\n\n".join(f"{item.case_id}\n{item.event_card}" for item in result.events)
+    )
+    model_card_digest = _sha256_text(
+        "\n\n".join(f"{item.case_id}\n{item.model_card}" for item in result.events)
     )
     lines = [
         "# GSI 事件卡流式事实评测报告",
@@ -964,7 +993,8 @@ def render_stream_analysis_report(
         f"- 推理强度：{result.reasoning_effort}",
         f"- 固定随机种子：{result.seed}",
         f"- 提示词 SHA-256：`{_sha256_text(result.system_prompt)}`",
-        f"- 事件卡集合 SHA-256：`{card_digest}`",
+        f"- 模型输入卡集合 SHA-256：`{model_card_digest}`",
+        f"- 完整核对卡集合 SHA-256：`{full_card_digest}`",
         f"- 运行时间：{result.run_timestamp.isoformat()}",
         "",
         "## 逐条结果",
@@ -980,7 +1010,11 @@ def render_stream_analysis_report(
                 f"- 类型：{_EVENT_LABELS[item.event.type]}（{_CATEGORY_LABELS[item.category]}）",
                 f"- 来源：`{item.recording_path}`",
                 "",
-                "GSI 事件卡：",
+                "发给模型的精简事件卡：",
+                "",
+                *(f"    {line}" for line in item.model_card.splitlines()),
+                "",
+                "人工核对用完整 GSI 事件卡：",
                 "",
                 *(f"    {line}" for line in item.event_card.splitlines()),
                 "",

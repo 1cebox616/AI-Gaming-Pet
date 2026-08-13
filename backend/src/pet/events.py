@@ -195,14 +195,15 @@ class EventDetector:
                 if self._live_started_at is not None
                 else None
             )
-            round_kills = current.round_kills if current.round_kills is not None else 0
+            round_kills = current.round_kills
             seconds_since_last_kill = _seconds_since_last_kill(
                 baseline,
                 current,
                 round_number,
             )
             death_after_kill = (
-                round_kills >= 1
+                round_kills is not None
+                and round_kills >= 1
                 and seconds_since_last_kill is not None
                 and seconds_since_last_kill
                 <= self._config.death_after_kill_max_seconds

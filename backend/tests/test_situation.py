@@ -217,7 +217,7 @@ def test_round_stage_is_unknown_without_live_origin_or_before_live() -> None:
     )
 
 
-def test_flash_count_tracks_zero_or_missing_to_positive_transitions() -> None:
+def test_flash_count_does_not_split_one_effect_across_a_missing_frame() -> None:
     result = _observe_all(
         (
             _snapshot(1.0, flashed=0),
@@ -228,7 +228,7 @@ def test_flash_count_tracks_zero_or_missing_to_positive_transitions() -> None:
         )
     )
 
-    assert result.flash_count == 2
+    assert result.flash_count == 1
 
 
 def test_effect_durations_close_normally_from_adjacent_timestamps() -> None:
@@ -298,7 +298,7 @@ def test_effect_durations_close_at_recording_end() -> None:
     assert result.smoked_seconds_total == 3.5
 
 
-def test_missing_effect_fields_neither_open_nor_extend_intervals() -> None:
+def test_missing_effect_fields_neither_split_nor_extend_intervals() -> None:
     result = _observe_all(
         (
             _snapshot(1.0, flashed=1, smoked=100),
@@ -308,7 +308,7 @@ def test_missing_effect_fields_neither_open_nor_extend_intervals() -> None:
         )
     )
 
-    assert result.flash_count == 2
+    assert result.flash_count == 1
     assert result.flashed_seconds_total == 2.0
     assert result.longest_flash_seconds == 2.0
     assert result.smoked_seconds_total == 2.0
@@ -802,6 +802,28 @@ def test_grenade_pickup_records_only_after_round_is_live() -> None:
     assert pickups == (TimelineEntry(1.0, "grenade_pickup", "捡到烟雾弹"),)
 
 
+def test_missing_weapon_inventory_breaks_grenade_change_baseline() -> None:
+    rifle_and_flash = (
+        ("weapon_ak47", "Rifle", "active"),
+        ("weapon_flashbang", "Grenade", "holstered"),
+    )
+    missing = _snapshot(12.0, round_phase="live").model_copy(
+        update={"weapons": None}
+    )
+    result = _observe_all(
+        (
+            _snapshot(11.0, round_phase="live", weapon_slots=rifle_and_flash),
+            missing,
+            _snapshot(13.0, round_phase="live", weapon_slots=rifle_and_flash[:1]),
+        )
+    )
+
+    assert all(
+        entry.kind not in {"grenade_used", "grenade_pickup"}
+        for entry in result.timeline
+    )
+
+
 def test_ammo_low_rearms_after_weapon_switch_and_reload() -> None:
     result = _observe_all(
         (
@@ -866,6 +888,31 @@ def test_reload_duration_uses_reloading_state_transitions() -> None:
     )
     assert interrupted_reloads == (
         TimelineEntry(2.0, "reload", "换弹 AK47 未完成 已持续1.0秒"),
+    )
+
+
+def test_missing_weapon_inventory_marks_reload_observation_interrupted() -> None:
+    missing = _snapshot(12.0).model_copy(update={"weapons": None})
+    result = _observe_all(
+        (
+            _snapshot(10.0, ammo_clip=3, ammo_reserve=60),
+            _snapshot(
+                11.0,
+                weapon_state="reloading",
+                ammo_clip=3,
+                ammo_reserve=60,
+            ),
+            missing,
+        )
+    )
+
+    reloads = tuple(entry for entry in result.timeline if entry.kind == "reload")
+    assert reloads == (
+        TimelineEntry(
+            2.0,
+            "reload",
+            "换弹 AK47 观测中断 已确认持续1.0秒",
+        ),
     )
 
 
@@ -1064,6 +1111,72 @@ def test_awp_miss_compares_inventory_clip_after_switching_away() -> None:
     )
     assert killed.awp_miss_count == 0
     assert all(entry.kind != "awp_miss" for entry in killed.timeline)
+
+
+def test_awp_kill_uses_observed_clip_drop_after_switching_to_knife() -> None:
+    first = _snapshot(10.0).model_copy(
+        update={
+            "weapons": (
+                WeaponSlot("weapon_awp", "SniperRifle", 3, 5, 0, "active"),
+                WeaponSlot("weapon_knife", "Knife", None, None, None, "holstered"),
+            )
+        }
+    )
+    kill = _snapshot(11.0, active_weapon="weapon_knife", round_kills=1).model_copy(
+        update={
+            "weapons": (
+                WeaponSlot("weapon_awp", "SniperRifle", 2, 5, 0, "holstered"),
+                WeaponSlot("weapon_knife", "Knife", None, None, None, "active"),
+            )
+        }
+    )
+
+    result = _observe_all((first, kill))
+    detail = next(entry.detail for entry in result.timeline if entry.kind == "kill")
+
+    assert detail is not None
+    assert detail.startswith("AWP ")
+    assert "knife" not in detail
+
+
+def test_awp_miss_waits_when_kill_counter_is_missing() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, active_weapon="weapon_awp", ammo_clip=3),
+            _snapshot(11.0, active_weapon="weapon_awp", ammo_clip=2),
+            _snapshot(
+                12.0,
+                active_weapon="weapon_awp",
+                ammo_clip=2,
+                round_kills=None,
+            ),
+            _snapshot(13.0, active_weapon="weapon_awp", ammo_clip=2, round_kills=1),
+        )
+    )
+
+    assert result.awp_miss_count == 0
+    assert all(entry.kind != "awp_miss" for entry in result.timeline)
+
+
+def test_missing_effect_field_records_observation_break_not_unfinished_fact() -> None:
+    result = _observe_all(
+        (
+            _snapshot(1.0, flashed=1, smoked=100, burning=50),
+            _snapshot(2.0, flashed=None, smoked=None, burning=None),
+            _snapshot(3.0, flashed=1, smoked=100, burning=50),
+            _snapshot(4.0, flashed=0, smoked=0, burning=0),
+        )
+    )
+
+    ended = tuple(
+        entry
+        for entry in result.timeline
+        if entry.kind in {"flash_end", "smoke_end", "burn_end"}
+    )
+    assert len(ended) == 3
+    assert all((entry.detail or "").startswith("观测中断") for entry in ended)
+    assert result.flash_count == 1
+    assert result.burn_count == 1
 
 
 def test_kill_ammo_count_accumulates_across_contiguous_clip_drops() -> None:

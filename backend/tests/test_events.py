@@ -273,6 +273,24 @@ def test_same_snapshot_trade_kill_is_classified_as_death_after_kill(
     assert events[1].subject_is_self is True
 
 
+def test_missing_round_kills_is_not_replaced_with_zero_on_death(
+    event_samples: dict[str, Any],
+) -> None:
+    snapshots = tuple(
+        snapshot.model_copy(update={"round_kills": None})
+        for snapshot in _snapshots(event_samples, "ordinary_death_with_trade_kill")
+    )
+
+    deaths = tuple(
+        event
+        for event in _detect(snapshots)
+        if event.type in {"death", "death_after_kill", "death_thrown_away"}
+    )
+
+    assert [event.type for event in deaths] == ["death"]
+    assert deaths[0].facts["round_kills"] is None
+
+
 def test_death_after_kill_uses_real_kill_interval_and_positive_classification(
     t7_samples: dict[str, Any],
 ) -> None:

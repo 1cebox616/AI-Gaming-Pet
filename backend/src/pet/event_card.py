@@ -160,6 +160,123 @@ def render_event_card(
     return "\n".join(section for section in sections if section is not None)
 
 
+def render_model_event_card(
+    snapshot: GameSnapshot,
+    game: GameState,
+    round_situation: RoundSituation,
+    event: GameEvent,
+    *,
+    death_after_kill_max_seconds: float = 8.0,
+) -> str:
+    """Render the compact header and sole current-event section sent to a model."""
+    current_round = human_round_number(snapshot)
+    focus_line: str | None = None
+    if round_situation.round_number == current_round:
+        event_self_team = event.facts.get("self_team")
+        self_team = round_situation.self_team or (
+            event_self_team if isinstance(event_self_team, str) else None
+        )
+        _, focus_line = _timeline_sections(
+            round_situation.timeline,
+            self_team=self_team,
+            death_after_kill_max_seconds=death_after_kill_max_seconds,
+            event=event,
+            snapshot=snapshot,
+            round_situation=round_situation,
+        )
+    if focus_line is None:
+        focus_line = "  " + " ".join(_event_facts(event))
+
+    header = _model_header(snapshot, event)
+    state_tags = _round_state_tags(snapshot, round_situation, game)
+    direct_focus = _direct_focus_section(focus_line, event, state_tags=state_tags)
+    return "\n".join(part for part in (header, direct_focus) if part)
+
+
+def _model_header(snapshot: GameSnapshot, event: GameEvent) -> str:
+    """Render the product-approved one-line static match context."""
+    parts: list[str] = []
+    if snapshot.map_name is not None:
+        parts.append(snapshot.map_name)
+    self_team = event.facts.get("self_team")
+    if self_team in {"CT", "T"}:
+        parts.append(str(self_team))
+    self_score = event.facts.get("self_score")
+    opponent_score = event.facts.get("opponent_score")
+    if isinstance(self_score, int) and isinstance(opponent_score, int):
+        parts.append(f"{self_score}:{opponent_score}")
+    score_situation = event.facts.get("score_situation")
+    if isinstance(score_situation, str) and score_situation:
+        parts.append(score_situation)
+    losses = event.facts.get("team_consecutive_round_losses")
+    if isinstance(losses, int) and losses > 0:
+        parts.append(f"连败{losses}")
+    return " ".join(parts)
+
+
+_FOCUS_LINE_PATTERN = re.compile(
+    r"^\s*(?:(?P<seconds>-?\d+(?:\.\d+)?)s)?"
+    r"(?P<marker>【[^】]+】)?\s*(?P<expression>.*)$"
+)
+
+
+def _direct_focus_section(
+    focus_line: str,
+    event: GameEvent,
+    *,
+    state_tags: tuple[str, ...],
+) -> str:
+    """Turn the lossless timeline expression into model-readable Chinese prose."""
+    match = _FOCUS_LINE_PATTERN.fullmatch(focus_line.strip())
+    if match is None:
+        return f"【刚刚】\n焦点：{_EVENT_LABELS[event.type]}\n经过：{focus_line.strip()}"
+
+    marker = match.group("marker") or ""
+    marker_facts = tuple(
+        fact
+        for fact in marker.removeprefix("【").removesuffix("】").split("｜")
+        if fact
+    )
+    duration = next(
+        (
+            fact.removeprefix("连续事件").removesuffix("秒")
+            for fact in marker_facts
+            if fact.startswith("连续事件")
+        ),
+        None,
+    )
+    stage = next(
+        (fact for fact in marker_facts if not fact.startswith("连续事件")),
+        None,
+    )
+    expression = match.group("expression").strip()
+    expression = re.sub(r"本次焦点：[^｜）]+(?:｜)?", "", expression)
+    expression = expression.replace("（）", "")
+    expression = expression.replace(" > ", "，随后")
+    expression = expression.replace(" + ", "；同一快照还观察到")
+    expression = expression.replace("｜", "、")
+
+    scene_tags = [label for label in sorted(SCENE_TAGS) if label in focus_line]
+    scene_tags.extend(label for label in state_tags if label not in scene_tags)
+
+    context: list[str] = []
+    if stage is not None:
+        context.append(f"阶段：{stage}")
+    seconds = match.group("seconds")
+    if seconds is not None:
+        context.append(f"回合时刻：{float(seconds):.1f}秒")
+    if duration is not None:
+        context.append(f"连续事件跨度：{float(duration):.1f}秒")
+
+    lines = ["【刚刚】", f"焦点：{_EVENT_LABELS[event.type]}"]
+    if scene_tags:
+        lines.append(f"场景标签：{'、'.join(scene_tags)}")
+    if context:
+        lines.append("；".join(context))
+    lines.append(f"经过：{expression}")
+    return "\n".join(lines)
+
+
 def _grenade_summary(grenades_used: tuple[tuple[str, int], ...]) -> str | None:
     counts: Counter[str] = Counter()
     for name, count in grenades_used:
@@ -398,7 +515,9 @@ def _timeline_sections(
             )
             if damage_gap is not None:
                 annotations.append(f"{_scene('对枪胜利')}，间隔{_seconds(damage_gap)}秒")
-            smoke_gap = _previous_entry_gap(entries, index, kind="smoke_end")
+            smoke_gap = _previous_completed_effect_gap(
+                entries, index, kind="smoke_end"
+            )
             if smoke_gap is not None and smoke_gap <= _NEARBY_COMBAT_SECONDS:
                 annotations.append(f"{_scene('摸烟击杀')}，出烟后{_seconds(smoke_gap)}秒")
             annotations.extend(
@@ -481,6 +600,8 @@ def _round_state_tags(
         and round_situation.lowest_health_while_alive <= RESIDUAL_KILL_HEALTH
     ):
         tags.append(_scene("血皮撑住了"))
+    if round_situation.awp_miss_count >= 1:
+        tags.append(_scene("大狙空枪"))
     if round_situation.awp_miss_count >= 2:
         tags.append(_scene("连续空枪"))
     return tuple(tags)
@@ -528,7 +649,9 @@ def _action_scene_tags(
     elif entry.kind == "death":
         if _interval_active_at(entries, index, "flash_start", "flash_end"):
             tags.append(_scene("白着被打死"))
-        smoke_gap = _previous_entry_gap(entries, index, kind="smoke_end")
+        smoke_gap = _previous_completed_effect_gap(
+            entries, index, kind="smoke_end"
+        )
         if smoke_gap is not None and 0 <= smoke_gap <= SMOKE_DEATH_WINDOW_SECONDS:
             tags.append(_scene("出烟就没了"))
         if event.type in {"death", "death_after_kill", "death_thrown_away"}:
@@ -1691,6 +1814,25 @@ def _previous_entry_gap(
     return current_seconds - previous.seconds if previous is not None else None
 
 
+def _previous_completed_effect_gap(
+    entries: tuple[TimelineEntry, ...], index: int, *, kind: str
+) -> float | None:
+    """Return a gap only from an observed effect end, never a missing-data marker."""
+    current_seconds = entries[index].seconds
+    previous = next(
+        (
+            entry
+            for entry in reversed(entries[:index])
+            if entry.kind == kind
+            and entry.seconds <= current_seconds
+            and not (entry.detail or "").startswith("观测中断 ")
+            and not (entry.detail or "").startswith("未结束 ")
+        ),
+        None,
+    )
+    return current_seconds - previous.seconds if previous is not None else None
+
+
 def _timeline_entry_text(
     entry: TimelineEntry,
     *,
@@ -1705,18 +1847,24 @@ def _timeline_entry_text(
     if entry.kind == "flash_start":
         return "玩家被闪"
     if entry.kind == "flash_end":
+        if detail is not None and detail.startswith("观测中断"):
+            return "玩家闪光状态" + detail
         if detail is not None and detail.startswith("未结束 "):
             return "玩家受闪光影响" + detail
         return "玩家闪光影响结束" + (f" {detail}" if detail else "")
     if entry.kind == "smoke_start":
         return "玩家进烟"
     if entry.kind == "smoke_end":
+        if detail is not None and detail.startswith("观测中断"):
+            return "玩家烟雾状态" + detail
         if detail is not None and detail.startswith("未结束 "):
             return "玩家仍在烟中 " + detail.removeprefix("未结束 ")
         return "玩家出烟" + (f" {detail}" if detail else "")
     if entry.kind == "burn_start":
         return "玩家开始燃烧"
     if entry.kind == "burn_end":
+        if detail is not None and detail.startswith("观测中断"):
+            return "玩家燃烧状态" + detail
         if detail is not None and detail.startswith("未结束 "):
             return "玩家仍在燃烧 " + detail.removeprefix("未结束 ")
         return "玩家燃烧结束" + (f" {detail}" if detail else "")

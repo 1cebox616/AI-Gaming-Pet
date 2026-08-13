@@ -294,8 +294,19 @@ class SituationTracker:
         round_kills_increase = _positive_increase(
             self._previous_round_kills, snapshot.round_kills
         )
-        ammo_detail, ammo_drop, awp_miss, fired_weapons = self._observe_ammo(
-            snapshot, kill_count=round_kills_increase
+        (
+            ammo_detail,
+            ammo_drop,
+            observed_firing_weapon,
+            awp_miss,
+            fired_weapons,
+        ) = self._observe_ammo(
+            snapshot,
+            kill_count=round_kills_increase,
+            kill_count_known=(
+                self._previous_round_kills is not None
+                and snapshot.round_kills is not None
+            ),
         )
         fire_seconds = self._current.fire_seconds + (relative_seconds,) * len(
             fired_weapons
@@ -348,7 +359,7 @@ class SituationTracker:
                     relative_seconds,
                     flash_transition,
                     (
-                        _unfinished_duration_detail(flash_duration)
+                        _interrupted_duration_detail(flash_duration)
                         if flash_interrupted
                         else _duration_detail(flash_duration)
                     )
@@ -370,7 +381,7 @@ class SituationTracker:
                     relative_seconds,
                     smoke_transition,
                     (
-                        _unfinished_duration_detail(smoke_duration)
+                        _interrupted_duration_detail(smoke_duration)
                         if smoke_interrupted
                         else _duration_detail(smoke_duration)
                     )
@@ -396,7 +407,7 @@ class SituationTracker:
                     relative_seconds,
                     burn_transition,
                     (
-                        _unfinished_duration_detail(burn_duration)
+                        _interrupted_duration_detail(burn_duration)
                         if burn_interrupted
                         else _duration_detail(burn_duration)
                     )
@@ -419,6 +430,7 @@ class SituationTracker:
                         kill_count=round_kills_increase,
                         headshot_count=round_headshots_increase,
                         ammo_drop=ammo_drop,
+                        observed_firing_weapon=observed_firing_weapon,
                     ),
                 ),
             )
@@ -574,7 +586,8 @@ class SituationTracker:
             self._last_nonzero_health = snapshot.health
         self._previous_money = snapshot.money
         self._previous_equip_value = snapshot.equip_value
-        self._previous_round_kills = snapshot.round_kills
+        if snapshot.round_kills is not None:
+            self._previous_round_kills = snapshot.round_kills
         self._previous_burning = snapshot.burning
         self._previous_round_killhs = snapshot.round_killhs
         self._previous_match_assists = snapshot.match_assists
@@ -697,10 +710,16 @@ class SituationTracker:
     def _reset_baselines(self) -> None:
         self._flash_active = False
         self._active_flash_seconds = 0.0
+        self._flash_observation_missing = False
+        self._flash_interval_interrupted = False
         self._smoke_active = False
         self._active_smoke_seconds = 0.0
+        self._smoke_observation_missing = False
+        self._smoke_interval_interrupted = False
         self._burn_active = False
         self._active_burn_seconds = 0.0
+        self._burn_observation_missing = False
+        self._burn_interval_interrupted = False
         self._previous_health: int | None = None
         self._last_nonzero_health: int | None = None
         self._previous_money: int | None = None
@@ -759,25 +778,28 @@ class SituationTracker:
         interrupted = False
         if self._flash_active:
             if snapshot.flashed is None:
-                transition = "flash_end"
-                duration = self._active_flash_seconds
-                interrupted = True
-                self._flash_active = False
-                self._active_flash_seconds = 0.0
+                self._flash_observation_missing = True
+                self._flash_interval_interrupted = True
             else:
-                elapsed = self._elapsed_since_last_self(snapshot.ts)
-                total += elapsed
-                self._active_flash_seconds += elapsed
+                if not self._flash_observation_missing:
+                    elapsed = self._elapsed_since_last_self(snapshot.ts)
+                    total += elapsed
+                    self._active_flash_seconds += elapsed
                 longest = max(longest, self._active_flash_seconds)
                 if snapshot.flashed <= 0:
                     transition = "flash_end"
                     duration = self._active_flash_seconds
+                    interrupted = self._flash_interval_interrupted
                     self._flash_active = False
                     self._active_flash_seconds = 0.0
+                    self._flash_interval_interrupted = False
+                self._flash_observation_missing = False
         elif snapshot.flashed is not None and snapshot.flashed > 0:
             count += 1
             self._flash_active = True
             self._active_flash_seconds = 0.0
+            self._flash_observation_missing = False
+            self._flash_interval_interrupted = False
             transition = "flash_start"
         return count, total, longest, transition, duration, interrupted
 
@@ -795,23 +817,26 @@ class SituationTracker:
         interrupted = False
         if self._smoke_active:
             if snapshot.smoked is None:
-                transition = "smoke_end"
-                duration = self._active_smoke_seconds
-                interrupted = True
-                self._smoke_active = False
-                self._active_smoke_seconds = 0.0
+                self._smoke_observation_missing = True
+                self._smoke_interval_interrupted = True
             else:
-                elapsed = self._elapsed_since_last_self(snapshot.ts)
-                total += elapsed
-                self._active_smoke_seconds += elapsed
+                if not self._smoke_observation_missing:
+                    elapsed = self._elapsed_since_last_self(snapshot.ts)
+                    total += elapsed
+                    self._active_smoke_seconds += elapsed
                 if snapshot.smoked <= 0:
                     transition = "smoke_end"
                     duration = self._active_smoke_seconds
+                    interrupted = self._smoke_interval_interrupted
                     self._smoke_active = False
                     self._active_smoke_seconds = 0.0
+                    self._smoke_interval_interrupted = False
+                self._smoke_observation_missing = False
         elif snapshot.smoked is not None and snapshot.smoked > 0:
             self._smoke_active = True
             self._active_smoke_seconds = 0.0
+            self._smoke_observation_missing = False
+            self._smoke_interval_interrupted = False
             transition = "smoke_start"
         return total, transition, duration, interrupted
 
@@ -829,22 +854,27 @@ class SituationTracker:
         interrupted = False
         if self._burn_active:
             if snapshot.burning is None:
-                transition = "burn_end"
-                duration = self._active_burn_seconds
-                interrupted = True
-                self._burn_active = False
-                self._active_burn_seconds = 0.0
+                self._burn_observation_missing = True
+                self._burn_interval_interrupted = True
             else:
-                self._active_burn_seconds += self._elapsed_since_last_self(snapshot.ts)
+                if not self._burn_observation_missing:
+                    self._active_burn_seconds += self._elapsed_since_last_self(
+                        snapshot.ts
+                    )
                 if snapshot.burning <= 0:
                     transition = "burn_end"
                     duration = self._active_burn_seconds
+                    interrupted = self._burn_interval_interrupted
                     self._burn_active = False
                     self._active_burn_seconds = 0.0
+                    self._burn_interval_interrupted = False
+                self._burn_observation_missing = False
         elif snapshot.burning is not None and snapshot.burning > 0:
             count += 1
             self._burn_active = True
             self._active_burn_seconds = 0.0
+            self._burn_observation_missing = False
+            self._burn_interval_interrupted = False
             transition = "burn_start"
         return count, transition, duration, interrupted
 
@@ -870,6 +900,7 @@ class SituationTracker:
         self, snapshot: GameSnapshot
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if snapshot.weapons is None:
+            self._previous_grenades = None
             return (), ()
         current = Counter(
             weapon.name for weapon in snapshot.weapons if weapon.type == "Grenade"
@@ -889,8 +920,12 @@ class SituationTracker:
         return tuple(used), tuple(picked_up)
 
     def _observe_ammo(
-        self, snapshot: GameSnapshot, *, kill_count: int
-    ) -> tuple[str | None, int | None, bool, tuple[str, ...]]:
+        self,
+        snapshot: GameSnapshot,
+        *,
+        kill_count: int,
+        kill_count_known: bool,
+    ) -> tuple[str | None, int | None, str | None, bool, tuple[str, ...]]:
         weapon = _operated_weapon(snapshot)
         detail: str | None = None
         ammo_drop: int | None = None
@@ -909,6 +944,23 @@ class SituationTracker:
             )
         )
 
+        delayed_firing_weapons = tuple(
+            name
+            for name, run_start in self._ammo_run_start.items()
+            if name in current_ammo and current_ammo[name] < run_start
+        )
+        firing_candidates = fired_weapons or delayed_firing_weapons
+        observed_firing_weapon = (
+            firing_candidates[0] if len(firing_candidates) == 1 else None
+        )
+        if observed_firing_weapon is not None:
+            current_clip = current_ammo[observed_firing_weapon]
+            previous_clip = self._previous_weapon_ammo.get(observed_firing_weapon)
+            run_start = self._ammo_run_start.get(observed_firing_weapon)
+            start = run_start if run_start is not None else previous_clip
+            if start is not None and current_clip < start:
+                ammo_drop = start - current_clip
+
         # AWP misses use the weapon inventory rather than _operated_weapon().
         # This keeps the observation valid when the player has already swapped
         # to a sidearm at the frame carrying the AWP's decreased clip count.
@@ -918,18 +970,23 @@ class SituationTracker:
             previous_awp_ammo is not None
             and current_awp_ammo is not None
             and current_awp_ammo < previous_awp_ammo
-            and kill_count == 0
+            and (not kill_count_known or kill_count == 0)
         )
-        awp_miss = self._pending_awp_miss and kill_count == 0
-        self._pending_awp_miss = awp_shot_without_same_frame_kill
+        awp_miss = (
+            self._pending_awp_miss and kill_count_known and kill_count == 0
+        )
+        unresolved_pending = self._pending_awp_miss and not kill_count_known
+        self._pending_awp_miss = (
+            unresolved_pending or awp_shot_without_same_frame_kill
+        )
 
         if weapon is not None and weapon.ammo_clip is not None:
             previous_ammo = self._previous_weapon_ammo.get(weapon.name)
             run_start = self._ammo_run_start.get(weapon.name)
-            if previous_ammo is not None and weapon.ammo_clip < previous_ammo:
+            if ammo_drop is None and previous_ammo is not None and weapon.ammo_clip < previous_ammo:
                 start = run_start if run_start is not None else previous_ammo
                 ammo_drop = start - weapon.ammo_clip
-            elif run_start is not None and weapon.ammo_clip < run_start:
+            elif ammo_drop is None and run_start is not None and weapon.ammo_clip < run_start:
                 # GSI can report the final hit (round_kills) one frame after the
                 # last visible bullet decrement; keep that decrement attached.
                 ammo_drop = run_start - weapon.ammo_clip
@@ -977,13 +1034,32 @@ class SituationTracker:
             if name in current_ammo
         }
         self._previous_weapon_ammo = current_ammo
-        return detail, ammo_drop, awp_miss, fired_weapons
+        return detail, ammo_drop, observed_firing_weapon, awp_miss, fired_weapons
 
     def _observe_reload(
         self,
         snapshot: GameSnapshot,
         relative_seconds: float,
     ) -> tuple[str, ...]:
+        if snapshot.weapons is None:
+            details: list[str] = []
+            if (
+                self._reload_weapon_name is not None
+                and self._reload_started_at_seconds is not None
+            ):
+                duration = max(
+                    0.0,
+                    relative_seconds - self._reload_started_at_seconds,
+                )
+                label = weapon_display_name(self._reload_weapon_name)
+                details.append(
+                    f"换弹 {label} 观测中断 已确认持续{duration:.1f}秒"
+                )
+            self._reload_weapon_name = None
+            self._reload_started_at_seconds = None
+            self._previous_weapon_states = None
+            return tuple(details)
+
         current_states = {
             weapon.name: weapon.state for weapon in snapshot.weapons or ()
         }
@@ -996,6 +1072,25 @@ class SituationTracker:
             None,
         )
         details: list[str] = []
+
+        if (
+            self._reload_weapon_name is not None
+            and self._reload_started_at_seconds is not None
+            and self._reload_weapon_name in current_states
+            and current_states[self._reload_weapon_name] is None
+        ):
+            duration = max(
+                0.0,
+                relative_seconds - self._reload_started_at_seconds,
+            )
+            label = weapon_display_name(self._reload_weapon_name)
+            details.append(
+                f"换弹 {label} 观测中断 已确认持续{duration:.1f}秒"
+            )
+            self._reload_weapon_name = None
+            self._reload_started_at_seconds = None
+            self._previous_weapon_states = None
+            return tuple(details)
 
         if self._reload_weapon_name is not None and (
             reloading is None or reloading.name != self._reload_weapon_name
@@ -1044,6 +1139,7 @@ class SituationTracker:
         if self._last_self_ts is None:
             return 0.0
         return max(0.0, ts - self._last_self_ts)
+
     def _close_effect_intervals(
         self,
         *,
@@ -1062,7 +1158,11 @@ class SituationTracker:
                 TimelineEntry(
                     seconds,
                     "flash_end",
-                    f"未结束 已持续{self._active_flash_seconds:.1f}秒",
+                    (
+                        f"观测中断 已确认持续{self._active_flash_seconds:.1f}秒"
+                        if self._flash_interval_interrupted
+                        else f"未结束 已持续{self._active_flash_seconds:.1f}秒"
+                    ),
                 ),
             )
         if self._smoke_active:
@@ -1071,7 +1171,11 @@ class SituationTracker:
                 TimelineEntry(
                     seconds,
                     "smoke_end",
-                    f"未结束 已持续{self._active_smoke_seconds:.1f}秒",
+                    (
+                        f"观测中断 已确认持续{self._active_smoke_seconds:.1f}秒"
+                        if self._smoke_interval_interrupted
+                        else f"未结束 已持续{self._active_smoke_seconds:.1f}秒"
+                    ),
                 ),
             )
         if self._burn_active:
@@ -1080,15 +1184,25 @@ class SituationTracker:
                 TimelineEntry(
                     seconds,
                     "burn_end",
-                    f"未结束 已持续{self._active_burn_seconds:.1f}秒",
+                    (
+                        f"观测中断 已确认持续{self._active_burn_seconds:.1f}秒"
+                        if self._burn_interval_interrupted
+                        else f"未结束 已持续{self._active_burn_seconds:.1f}秒"
+                    ),
                 ),
             )
         self._flash_active = False
         self._active_flash_seconds = 0.0
+        self._flash_observation_missing = False
+        self._flash_interval_interrupted = False
         self._smoke_active = False
         self._active_smoke_seconds = 0.0
+        self._smoke_observation_missing = False
+        self._smoke_interval_interrupted = False
         self._burn_active = False
         self._active_burn_seconds = 0.0
+        self._burn_observation_missing = False
+        self._burn_interval_interrupted = False
         if timeline is None:
             self._current = replace(self._current, timeline=tuple(result))
         return result
@@ -1131,9 +1245,12 @@ def _kill_detail(
     kill_count: int,
     headshot_count: int,
     ammo_drop: int | None = None,
+    observed_firing_weapon: str | None = None,
 ) -> str | None:
     weapon = held_weapon(snapshot)
-    weapon_name = weapon.name if weapon is not None else snapshot.active_weapon
+    weapon_name = observed_firing_weapon or (
+        weapon.name if weapon is not None else snapshot.active_weapon
+    )
     details: list[str] = []
     if weapon_name is not None:
         details.append(weapon_display_name(weapon_name))
@@ -1164,8 +1281,12 @@ def _duration_detail(duration: float | None) -> str | None:
     return f"持续{duration:.1f}秒" if duration is not None else None
 
 
-def _unfinished_duration_detail(duration: float | None) -> str | None:
-    return f"未结束 已持续{duration:.1f}秒" if duration is not None else None
+def _interrupted_duration_detail(duration: float | None) -> str | None:
+    return (
+        f"观测中断 已确认持续{duration:.1f}秒"
+        if duration is not None
+        else "观测中断"
+    )
 
 
 def _bomb_detail(state: str) -> str:

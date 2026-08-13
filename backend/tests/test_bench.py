@@ -192,7 +192,7 @@ def prompts_directory(tmp_path: Path) -> Path:
 def test_external_prompt_joins_reading_then_personality_and_replaces_limit() -> None:
     prompt = load_system_prompt("brother", max_chars=19)
 
-    assert prompt.startswith("你会收到一份 CS2 的 GSI 事件卡")
+    assert prompt.startswith("你会收到一份精简的 CS2 GSI 事件卡")
     assert prompt.index("## 卡片结构") < prompt.index("你是观战朋友打 CS2")
     assert "最多包含 19 个汉字" in prompt
     assert "没有提供的信息不要推断，更不要编造" in prompt
@@ -306,7 +306,10 @@ def test_report_prints_exact_full_event_card_and_single_attempt(
     assert provider == "provider-under-test"
     assert system_prompt.startswith("共享读卡指南\n\n外置解说提示词")
     assert max_tokens == 96
-    assert user_prompt == result.events[0].event_card
+    assert user_prompt == result.events[0].model_card
+    assert "【本回合历史】" not in user_prompt
+    for card_line in result.events[0].event_card.splitlines():
+        assert f"    {card_line}" in report
     for card_line in user_prompt.splitlines():
         assert f"    {card_line}" in report
     assert "模板句：" in report
@@ -473,7 +476,7 @@ def test_stream_analysis_uses_strict_protocol_settings_and_split_metrics(
     ) = client.calls[0]
     assert provider == "provider-under-test"
     assert prompt == "共享读卡指南\n\n只复述事实，不限制字数"
-    assert card == result.events[0].event_card
+    assert card == result.events[0].model_card
     assert max_tokens == 128
     assert temperature == pytest.approx(0.0)
     assert ANALYSIS_MAX_EVENT_CHARS == 30
@@ -487,7 +490,8 @@ def test_stream_analysis_uses_strict_protocol_settings_and_split_metrics(
     assert "事件延迟：P50 0.400s" in report
     assert "完整延迟：P50 0.800s" in report
     assert "提示词 SHA-256" in report
-    assert "事件卡集合 SHA-256" in report
+    assert "模型输入卡集合 SHA-256" in report
+    assert "完整核对卡集合 SHA-256" in report
     assert "固定随机种子：43" in report
     assert "提示词：只响应【刚刚】事件或连续事件" in report
     assert "否定总结 ✓" in report
@@ -867,10 +871,11 @@ def test_analysis_prompt_is_loaded_from_the_product_owned_files() -> None:
 
     assert "【事件必答】" not in prompt
     assert "只对事件卡最末的【刚刚】区域作出反应" in prompt
-    assert "【本回合历史】明确禁止回应" in prompt
+    assert "事件行只能使用【刚刚】" in prompt
+    assert "第一行抬头只可给场面行" in prompt
     assert "也不得补充、累计或总结" in prompt
-    assert "场面行可引用【比分】" in prompt
-    assert "不得补三杀" in prompt
+    assert "提供地图、阵营、比分、局势与连败背景" in prompt
+    assert "卡上没有出现的动作" in prompt
 
 
 def test_universal_forbidden_hit_forces_whole_sentence_wrong() -> None:
