@@ -63,6 +63,7 @@ _ZERO_SIGNAL_EVENT_FACTS = {
     "round_kills",
 }
 _STAGE_ANNOTATED_TIMELINE_KINDS = frozenset({"kill", "death"})
+_CARD_HIDDEN_TIMELINE_KINDS = frozenset({"reload"})
 _NEARBY_COMBAT_SECONDS = 1.0
 _REQUIRED_FACT_CHAR_BUDGET = 30
 _DROPPED_REQUIRED_PREFIX = "因字数丢弃："
@@ -80,7 +81,6 @@ _CONTINUOUS_EVENT_KINDS = frozenset(
         "damage",
         "primary_weapon",
         "ammo_low",
-        "reload",
         "grenade_used",
         "bomb",
         "bomb_pickup",
@@ -471,6 +471,9 @@ def _timeline_sections(
     snapshot: GameSnapshot,
     round_situation: RoundSituation,
 ) -> tuple[str | None, str | None]:
+    entries = tuple(
+        entry for entry in entries if entry.kind not in _CARD_HIDDEN_TIMELINE_KINDS
+    )
     if not entries:
         return None, None
     observed_live = any(entry.kind == "round_live" for entry in entries)
@@ -1173,9 +1176,6 @@ def _focused_rare_facts(
         return ammo_after_kills[:1]
     if smoke:
         return smoke[:1]
-    reload_facts = matching("换弹完成")
-    if reload_facts:
-        return reload_facts[:1]
     planted = matching("炸弹已安放")
     if planted:
         return planted[:1]
@@ -1232,9 +1232,6 @@ def _rare_required_facts(
                 )
             if _effect_active_at(entries, index, "burn_start", "burn_end"):
                 facts.append(f"{stage}、燃烧期间完成{kill_label}")
-            reload_gap = _previous_entry_gap(entries, index, kind="reload")
-            if reload_gap is not None and reload_gap <= _CONTINUOUS_EVENT_MAX_SECONDS:
-                facts.append(f"换弹完成后{_seconds(reload_gap)}秒完成{kill_label}")
             ammo = _previous_detail(entries, index, kind="ammo_low")
             if ammo is not None:
                 facts.append(f"{ammo}时完成{kill_label}")
@@ -1414,7 +1411,7 @@ def _rare_fact_priority(fact: str) -> int:
         )
     ):
         return 0
-    if any(term in fact for term in ("炸弹", "下包", "换弹")):
+    if any(term in fact for term in ("炸弹", "下包")):
         return 1
     if "换枪" in fact:
         return 2
@@ -1879,7 +1876,7 @@ def _timeline_entry_text(
         if detail is not None and detail.startswith("换枪 "):
             return "玩家" + detail
         return "玩家主武器" + (f" {detail}" if detail else "")
-    if entry.kind in {"ammo_low", "reload", "grenade_used", "grenade_pickup"}:
+    if entry.kind in {"ammo_low", "grenade_used", "grenade_pickup"}:
         return "玩家" + (detail or "状态变化")
     if entry.kind == "awp_miss":
         return "玩家" + (detail or _scene("大狙空枪"))

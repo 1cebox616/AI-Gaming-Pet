@@ -505,7 +505,7 @@ def test_spectating_keeps_match_round_timeline_and_self_team_but_not_player_data
     assert "99个爆头击杀" not in card
 
 
-def test_existing_timeline_kinds_render_the_declared_text() -> None:
+def test_existing_timeline_kinds_render_declared_text_except_hidden_reload() -> None:
     entries = (
         TimelineEntry(-2.0, "bought", None),
         TimelineEntry(0.0, "round_live", None),
@@ -546,7 +546,6 @@ def test_existing_timeline_kinds_render_the_declared_text() -> None:
         "30.0s 玩家掉了35血 剩65血",
         "35.0s 玩家换枪 AK47",
         "40.0s 玩家弹匣仅剩1发 AK47",
-        "45.0s 玩家换弹 AK47",
         "50.0s 玩家扔了闪光弹",
         "55.0s 玩家捡到烟雾弹",
         "60.0s 炸弹已安放",
@@ -557,6 +556,7 @@ def test_existing_timeline_kinds_render_the_declared_text() -> None:
         "玩家阵亡（本次焦点：普通死亡｜本回合1杀）",
     )
     assert all(text in card for text in expected)
+    assert "换弹" not in card
 
 
 def test_round_result_is_rendered_only_in_the_separate_focus_section() -> None:
@@ -1005,7 +1005,7 @@ def test_existing_death_tags_remain_when_combat_tags_also_apply(
     assert "对枪输了" in focus
 
 
-def test_rare_context_remains_only_in_the_timeline() -> None:
+def test_reload_detection_is_hidden_from_full_and_model_cards() -> None:
     snapshot = _real_snapshot()
     entries = (
         TimelineEntry(0.0, "round_live", None),
@@ -1017,16 +1017,25 @@ def test_rare_context_remains_only_in_the_timeline() -> None:
         TimelineEntry(22.0, "flash_end", "持续2.0秒"),
     )
 
+    situation = replace(_situation(), flash_count=1, timeline=entries)
+    event = _event(snapshot).model_copy(update={"type": "kill"})
     card = render_event_card(
         snapshot,
         _game(snapshot),
-        replace(_situation(), flash_count=1, timeline=entries),
-        _event(snapshot).model_copy(update={"type": "kill"}),
+        situation,
+        event,
+    )
+    model_card = render_model_event_card(
+        snapshot,
+        _game(snapshot),
+        situation,
+        event,
     )
 
     assert "【事件必答】" not in card
     assert "玩家被闪" in card
-    assert "换弹 AK47" in card
+    assert "换弹" not in card
+    assert "换弹" not in model_card
     assert "弹匣仅剩1发 AK47" in card
     assert "本次焦点：普通击杀" in card
 
