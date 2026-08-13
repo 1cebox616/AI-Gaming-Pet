@@ -36,6 +36,9 @@ _STATIC_PRIORITIES: dict[EventType, int] = {
     "multi_kill": 0,
 }
 _MULTI_KILL_PRIORITIES = {2: 50, 3: 80, 4: 90, 5: 100}
+# Round results remain detectable facts, but their speech slot is reserved for
+# the later OCR-backed long-memory layer.
+_NON_SPEECH_EVENT_TYPES = frozenset({"round_win", "round_loss"})
 
 
 class PolicyDecision(BaseModel):
@@ -166,7 +169,7 @@ class SpeechPolicy:
     ) -> PolicyDecision | None:
         if not event.subject_is_self:
             return _rejected(event, priority, "teammate_event")
-        if event.type in {"round_win", "round_loss"}:
+        if event.type in _NON_SPEECH_EVENT_TYPES:
             return _rejected(event, priority, "round_event")
         if muted:
             return _rejected(event, priority, "muted")
