@@ -836,6 +836,115 @@ def test_death_focus_omits_grenade_to_avoid_guessing_damage_source() -> None:
     assert "扔了手雷" not in focus
 
 
+def test_death_focus_labels_an_observed_lost_duel_and_empty_magazine() -> None:
+    snapshot = _real_snapshot().model_copy(
+        update={
+            "health": 0,
+            "weapons": (
+                WeaponSlot("weapon_ak47", "Rifle", 0, 30, 60, "active"),
+            ),
+        }
+    )
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(18.5, "damage", "掉了55血 剩0血"),
+            TimelineEntry(20.0, "death", None),
+        ),
+        fire_seconds=(18.0,),
+        last_readable_held_ammo_at_seconds=20.0,
+        weapons_fired_this_round=frozenset({"weapon_ak47"}),
+    )
+
+    card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
+    focus = card.split("【刚刚】", 1)[1]
+
+    assert "对枪输了" in focus
+    assert "打空了还是没打过" in focus
+    assert "一枪没开就没了" not in focus
+
+
+def test_death_focus_labels_no_shot_only_with_readable_ammunition() -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 0})
+    entries = (TimelineEntry(0.0, "round_live", None), TimelineEntry(20.0, "death", None))
+    readable = replace(
+        _situation(),
+        timeline=entries,
+        fire_seconds=(),
+        last_readable_held_ammo_at_seconds=19.5,
+    )
+    unreadable = replace(readable, last_readable_held_ammo_at_seconds=None)
+
+    readable_card = render_event_card(
+        snapshot, _game(snapshot), readable, _event(snapshot)
+    )
+    unreadable_card = render_event_card(
+        snapshot, _game(snapshot), unreadable, _event(snapshot)
+    )
+
+    assert "一枪没开就没了" in readable_card
+    assert "一枪没开就没了" not in unreadable_card
+
+
+def test_death_focus_does_not_call_blind_fire_a_duel_or_no_shot() -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 0})
+    situation = replace(
+        _situation(),
+        timeline=(TimelineEntry(0.0, "round_live", None), TimelineEntry(20.0, "death", None)),
+        fire_seconds=(19.0,),
+        last_readable_held_ammo_at_seconds=20.0,
+    )
+
+    card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
+
+    assert "对枪输了" not in card
+    assert "一枪没开就没了" not in card
+
+
+def test_empty_magazine_death_requires_that_weapon_to_have_fired_this_round() -> None:
+    snapshot = _real_snapshot().model_copy(
+        update={
+            "health": 0,
+            "weapons": (WeaponSlot("weapon_ak47", "Rifle", 0, 30, 60, "active"),),
+        }
+    )
+    situation = replace(
+        _situation(),
+        timeline=(TimelineEntry(20.0, "death", None),),
+        last_readable_held_ammo_at_seconds=20.0,
+        weapons_fired_this_round=frozenset(),
+    )
+
+    card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
+
+    assert "打空了还是没打过" not in card
+
+
+@pytest.mark.parametrize("death_type, existing_tag", [("death_after_kill", "击杀后被补枪"), ("death_thrown_away", "白给")])
+def test_existing_death_tags_remain_when_combat_tags_also_apply(
+    death_type: str, existing_tag: str
+) -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 0})
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(18.0, "kill", "AK47"),
+            TimelineEntry(19.0, "damage", "掉了100血 剩0血"),
+            TimelineEntry(20.0, "death", None),
+        ),
+        fire_seconds=(19.5,),
+        last_readable_held_ammo_at_seconds=20.0,
+    )
+    event = _event(snapshot).model_copy(update={"type": death_type})
+
+    card = render_event_card(snapshot, _game(snapshot), situation, event)
+    focus = card.split("【刚刚】", 1)[1]
+
+    assert existing_tag in focus
+    assert "对枪输了" in focus
+
+
 def test_rare_context_remains_only_in_the_timeline() -> None:
     snapshot = _real_snapshot()
     entries = (

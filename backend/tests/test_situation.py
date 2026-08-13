@@ -10,6 +10,7 @@ from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, WeaponSlot, parse_snapsho
 from pet.session import GameSessionTracker, GameState, MatchLifecycleTracker
 from pet.situation import (
     RoundSituation,
+    SCENE_TAGS,
     SituationTracker,
     TimelineEntry,
     TimelineKind,
@@ -1091,6 +1092,25 @@ def test_kill_ammo_count_restarts_after_two_second_clip_gap() -> None:
 
     kill = next(entry for entry in result.timeline if entry.kind == "kill")
     assert kill.detail is not None and "用弹5" in kill.detail
+
+
+def test_round_situation_records_fire_and_held_ammo_observations() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, ammo_clip=30),
+            _snapshot(11.0, ammo_clip=28, health=70),
+            _snapshot(12.0, ammo_clip=28, health=0),
+        )
+    )
+
+    assert result.fire_seconds == (1.0,)
+    assert result.last_readable_held_ammo_at_seconds == 2.0
+    assert result.weapons_fired_this_round == frozenset({"weapon_ak47"})
+
+
+def test_scene_tags_enumerate_all_death_combat_labels() -> None:
+    assert len(SCENE_TAGS) == 22
+    assert {"对枪输了", "一枪没开就没了", "打空了还是没打过"} <= SCENE_TAGS
 
 
 def test_burn_damage_is_conservatively_counted_only_inside_burning_interval() -> None:

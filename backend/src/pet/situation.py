@@ -23,6 +23,10 @@ LOW_AMMO_THRESHOLD = 1
 RESIDUAL_KILL_HEALTH = 30
 SMOKE_DEATH_WINDOW_SECONDS = 2.0
 WEAPON_SWITCH_KILL_WINDOW_SECONDS = 3.0
+# A three-second window matches the existing continuous-event horizon: close
+# enough to describe the death exchange, without treating earlier probing fire
+# as part of it.
+DEATH_COMBAT_WINDOW_SECONDS = 3.0
 FLASH_BAD_LUCK_SECONDS = 1.5
 FLASH_BAD_LUCK_COUNT = 3
 BURN_BAD_LUCK_DAMAGE = 30
@@ -95,6 +99,9 @@ SCENE_TAGS: frozenset[str] = frozenset(
         "白惨了",
         "烧惨了",
         "血皮撑住了",
+        "对枪输了",
+        "一枪没开就没了",
+        "打空了还是没打过",
     }
 )
 
@@ -162,6 +169,11 @@ class RoundSituation:
     grenades_used: tuple[tuple[str, int], ...] = ()
     awp_miss_count: int = 0
     burn_damage_taken: int = 0
+    # Deterministic ammunition observations consumed only when rendering a
+    # death focus. They never create a standalone event or speech candidate.
+    fire_seconds: tuple[float, ...] = ()
+    last_readable_held_ammo_at_seconds: float | None = None
+    weapons_fired_this_round: frozenset[str] = frozenset()
     # Deliberate GameSnapshot duplication: spectating replaces snapshot.team with
     # the teammate's team, while round-result cards still need the player's team.
     self_team: str | None = None
@@ -282,8 +294,20 @@ class SituationTracker:
         round_kills_increase = _positive_increase(
             self._previous_round_kills, snapshot.round_kills
         )
-        ammo_detail, ammo_drop, awp_miss = self._observe_ammo(
+        ammo_detail, ammo_drop, awp_miss, fired_weapons = self._observe_ammo(
             snapshot, kill_count=round_kills_increase
+        )
+        fire_seconds = self._current.fire_seconds + (relative_seconds,) * len(
+            fired_weapons
+        )
+        weapons_fired_this_round = (
+            self._current.weapons_fired_this_round | frozenset(fired_weapons)
+        )
+        held = held_weapon(snapshot)
+        last_readable_held_ammo_at_seconds = (
+            relative_seconds
+            if held is not None and held.ammo_clip is not None
+            else self._current.last_readable_held_ammo_at_seconds
         )
         if ammo_detail is not None:
             timeline = _append_timeline(
@@ -539,6 +563,9 @@ class SituationTracker:
             grenades_used=tuple(sorted(grenades_used.items())),
             awp_miss_count=awp_miss_count,
             burn_damage_taken=burn_damage_taken,
+            fire_seconds=fire_seconds,
+            last_readable_held_ammo_at_seconds=last_readable_held_ammo_at_seconds,
+            weapons_fired_this_round=weapons_fired_this_round,
             self_team=self_team,
             timeline=tuple(timeline),
         )
@@ -650,6 +677,9 @@ class SituationTracker:
             grenades_used=(),
             awp_miss_count=0,
             burn_damage_taken=0,
+            fire_seconds=(),
+            last_readable_held_ammo_at_seconds=None,
+            weapons_fired_this_round=frozenset(),
             self_team=None,
             timeline=(),
         )
@@ -860,7 +890,7 @@ class SituationTracker:
 
     def _observe_ammo(
         self, snapshot: GameSnapshot, *, kill_count: int
-    ) -> tuple[str | None, int | None, bool]:
+    ) -> tuple[str | None, int | None, bool, tuple[str, ...]]:
         weapon = _operated_weapon(snapshot)
         detail: str | None = None
         ammo_drop: int | None = None
@@ -869,6 +899,15 @@ class SituationTracker:
             for item in snapshot.weapons or ()
             if item.ammo_clip is not None
         }
+        fired_weapons = tuple(
+            name
+            for name, clip in current_ammo.items()
+            if (
+                (previous_ammo := self._previous_weapon_ammo.get(name))
+                is not None
+                and clip < previous_ammo
+            )
+        )
 
         # AWP misses use the weapon inventory rather than _operated_weapon().
         # This keeps the observation valid when the player has already swapped
@@ -938,7 +977,7 @@ class SituationTracker:
             if name in current_ammo
         }
         self._previous_weapon_ammo = current_ammo
-        return detail, ammo_drop, awp_miss
+        return detail, ammo_drop, awp_miss, fired_weapons
 
     def _observe_reload(
         self,

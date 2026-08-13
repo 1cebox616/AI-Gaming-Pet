@@ -1,0 +1,27 @@
+{
+  "scope": "event_only",
+  "answer_key_sha256": "11d66227603d626be1c5f1ce134562e59f323bfec4514e8c0b4453258634b27e",
+  "cases": [
+    {"case_id":"rare_reload_then_kill","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2}},
+    {"case_id":"rare_ammo_low_death","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2}},
+    {"case_id":"rare_flash_interrupted_by_death","event":{"whole_correct":false,"correct_atoms":1,"total_atoms":2,"errors":["遗漏受闪光影响未结束，并无根据称白给"]}},
+    {"case_id":"triple_kill_same_stage","event":{"whole_correct":false,"correct_atoms":2,"total_atoms":3,"errors":["遗漏该阶段三杀"]}},
+    {"case_id":"triple_kill_cross_stage","event":{"whole_correct":true,"correct_atoms":3,"total_atoms":3}},
+    {"case_id":"weapon_switch_double_kill","event":{"whole_correct":false,"correct_atoms":0,"total_atoms":2,"errors":["冻结答案要求回合胜利和灭队，但该目标已改为不播报的回合结算前多杀"]}},
+    {"case_id":"low_health_triple","event":{"whole_correct":false,"correct_atoms":0,"total_atoms":2,"errors":["冻结答案要求回合失败和灭队，但该目标已改为不播报的回合结算前多杀"]}},
+    {"case_id":"four_kill","event":{"whole_correct":true,"correct_atoms":3,"total_atoms":3}},
+    {"case_id":"ace","event":{"whole_correct":true,"correct_atoms":3,"total_atoms":3}},
+    {"case_id":"flash_kill","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2}},
+    {"case_id":"flash_death","event":{"whole_correct":false,"correct_atoms":1,"total_atoms":2,"errors":["遗漏受闪光影响未结束，并无根据称白给"]}},
+    {"case_id":"long_smoke_then_kill","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2}},
+    {"case_id":"smoke_exit_death","event":{"whole_correct":true,"correct_atoms":4,"total_atoms":4}},
+    {"case_id":"four_grenades_then_kill","event":{"whole_correct":true,"correct_atoms":3,"total_atoms":3}},
+    {"case_id":"double_flash_then_kill","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2}},
+    {"case_id":"smoke_flash_kill","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2}},
+    {"case_id":"burning_kill","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2}},
+    {"case_id":"bomb_pickup_then_death","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2}},
+    {"case_id":"bomb_drop_repickup","event":{"whole_correct":false,"correct_atoms":2,"total_atoms":4,"errors":["遗漏重新拿包和弹匣仅剩1发"]}},
+    {"case_id":"bomb_pickup_kill","event":{"whole_correct":false,"correct_atoms":3,"total_atoms":4,"errors":["遗漏弹匣仅剩1发"]}},
+    {"case_id":"bomb_planted_then_death","event":{"whole_correct":true,"correct_atoms":2,"total_atoms":2}}
+  ]
+}

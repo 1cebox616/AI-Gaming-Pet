@@ -14,6 +14,7 @@ from pet.session import GameState
 from pet.situation import (
     RoundSituation,
     BURN_BAD_LUCK_DAMAGE,
+    DEATH_COMBAT_WINDOW_SECONDS,
     FLASH_BAD_LUCK_COUNT,
     FLASH_BAD_LUCK_SECONDS,
     RESIDUAL_KILL_HEALTH,
@@ -142,6 +143,7 @@ def render_event_card(
             self_team=self_team,
             death_after_kill_max_seconds=death_after_kill_max_seconds,
             event=event,
+            snapshot=snapshot,
             round_situation=round_situation,
         )
         sections.append(timeline_history)
@@ -349,6 +351,7 @@ def _timeline_sections(
     self_team: str | None,
     death_after_kill_max_seconds: float,
     event: GameEvent,
+    snapshot: GameSnapshot,
     round_situation: RoundSituation,
 ) -> tuple[str | None, str | None]:
     if not entries:
@@ -403,6 +406,7 @@ def _timeline_sections(
                     entries,
                     index,
                     event=event,
+                    snapshot=snapshot,
                     round_situation=round_situation,
                 )
             )
@@ -424,6 +428,7 @@ def _timeline_sections(
                     entries,
                     index,
                     event=event,
+                    snapshot=snapshot,
                     round_situation=round_situation,
                 )
             )
@@ -486,6 +491,7 @@ def _action_scene_tags(
     index: int,
     *,
     event: GameEvent,
+    snapshot: GameSnapshot,
     round_situation: RoundSituation,
 ) -> tuple[str, ...]:
     entry = entries[index]
@@ -525,6 +531,53 @@ def _action_scene_tags(
         smoke_gap = _previous_entry_gap(entries, index, kind="smoke_end")
         if smoke_gap is not None and 0 <= smoke_gap <= SMOKE_DEATH_WINDOW_SECONDS:
             tags.append(_scene("出烟就没了"))
+        if event.type in {"death", "death_after_kill", "death_thrown_away"}:
+            tags.extend(
+                _death_combat_scene_tags(
+                    entries,
+                    index,
+                    snapshot=snapshot,
+                    round_situation=round_situation,
+                )
+            )
+    return tuple(tags)
+
+
+def _death_combat_scene_tags(
+    entries: tuple[TimelineEntry, ...],
+    index: int,
+    *,
+    snapshot: GameSnapshot,
+    round_situation: RoundSituation,
+) -> tuple[str, ...]:
+    """Derive only observable, death-specific combat outcomes."""
+    death_seconds = entries[index].seconds
+    window_start = death_seconds - DEATH_COMBAT_WINDOW_SECONDS
+    fired_in_window = any(
+        window_start <= fired_at <= death_seconds
+        for fired_at in round_situation.fire_seconds
+    )
+    damaged_in_window = any(
+        entry.kind == "damage" and window_start <= entry.seconds <= death_seconds
+        for entry in entries[: index + 1]
+    )
+    tags: list[str] = []
+    if fired_in_window and damaged_in_window:
+        tags.append(_scene("对枪输了"))
+    elif (
+        not fired_in_window
+        and round_situation.last_readable_held_ammo_at_seconds is not None
+        and round_situation.last_readable_held_ammo_at_seconds >= window_start
+    ):
+        tags.append(_scene("一枪没开就没了"))
+
+    weapon = held_weapon(snapshot)
+    if (
+        weapon is not None
+        and weapon.ammo_clip == 0
+        and weapon.name in round_situation.weapons_fired_this_round
+    ):
+        tags.append(_scene("打空了还是没打过"))
     return tuple(tags)
 
 
