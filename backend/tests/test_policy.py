@@ -9,7 +9,13 @@ import pytest
 from pet.config import EventsConfig, PolicyConfig
 from pet.events import EventDetector
 from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, parse_snapshot
-from pet.policy import PolicyDecision, SpeechPolicy
+from pet.policy import (
+    EVENT_BUFFER_SECONDS,
+    PolicyDecision,
+    SpeechBuffer,
+    SpeechPolicy,
+    event_priority,
+)
 from pet.replay import format_decision_reason, replay_policy
 from pet.session import GameSessionTracker
 
@@ -126,6 +132,95 @@ def test_alive_combat_drops_normal_kills_but_allows_three_kill(
     assert format_decision_reason(three_kill) == "优先级 80"
 
 
+def test_round_result_is_detected_but_excluded_from_speech_candidates(
+    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
+) -> None:
+    decisions = _decisions(
+        _event_sequence(recorded_fixtures, "round_win_dedup"),
+        PolicyConfig(cooldown_seconds=0, alive_priority_threshold=0),
+    )
+
+    round_decisions = [
+        decision
+        for decision in decisions
+        if decision.event.type == "round_win"
+    ]
+    assert round_decisions
+    assert all(not decision.selected for decision in round_decisions)
+    assert all(decision.reason_code == "round_event" for decision in round_decisions)
+
+
+def test_buffer_merges_real_fixture_events_and_uses_existing_priority(
+    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
+) -> None:
+    first_decisions = _decisions(
+        _three_kill_sequence(recorded_fixtures),
+        PolicyConfig(alive_priority_threshold=0),
+    )
+    second_decisions = _decisions(
+        _event_sequence(recorded_fixtures, "ordinary_death_with_trade_kill"),
+        PolicyConfig(alive_priority_threshold=0),
+    )
+    first = next(decision.event for decision in first_decisions if decision.selected)
+    second = next(decision.event for decision in second_decisions if decision.selected)
+    second = second.model_copy(update={"ts": first.ts + 1.0})
+
+    buffer = SpeechBuffer()
+    buffer.add(first)
+    buffer.add(second)
+
+    assert buffer.flush_due(now=first.ts + EVENT_BUFFER_SECONDS - 0.01) == ()
+    groups = buffer.flush_due(now=first.ts + EVENT_BUFFER_SECONDS)
+
+    assert len(groups) == 1
+    assert groups[0].events == (first, second)
+    assert groups[0].focus_event.id == max((first, second), key=event_priority).id
+
+
+def test_buffer_flushes_pending_group_immediately_at_boundary(
+    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
+) -> None:
+    event = next(
+        decision.event
+        for decision in _decisions(
+            _event_sequence(recorded_fixtures, "ordinary_death_with_trade_kill"),
+            PolicyConfig(alive_priority_threshold=0),
+        )
+        if decision.selected
+    )
+    buffer = SpeechBuffer()
+    buffer.add(event)
+
+    groups = buffer.flush_all(now=event.ts + 0.01)
+
+    assert len(groups) == 1
+    assert groups[0].events == (event,)
+    assert buffer.has_pending is False
+
+
+def test_buffer_does_not_extend_a_window_when_a_late_real_event_arrives(
+    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
+) -> None:
+    event = next(
+        decision.event
+        for decision in _decisions(
+            _event_sequence(recorded_fixtures, "ordinary_death_with_trade_kill"),
+            PolicyConfig(alive_priority_threshold=0),
+        )
+        if decision.selected
+    )
+    late_event = event.model_copy(update={"ts": event.ts + 2.0})
+    buffer = SpeechBuffer()
+    buffer.add(event)
+
+    first_group = buffer.add(late_event)
+
+    assert len(first_group) == 1
+    assert first_group[0].events == (event,)
+    second_group = buffer.flush_all(now=late_event.ts)
+    assert second_group[0].events == (late_event,)
+
+
 def test_death_after_kill_is_not_blocked_by_alive_combat_threshold(
     recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
@@ -199,7 +294,12 @@ def test_cooldown_drops_early_batch_then_allows_later_event(
         decision for decision in decisions if decision.reason_code == "cooldown"
     ]
 
-    assert [decision.event.type for decision in selected] == ["multi_kill", "round_win"]
+    assert [decision.event.type for decision in selected] == ["multi_kill"]
+    assert any(
+        decision.event.type == "round_win"
+        and decision.reason_code == "round_event"
+        for decision in decisions
+    )
     assert cooldown_rejections
     assert all(
         format_decision_reason(decision)
@@ -226,7 +326,6 @@ def test_round_limit_drops_after_cap_and_resets_on_round_change(
 
     assert [(decision.event.round_number, decision.event.type) for decision in selected] == [
         (6, "multi_kill"),
-        (1, "round_win"),
     ]
     assert limit_rejections
     assert all(
@@ -292,8 +391,8 @@ def test_cooldown_config_changes_same_real_timeline(
         ),
     )
 
-    assert sum(decision.selected for decision in cooled) == 2
-    assert sum(decision.selected for decision in immediate) == 3
+    assert sum(decision.selected for decision in cooled) == 1
+    assert sum(decision.selected for decision in immediate) == 2
 
 
 def test_low_priority_event_is_still_dropped_during_cooldown(
@@ -414,5 +513,5 @@ def test_round_limit_config_changes_same_real_timeline(
         ),
     )
 
-    assert sum(decision.selected for decision in one_line) == 2
-    assert sum(decision.selected for decision in three_lines) == 4
+    assert sum(decision.selected for decision in one_line) == 1
+    assert sum(decision.selected for decision in three_lines) == 2

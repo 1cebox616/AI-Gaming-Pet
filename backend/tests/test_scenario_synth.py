@@ -111,6 +111,11 @@ def test_every_scenario_replays_and_renders_declared_facts() -> None:
             event.type for event in replay.events
         }, spec.scenario_id
 
+        if spec.expected_event_type in {"round_win", "round_loss"}:
+            # Round result facts remain detector regressions, but this
+            # milestone no longer evaluates them as speech candidates.
+            continue
+
         cards = run_bench(
             path,
             model=None,

@@ -160,6 +160,7 @@ class BenchEvent:
     event_card: str
     template_text: str
     attempt: BenchAttempt | None
+    merged_events: tuple[GameEvent, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +229,7 @@ class AnalysisBenchEvent:
     category: CommentaryCategory
     event_card: str
     attempt: AnalysisAttempt
+    merged_events: tuple[GameEvent, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,6 +475,7 @@ def run_bench(
             death_after_kill_max_seconds=(
                 configuration.events.death_after_kill_max_seconds
             ),
+            merged_events=disposition.buffered_events,
         )
         attempt = None
         if not cards_only:
@@ -496,6 +499,7 @@ def run_bench(
                 event_card=card,
                 template_text=disposition.utterance.text,
                 attempt=attempt,
+                merged_events=disposition.buffered_events or (event,),
             )
         )
 
@@ -663,6 +667,7 @@ def run_stream_analysis(
                 death_after_kill_max_seconds=(
                     configuration.events.death_after_kill_max_seconds
                 ),
+                merged_events=disposition.buffered_events,
             )
             case_id = (
                 recording_path.stem
@@ -691,6 +696,7 @@ def run_stream_analysis(
                         seed=seed,
                         client=client,
                     ),
+                    merged_events=disposition.buffered_events or (event,),
                 )
             )
 
@@ -878,6 +884,14 @@ def render_report(result: BenchResult) -> str:
                 f"### 事件 {index} —— {_EVENT_LABELS[event.type]}"
                 f"（{_CATEGORY_LABELS[item.category]}），{round_label}",
                 "",
+                *(
+                    "缓冲窗口合并："
+                    + " → ".join(_EVENT_LABELS[merged.type] for merged in item.merged_events)
+                    + ""
+                    for _ in (1,)
+                    if len(item.merged_events) > 1
+                ),
+                *([""] if len(item.merged_events) > 1 else []),
                 "喂进去的 GSI 事件卡：",
                 "",
                 *(f"    {line}" for line in item.event_card.splitlines()),
@@ -979,6 +993,12 @@ def render_stream_analysis_report(
                 "",
                 f"- 类型：{_EVENT_LABELS[item.event.type]}（{_CATEGORY_LABELS[item.category]}）",
                 f"- 来源：`{item.recording_path}`",
+                *(
+                    "- 缓冲窗口合并："
+                    + " → ".join(_EVENT_LABELS[merged.type] for merged in item.merged_events)
+                    for _ in (1,)
+                    if len(item.merged_events) > 1
+                ),
                 "",
                 "GSI 事件卡：",
                 "",

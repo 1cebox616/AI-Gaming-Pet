@@ -28,35 +28,6 @@
     ]
   },
   {
-    "case_id": "rare_mvp_round_win",
-    "expected_summary": "获得 MVP，同时灭队拿下回合胜利。",
-    "required_facts": [
-      "获得MVP",
-      "灭队",
-      "回合胜利"
-    ],
-    "forbidden_claims": [
-      "不得出现队友或敌人身份",
-      "不得声称玩家所在位置",
-      "不得编造伤害来源",
-      "不得引用带【刚刚】行之外的回合经过"
-    ]
-  },
-  {
-    "case_id": "rare_assist_round_win",
-    "expected_summary": "灭队拿下回合胜利。",
-    "required_facts": [
-      "灭队",
-      "回合胜利"
-    ],
-    "forbidden_claims": [
-      "不得出现队友或敌人身份",
-      "不得声称玩家所在位置",
-      "不得编造伤害来源",
-      "不得引用带【刚刚】行之外的回合经过"
-    ]
-  },
-  {
     "case_id": "rare_grenade_pickup",
     "expected_summary": "灭队拿下回合胜利。",
     "required_facts": [

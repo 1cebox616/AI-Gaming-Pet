@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 import logging
 import time
 
@@ -25,9 +25,10 @@ from pet.gsi import (
     ensure_gsi_config,
 )
 from pet.network import HOST, PORT
-from pet.policy import SpeechPolicy
+from pet.policy import EVENT_BUFFER_SECONDS, SpeechBuffer, SpeechPolicy
 from pet.session import GameSessionTracker, MatchLifecycleTracker
 from pet.situation import SituationTracker
+from pet.situation import RoundSituation
 from pet.speech import SpeechService
 
 PACKAGE_NAME = "pet"
@@ -93,16 +94,60 @@ class GameSnapshotProcessor:
         self._situation = situation
         self._policy = policy
         self._generator = generator
+        self._buffer = SpeechBuffer()
+        self._flush_task: asyncio.Task[None] | None = None
+        self._last_context: tuple[GameSnapshot, GameState, RoundSituation] | None = None
+
+    async def _deliver_pending(self, *, now: float) -> None:
+        """Flush buffered groups using the latest complete game context."""
+        groups = self._buffer.flush_all(now=now)
+        if not groups or self._last_context is None:
+            return
+        snapshot, _, _ = self._last_context
+        if not self._bridge.has_consumers():
+            return
+        for group in groups:
+            utterance = self._generator.generate(
+                group.focus_event,
+                map_name=snapshot.map_name,
+            )
+            await self._bridge.broadcast_commentary(utterance)
+
+    async def _deliver_due(self, *, now: float) -> None:
+        """Deliver a due window before the next snapshot can contaminate its card."""
+        groups = self._buffer.flush_due(now=now)
+        if not groups or self._last_context is None:
+            return
+        snapshot, _, _ = self._last_context
+        if not self._bridge.has_consumers():
+            return
+        for group in groups:
+            utterance = self._generator.generate(
+                group.focus_event,
+                map_name=snapshot.map_name,
+            )
+            await self._bridge.broadcast_commentary(utterance)
+
+    def _arm_flush_timer(self) -> None:
+        """Ensure a quiet GSI stream still flushes the fixed speech window."""
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._flush_after_window())
+
+    async def _flush_after_window(self) -> None:
+        await asyncio.sleep(EVENT_BUFFER_SECONDS)
+        await self._deliver_pending(now=time.time())
 
     async def observe(self, snapshot: GameSnapshot) -> None:
         """Advance facts always, then spend policy quota only for live consumers."""
         game = self._session.observe(snapshot)
+        await self._deliver_due(now=snapshot.ts)
         if self._lifecycle.observe(game):
+            await self._deliver_pending(now=snapshot.ts)
             self._detector.reset()
             self._situation.reset()
             self._policy.reset()
 
-        self._situation.observe(snapshot, game)
+        round_situation = self._situation.observe(snapshot, game)
         self._policy.observe_snapshot(snapshot)
         events = self._detector.observe(snapshot, game)
         await self._bridge.update_game(game)
@@ -116,20 +161,37 @@ class GameSnapshotProcessor:
             muted=self._bridge.is_muted(),
         )
         if policy_batch.selected_event is None:
+            self._last_context = (snapshot, game, round_situation)
+            if game.state in {"offline", "menu", "round_over", "match_over"}:
+                await self._deliver_pending(now=snapshot.ts)
             return
-        utterance = self._generator.generate(
-            policy_batch.selected_event,
-            map_name=snapshot.map_name,
-        )
-        await self._bridge.broadcast_commentary(utterance)
+        was_empty = not self._buffer.has_pending
+        self._buffer.add(policy_batch.selected_event)
+        if was_empty:
+            self._arm_flush_timer()
+        self._last_context = (snapshot, game, round_situation)
+        if game.state in {"offline", "menu", "round_over", "match_over"}:
+            await self._deliver_pending(now=snapshot.ts)
+
+    async def shutdown(self) -> None:
+        """Flush pending speech before the process closes."""
+        await self._deliver_pending(now=time.time())
+        if self._flush_task is not None and not self._flush_task.done():
+            self._flush_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._flush_task
+        self._flush_task = None
 
     async def mark_offline(self, *, now: float) -> None:
         """Reset per-match state when GSI silence transitions the session offline."""
+        await self._deliver_pending(now=now)
         game = self._session.current(now=now)
         if self._lifecycle.observe(game):
             self._detector.reset()
             self._situation.reset()
             self._policy.reset()
+            self._buffer.reset()
+            self._last_context = None
         await self._bridge.update_game(game)
 
 
@@ -171,6 +233,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await gsi_service.shutdown()
+        await game_snapshot_processor.shutdown()
         await pet_bridge.shutdown()
         speech_service.shutdown()
 

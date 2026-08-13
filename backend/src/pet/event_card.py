@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 import re
 from typing import Any
 
@@ -94,8 +94,16 @@ def render_event_card(
     event: GameEvent,
     *,
     death_after_kill_max_seconds: float = 8.0,
+    merged_events: Sequence[GameEvent] = (),
 ) -> str:
-    """Render everything the model may know about this moment as Chinese text."""
+    """Render a buffered moment with one policy-selected focus.
+
+    The round timeline already contains the state changes for every event in
+    the fixed window. ``event`` remains the sole focus so a merged card never
+    presents multiple competing ``本次焦点`` markers.
+    """
+    if merged_events and event not in merged_events:
+        raise ValueError("event focus must belong to merged_events")
     sections: list[str | None] = [
         *_match_sections(snapshot, round_situation, event),
         _section("我", _player_facts(snapshot, game, round_situation)),

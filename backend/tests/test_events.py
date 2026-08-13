@@ -304,6 +304,25 @@ def test_death_classifications_are_mutually_exclusive_on_real_fragments(
         EventsConfig(thrown_away_max_survival_seconds=30),
     )[-1]
 
+    assert [
+        event.type
+        for event in _detect(_snapshots(event_samples, "teammate_thrown_away"))
+        if event.type in {"death", "death_after_kill", "death_thrown_away"}
+    ] == ["death"]
+    assert [
+        event.type
+        for event in _detect(_t7_snapshots(t7_samples, "death_after_kill"))
+        if event.type in {"death", "death_after_kill", "death_thrown_away"}
+    ] == ["death_after_kill"]
+    assert [
+        event.type
+        for event in _detect(
+            _snapshots(event_samples, "teammate_thrown_away"),
+            EventsConfig(thrown_away_max_survival_seconds=30),
+        )
+        if event.type in {"death", "death_after_kill", "death_thrown_away"}
+    ] == ["death_thrown_away"]
+
     assert after_kill.type == "death_after_kill"
     assert ordinary.type == "death"
     assert thrown_away.type == "death_thrown_away"
@@ -312,6 +331,26 @@ def test_death_classifications_are_mutually_exclusive_on_real_fragments(
         "death",
         "death_thrown_away",
     }
+
+
+def test_one_real_death_is_not_reemitted_after_subject_identity_switch(
+    event_samples: dict[str, Any],
+) -> None:
+    """A real death must stay latched when GSI briefly omits the subject ID."""
+    real = _snapshots(event_samples, "ordinary_death_with_trade_kill")
+    unknown_alive = real[0].model_copy(update={"player_steamid": None})
+    unknown_death = real[-1].model_copy(
+        update={"player_steamid": None, "ts": real[-1].ts + 0.1}
+    )
+    switched_back = real[-1].model_copy(update={"ts": real[-1].ts + 0.2})
+
+    events = _detect((real[0], unknown_alive, unknown_death, switched_back))
+
+    assert [
+        event.type
+        for event in events
+        if event.type in {"death", "death_after_kill", "death_thrown_away"}
+    ] == ["death_after_kill"]
 
 
 def test_death_after_kill_threshold_changes_real_fragment_classification(

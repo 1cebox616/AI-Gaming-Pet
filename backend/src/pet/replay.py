@@ -23,7 +23,13 @@ from pet.gsi import (
     parse_snapshot,
 )
 from pet.lines import Utterance
-from pet.policy import DecisionReason, PolicyDecision, SpeechPolicy
+from pet.policy import (
+    BufferedEventGroup,
+    DecisionReason,
+    PolicyDecision,
+    SpeechBuffer,
+    SpeechPolicy,
+)
 from pet.session import GameSessionTracker, GameState, MatchLifecycleTracker
 from pet.situation import (
     RoundSituation,
@@ -126,6 +132,7 @@ _REASON_LABELS: dict[DecisionReason, str] = {
     "cooldown": "冷却未过",
     "minimum_gap": "最小间隔未过",
     "higher_priority": "已有更高优先级事件",
+    "round_event": "回合结算留给长记忆",
 }
 
 
@@ -146,6 +153,7 @@ class PolicyReplayResult:
     decisions: tuple[PolicyDecision, ...]
     started_at: float
     snapshot_count: int
+    speech_groups: tuple[BufferedEventGroup, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +165,7 @@ class CommentaryDisposition:
     snapshot: GameSnapshot
     game: GameState
     round_situation: RoundSituation
+    buffered_events: tuple[GameEvent, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,10 +373,14 @@ def replay_policy(
     lifecycle = MatchLifecycleTracker()
     situation = SituationTracker()
     policy = SpeechPolicy(policy_config)
+    buffer = SpeechBuffer()
     decisions: list[PolicyDecision] = []
+    speech_groups: list[BufferedEventGroup] = []
     for snapshot in snapshots:
         game = session.observe(snapshot)
+        speech_groups.extend(buffer.flush_due(now=snapshot.ts))
         if lifecycle.observe(game):
+            speech_groups.extend(buffer.flush_all(now=snapshot.ts))
             detector.reset()
             situation.reset()
             policy.reset()
@@ -376,10 +389,17 @@ def replay_policy(
         events = detector.observe(snapshot, game)
         batch = policy.decide(events, game, now=snapshot.ts, muted=muted)
         decisions.extend(batch.decisions)
+        if batch.selected_event is not None:
+            buffer.add(batch.selected_event)
+        if game.state in {"offline", "menu", "round_over", "match_over"}:
+            speech_groups.extend(buffer.flush_all(now=snapshot.ts))
+    if snapshots:
+        speech_groups.extend(buffer.flush_all(now=snapshots[-1].ts))
     return PolicyReplayResult(
         decisions=tuple(decisions),
         started_at=snapshots[0].ts if snapshots else 0.0,
         snapshot_count=len(snapshots),
+        speech_groups=tuple(speech_groups),
     )
 
 
@@ -398,14 +418,58 @@ def replay_commentary(
     lifecycle = MatchLifecycleTracker()
     situation = SituationTracker()
     policy = SpeechPolicy(policy_config)
+    buffer = SpeechBuffer()
     generator = CommentaryGenerator(
         random.Random(random_seed),
         personality_style=personality_style,
     )
     dispositions: list[CommentaryDisposition] = []
+    accepted_decisions: dict[str, PolicyDecision] = {}
+    last_context: tuple[GameSnapshot, GameState, RoundSituation] | None = None
+
+    def consume_groups(
+        groups: Sequence[BufferedEventGroup],
+        context: tuple[GameSnapshot, GameState, RoundSituation] | None,
+    ) -> None:
+        """Generate exactly one utterance for each flushed event group."""
+        if context is None:
+            return
+        flush_snapshot, flush_game, flush_situation = context
+        for group in groups:
+            focus_decision = accepted_decisions[group.focus_event.id]
+            utterance = generator.generate(
+                group.focus_event,
+                map_name=flush_snapshot.map_name,
+            )
+            for event in group.events:
+                source_decision = accepted_decisions[event.id]
+                decision = (
+                    source_decision
+                    if event.id == group.focus_event.id
+                    else PolicyDecision(
+                        event=event,
+                        selected=False,
+                        priority=source_decision.priority,
+                        reason_code="higher_priority",
+                    )
+                )
+                dispositions.append(
+                    CommentaryDisposition(
+                        decision=decision,
+                        utterance=utterance if event.id == focus_decision.event.id else None,
+                        snapshot=flush_snapshot,
+                        game=flush_game,
+                        round_situation=flush_situation,
+                        buffered_events=group.events if event.id == focus_decision.event.id else (),
+                    )
+                )
+
     for snapshot in snapshots:
         game = session.observe(snapshot)
+        consume_groups(buffer.flush_due(now=snapshot.ts), last_context)
         if lifecycle.observe(game):
+            consume_groups(buffer.flush_all(now=snapshot.ts), last_context)
+            accepted_decisions.clear()
             detector.reset()
             situation.reset()
             policy.reset()
@@ -413,21 +477,31 @@ def replay_commentary(
         policy.observe_snapshot(snapshot)
         events = detector.observe(snapshot, game)
         batch = policy.decide(events, game, now=snapshot.ts, muted=muted)
-        utterance = (
-            generator.generate(batch.selected_event, map_name=snapshot.map_name)
-            if batch.selected_event is not None
-            else None
-        )
         dispositions.extend(
             CommentaryDisposition(
                 decision=decision,
-                utterance=utterance if decision.selected else None,
+                utterance=None,
                 snapshot=snapshot,
                 game=game,
                 round_situation=round_situation,
             )
             for decision in batch.decisions
+            if not decision.selected
         )
+        if batch.selected_event is not None:
+            selected_decision = next(
+                decision
+                for decision in batch.decisions
+                if decision.event.id == batch.selected_event.id
+            )
+            accepted_decisions[batch.selected_event.id] = selected_decision
+            buffer.add(batch.selected_event)
+        current_context = (snapshot, game, round_situation)
+        if game.state in {"offline", "menu", "round_over", "match_over"}:
+            consume_groups(buffer.flush_all(now=snapshot.ts), current_context)
+        last_context = current_context
+    if snapshots:
+        consume_groups(buffer.flush_all(now=snapshots[-1].ts), last_context)
     return CommentaryReplayResult(
         dispositions=tuple(dispositions),
         started_at=snapshots[0].ts if snapshots else 0.0,
@@ -759,6 +833,8 @@ def format_policy_replay(result: PolicyReplayResult) -> str:
             "策略汇总：",
             f"- 检测到事件：{len(result.decisions)}",
             f"- 实际开口：{selected_count}",
+            f"- 缓冲后发言组：{len(result.speech_groups)}",
+            f"- 缓冲合并组：{sum(len(group.events) > 1 for group in result.speech_groups)}",
         )
     )
     _append_rejection_summary(lines, rejected_counts)
@@ -815,6 +891,7 @@ def format_commentary_replay(result: CommentaryReplayResult) -> str:
             f"- 检测到事件：{len(result.dispositions)}",
             f"- 实际开口：{selected_count}",
             f"- 实际生成话术：{generated_count}",
+            f"- 缓冲合并组：{sum(len(item.buffered_events) > 1 for item in result.dispositions)}",
         )
     )
     _append_rejection_summary(lines, rejected_counts)
@@ -844,6 +921,8 @@ def format_decision_reason(decision: PolicyDecision) -> str:
             f"距上次发言 {_format_elapsed(decision)} 秒，最小间隔 "
             f"{_format_limit(decision)} 秒未过"
         )
+    if decision.reason_code == "round_event":
+        return "回合结算事件，留给后续长记忆"
     return "已有更高优先级事件"
 
 
