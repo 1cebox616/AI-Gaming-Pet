@@ -86,6 +86,7 @@ SCENE_TAGS: frozenset[str] = frozenset(
         "一发命中",
         "干净解决",
         "打了半天",
+        "一梭子扫死",
         "大狙空枪",
         "连续空枪",
         "白惨了",
@@ -682,6 +683,18 @@ class SituationTracker:
         self._previous_weapon_states: dict[str, str | None] | None = None
         self._previous_held_weapon_name: str | None = None
         self._previous_held_ammo: int | None = None
+        # Per-weapon clip baselines deliberately include holstered weapons.
+        # An AWP often fires and is swapped away before GSI publishes its next
+        # frame, so its clip change cannot be inferred from held state alone.
+        self._previous_weapon_ammo: dict[str, int] = {}
+        # A firing run begins at the last stable clip value and remains open
+        # through its first stable post-shot frame, where CS2 may publish the
+        # kill counter after the ammo change.
+        self._ammo_run_start: dict[str, int] = {}
+        # The kill counter can arrive one GSI frame after an AWP clip drop.
+        # Keep a candidate for one frame so a delayed confirmed kill is never
+        # misreported as an AWP miss.
+        self._pending_awp_miss = False
         self._reload_weapon_name: str | None = None
         self._reload_started_at_seconds: float | None = None
         self._previous_round_win_team: str | None = None
@@ -843,30 +856,70 @@ class SituationTracker:
         self, snapshot: GameSnapshot, *, kill_count: int
     ) -> tuple[str | None, int | None, bool]:
         weapon = _operated_weapon(snapshot)
-        if weapon is None or weapon.ammo_clip is None:
-            self._previous_held_weapon_name = None
-            self._previous_held_ammo = None
-            return None, None, False
-
         detail: str | None = None
         ammo_drop: int | None = None
-        awp_miss = False
-        if (
-            weapon.name == self._previous_held_weapon_name
-            and self._previous_held_ammo is not None
-            and weapon.ammo_clip < self._previous_held_ammo
-        ):
-            ammo_drop = self._previous_held_ammo - weapon.ammo_clip
-            awp_miss = weapon.name.lower() == "weapon_awp" and kill_count == 0
-            label = weapon_display_name(weapon.name)
-            if self._previous_held_ammo > LOW_AMMO_THRESHOLD and weapon.ammo_clip <= LOW_AMMO_THRESHOLD:
+        current_ammo = {
+            item.name: item.ammo_clip
+            for item in snapshot.weapons or ()
+            if item.ammo_clip is not None
+        }
+
+        # AWP misses use the weapon inventory rather than _operated_weapon().
+        # This keeps the observation valid when the player has already swapped
+        # to a sidearm at the frame carrying the AWP's decreased clip count.
+        previous_awp_ammo = self._previous_weapon_ammo.get("weapon_awp")
+        current_awp_ammo = current_ammo.get("weapon_awp")
+        awp_shot_without_same_frame_kill = (
+            previous_awp_ammo is not None
+            and current_awp_ammo is not None
+            and current_awp_ammo < previous_awp_ammo
+            and kill_count == 0
+        )
+        awp_miss = self._pending_awp_miss and kill_count == 0
+        self._pending_awp_miss = awp_shot_without_same_frame_kill
+
+        if weapon is not None and weapon.ammo_clip is not None:
+            previous_ammo = self._previous_weapon_ammo.get(weapon.name)
+            run_start = self._ammo_run_start.get(weapon.name)
+            if previous_ammo is not None and weapon.ammo_clip < previous_ammo:
+                start = run_start if run_start is not None else previous_ammo
+                ammo_drop = start - weapon.ammo_clip
+            elif run_start is not None and weapon.ammo_clip < run_start:
+                # GSI can report the final hit (round_kills) one frame after the
+                # last visible bullet decrement; keep that decrement attached.
+                ammo_drop = run_start - weapon.ammo_clip
+
+            if (
+                weapon.name == self._previous_held_weapon_name
+                and self._previous_held_ammo is not None
+                and weapon.ammo_clip < self._previous_held_ammo
+                and self._previous_held_ammo > LOW_AMMO_THRESHOLD
+                and weapon.ammo_clip <= LOW_AMMO_THRESHOLD
+            ):
+                label = weapon_display_name(weapon.name)
                 detail = (
                     f"弹匣打空 {label}"
                     if weapon.ammo_clip == 0
                     else f"弹匣仅剩{weapon.ammo_clip}发 {label}"
                 )
-        self._previous_held_weapon_name = weapon.name
-        self._previous_held_ammo = weapon.ammo_clip
+            self._previous_held_weapon_name = weapon.name
+            self._previous_held_ammo = weapon.ammo_clip
+        else:
+            self._previous_held_weapon_name = None
+            self._previous_held_ammo = None
+
+        for name, clip in current_ammo.items():
+            previous_ammo = self._previous_weapon_ammo.get(name)
+            if previous_ammo is not None and clip < previous_ammo:
+                self._ammo_run_start.setdefault(name, previous_ammo)
+            else:
+                self._ammo_run_start.pop(name, None)
+        self._ammo_run_start = {
+            name: start
+            for name, start in self._ammo_run_start.items()
+            if name in current_ammo
+        }
+        self._previous_weapon_ammo = current_ammo
         return detail, ammo_drop, awp_miss
 
     def _observe_reload(

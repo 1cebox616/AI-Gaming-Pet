@@ -515,8 +515,10 @@ def _action_scene_tags(
                 tags.append(_scene("一发命中"))
             elif 2 <= ammo_drop <= 5:
                 tags.append(_scene("干净解决"))
-            elif ammo_drop >= 10:
+            elif 6 <= ammo_drop <= 9:
                 tags.append(_scene("打了半天"))
+            elif ammo_drop >= 10:
+                tags.append(_scene("一梭子扫死"))
     elif entry.kind == "death":
         if _interval_active_at(entries, index, "flash_start", "flash_end"):
             tags.append(_scene("白着被打死"))

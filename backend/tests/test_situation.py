@@ -6,7 +6,7 @@ from typing import get_args
 
 import pytest
 
-from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, parse_snapshot
+from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, WeaponSlot, parse_snapshot
 from pet.session import GameSessionTracker, GameState, MatchLifecycleTracker
 from pet.situation import (
     RoundSituation,
@@ -1011,10 +1011,11 @@ def test_damage_entries_at_least_one_second_apart_do_not_merge() -> None:
 
 def test_awp_miss_is_recorded_only_without_a_kill() -> None:
     missed = _observe_all(
-        (
-            _snapshot(10.0, active_weapon="weapon_awp", ammo_clip=3),
-            _snapshot(11.0, active_weapon="weapon_awp", ammo_clip=2),
-        )
+            (
+                _snapshot(10.0, active_weapon="weapon_awp", ammo_clip=3),
+                _snapshot(11.0, active_weapon="weapon_awp", ammo_clip=2),
+                _snapshot(12.0, active_weapon="weapon_awp", ammo_clip=2),
+            )
     )
     killed = _observe_all(
         (
@@ -1029,6 +1030,53 @@ def test_awp_miss_is_recorded_only_without_a_kill() -> None:
     )
     assert missed.awp_miss_count == 1
     assert all(entry.kind != "awp_miss" for entry in killed.timeline)
+
+
+def test_awp_miss_compares_inventory_clip_after_switching_away() -> None:
+    first = _snapshot(10.0).model_copy(
+        update={
+            "weapons": (
+                WeaponSlot("weapon_awp", "SniperRifle", 3, 5, 0, "active"),
+                WeaponSlot("weapon_glock", "Pistol", 20, 20, 120, "holstered"),
+            )
+        }
+    )
+    shot = _snapshot(11.0).model_copy(
+        update={
+            "weapons": (
+                WeaponSlot("weapon_awp", "SniperRifle", 2, 5, 0, "holstered"),
+                WeaponSlot("weapon_glock", "Pistol", 20, 20, 120, "active"),
+            )
+        }
+    )
+    missed = _observe_all((first, shot, shot.model_copy(update={"ts": 12.0})))
+
+    assert missed.awp_miss_count == 1
+    assert any(entry.kind == "awp_miss" for entry in missed.timeline)
+
+    killed = _observe_all(
+        (
+            first,
+            shot,
+            shot.model_copy(update={"ts": 12.0, "round_kills": 1}),
+        )
+    )
+    assert killed.awp_miss_count == 0
+    assert all(entry.kind != "awp_miss" for entry in killed.timeline)
+
+
+def test_kill_ammo_count_accumulates_across_contiguous_clip_drops() -> None:
+    result = _observe_all(
+        (
+            _snapshot(10.0, ammo_clip=30),
+            _snapshot(11.0, ammo_clip=27),
+            _snapshot(12.0, ammo_clip=25),
+            _snapshot(13.0, ammo_clip=22, round_kills=1),
+        )
+    )
+
+    kill = next(entry for entry in result.timeline if entry.kind == "kill")
+    assert kill.detail is not None and "用弹8" in kill.detail
 
 
 def test_burn_damage_is_conservatively_counted_only_inside_burning_interval() -> None:

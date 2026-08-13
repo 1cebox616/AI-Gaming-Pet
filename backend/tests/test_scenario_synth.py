@@ -13,6 +13,7 @@ from pet.replay import load_recording, replay_recording
 from pet.scenario_synth import (
     INVENTORY_PATHS,
     OBSERVED_CONSTRAINTS_PATH,
+    RECORDINGS_DIRECTORY,
     SCENARIO_SPECS,
     SCENARIOS_DIRECTORY,
     SYNTHETIC_OTHER_NAME,
@@ -22,6 +23,11 @@ from pet.scenario_synth import (
     Mutation,
     load_inventory_constraints,
     validate_mutation,
+)
+
+_requires_recordings = pytest.mark.skipif(
+    not RECORDINGS_DIRECTORY.is_dir(),
+    reason="需要 gitignore 的 backend/recordings/ 真实录制",
 )
 
 
@@ -35,6 +41,7 @@ def test_unknown_inventory_path_aborts_synthesis() -> None:
         )
 
 
+@_requires_recordings
 @pytest.mark.parametrize(
     ("path", "value", "message"),
     (
@@ -51,6 +58,7 @@ def test_out_of_range_state_value_aborts_synthesis(
         validate_mutation(Mutation(18, path, "set", value), constraints)
 
 
+@_requires_recordings
 def test_inventory_reports_provide_positive_path_constraints() -> None:
     constraints = load_inventory_constraints(INVENTORY_PATHS)
 

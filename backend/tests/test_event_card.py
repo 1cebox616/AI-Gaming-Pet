@@ -922,6 +922,36 @@ def test_scene_tags_cover_positive_and_negative_action_cases() -> None:
     assert "一发命中" not in ended_flash
 
 
+@pytest.mark.parametrize(
+    ("ammo_drop", "expected", "unexpected"),
+    (
+        (6, "打了半天", "一梭子扫死"),
+        (9, "打了半天", "一梭子扫死"),
+        (10, "一梭子扫死", "打了半天"),
+    ),
+)
+def test_ammo_scene_tag_uses_the_four_product_tiers(
+    ammo_drop: int, expected: str, unexpected: str
+) -> None:
+    snapshot = _real_snapshot()
+    event = _event(snapshot).model_copy(update={"type": "kill"})
+    card = render_event_card(
+        snapshot,
+        _game(snapshot),
+        replace(
+            _situation(),
+            timeline=(
+                TimelineEntry(0.0, "round_live", None),
+                TimelineEntry(2.0, "kill", f"AK47 用弹{ammo_drop}"),
+            ),
+        ),
+        event,
+    )
+
+    assert expected in card
+    assert unexpected not in card
+
+
 def test_scene_state_tags_require_thresholds_and_survival() -> None:
     snapshot = _real_snapshot().model_copy(update={"health": 20})
     event = _event(snapshot).model_copy(update={"type": "kill"})
