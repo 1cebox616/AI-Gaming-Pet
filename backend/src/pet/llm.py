@@ -80,6 +80,7 @@ class LlmClientProtocol(Protocol):
         user_prompt: str,
         max_tokens: int,
         temperature: float,
+        seed: int | None = None,
     ) -> LlmResult:
         """Return one completed response without retrying."""
         ...
@@ -158,6 +159,7 @@ class OpenRouterClient:
         user_prompt: str,
         max_tokens: int,
         temperature: float,
+        seed: int | None = None,
     ) -> LlmResult:
         """Send one non-streaming chat completion and never retry failures."""
         started_at = time.perf_counter()
@@ -176,6 +178,8 @@ class OpenRouterClient:
                 "only": [provider],
                 "allow_fallbacks": False,
             }
+        if seed is not None:
+            request_body["seed"] = seed
 
         try:
             response = self._client.post(
