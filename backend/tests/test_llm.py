@@ -128,6 +128,35 @@ def test_complete_forwards_optional_seed() -> None:
     assert request_body["seed"] == 42
 
 
+def test_complete_forwards_explicit_reasoning_effort() -> None:
+    request_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_body.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "vendor/model-actual",
+                "choices": [{"message": {"content": "好"}}],
+            },
+        )
+
+    client = OpenRouterClient("test-api-key", transport=httpx.MockTransport(handler))
+    try:
+        client.complete(
+            model="vendor/model-under-test",
+            system_prompt="system",
+            user_prompt="user",
+            max_tokens=32,
+            temperature=0.9,
+            reasoning_effort="none",
+        )
+    finally:
+        client.close()
+
+    assert request_body["reasoning"] == {"effort": "none"}
+
+
 def test_unavailable_locked_provider_fails_once_without_fallback() -> None:
     request_count = 0
 

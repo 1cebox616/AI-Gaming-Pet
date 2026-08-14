@@ -81,6 +81,7 @@ class LlmClientProtocol(Protocol):
         max_tokens: int,
         temperature: float,
         seed: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> LlmResult:
         """Return one completed response without retrying."""
         ...
@@ -160,6 +161,7 @@ class OpenRouterClient:
         max_tokens: int,
         temperature: float,
         seed: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> LlmResult:
         """Send one non-streaming chat completion and never retry failures."""
         started_at = time.perf_counter()
@@ -180,6 +182,10 @@ class OpenRouterClient:
             }
         if seed is not None:
             request_body["seed"] = seed
+        if reasoning_effort is not None:
+            if reasoning_effort not in {"none", "minimal", "low", "medium", "high"}:
+                raise ValueError("unsupported reasoning effort")
+            request_body["reasoning"] = {"effort": reasoning_effort}
 
         try:
             response = self._client.post(

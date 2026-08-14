@@ -2,6 +2,8 @@ from pet.bench import FactSentenceAuditCase
 from pet.llm import LlmResult, LlmUsage
 from pet.style_review import (
     MAX_CHINESE_CHARS,
+    MAX_TOKENS,
+    REASONING_EFFORT,
     StyleReview,
     check_hard_violations,
     render_style_review,
@@ -67,3 +69,8 @@ def test_render_style_review_contains_raw_outputs_without_a_score() -> None:
     assert "宠物说（温度0.9）：好枪" in report
     assert "自动打分" in report
     assert "评分：" not in report
+
+
+def test_style_review_uses_diagnostic_reasoning_and_token_limits() -> None:
+    assert REASONING_EFFORT == "none"
+    assert MAX_TOKENS == 256

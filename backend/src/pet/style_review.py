@@ -22,7 +22,11 @@ PROVIDER = "Alibaba"
 TEMPERATURES = (0.9, 0.0)
 SEED = 42
 TIMEOUT_SECONDS = 10.0
-MAX_TOKENS = 48
+# M3-T9-FIX B group: with explicit reasoning=none and 256 output tokens, all
+# five diagnostic calls reached a final 8–13-token Chinese sentence. 48 tokens
+# had instead been consumed by an English Thinking Process and truncated.
+MAX_TOKENS = 256
+REASONING_EFFORT = "none"
 MAX_CHINESE_CHARS = 30
 _HAN_PATTERN = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
 
@@ -196,6 +200,7 @@ def _attempt(
             max_tokens=MAX_TOKENS,
             temperature=temperature,
             seed=SEED,
+            reasoning_effort=REASONING_EFFORT,
         )
     except LlmError as error:
         return StyleAttempt(result=None, error=str(error), checks=None)
@@ -234,10 +239,11 @@ def render_style_review(review: StyleReview) -> str:
         bool(attempt.checks and attempt.checks.binding_violations) for attempt in attempts
     )
     lines = [
-        "# M3-T9 文风层首次评测",
+        "# M3-T9-FIX 文风层双温度评测",
         "",
         "- 模型：`qwen/qwen3.5-122b-a10b`；上游锁定：`Alibaba`。",
-        "- 温度：0.9 / 0；种子：42；单次超时：10 秒；输出上限：48 tokens。",
+        "- 温度：0.9 / 0；种子：42；单次超时：10 秒；"
+        f"reasoning_effort：`{REASONING_EFFORT}`；输出上限：{MAX_TOKENS} tokens。",
         f"- 题数：{len(review.cases)}；调用数：{len(attempts)}（每题两个温度，各一次且不重试）。",
         f"- 提示词 SHA-256（两组相同）：`{review.prompt_sha256}`。",
         "- 实际输入 token 中位数："
