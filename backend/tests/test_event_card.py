@@ -28,7 +28,7 @@ def _real_snapshot() -> GameSnapshot:
             "equip_value": 4100,
             "has_defusekit": True,
             "flashed": 80,
-            "smoked": 120,
+            "smoked": 0,
             "match_kills": 12,
             "match_assists": 4,
             "match_deaths": 5,
@@ -201,7 +201,7 @@ def test_model_card_contains_only_header_and_readable_current_event() -> None:
     model_card = render_model_event_card(snapshot, _game(snapshot), situation, event)
 
     assert full_card.startswith("【游戏模式】")
-    assert model_card.startswith("de_anubis CT 2:3 落后 连败2\n【刚刚】")
+    assert model_card.startswith("de_anubis CT 2:3 落后 连败2 全装局\n【刚刚】")
     assert "焦点：普通死亡" in model_card
     assert "场景标签：" in model_card
     assert "回合时刻：89.8秒" in model_card
@@ -213,7 +213,9 @@ def test_model_card_contains_only_header_and_readable_current_event() -> None:
 
 
 def test_model_header_omits_zero_losses_and_missing_fields() -> None:
-    snapshot = _real_snapshot().model_copy(update={"map_name": None})
+    snapshot = _real_snapshot().model_copy(
+        update={"map_name": None, "equip_value": None}
+    )
     event = _event(snapshot).model_copy(
         update={
             "facts": {
@@ -230,10 +232,28 @@ def test_model_header_omits_zero_losses_and_missing_fields() -> None:
 
     assert model_card.splitlines()[0] == "CT 4:4 追平"
     assert "连败" not in model_card.splitlines()[0]
+    assert not any(tier in model_card.splitlines()[0] for tier in ("eco局", "强起局", "全装局"))
+
+
+@pytest.mark.parametrize(
+    ("equip_value", "expected"),
+    ((1999, "eco局"), (2000, "强起局"), (4000, "全装局")),
+)
+def test_model_header_includes_only_the_equipment_economy_tier(
+    equip_value: int, expected: str
+) -> None:
+    snapshot = _real_snapshot().model_copy(update={"equip_value": equip_value})
+
+    model_card = render_model_event_card(
+        snapshot, _game(snapshot), _situation(), _event(snapshot)
+    )
+
+    assert model_card.splitlines()[0].endswith(expected)
+    assert str(equip_value) not in model_card.splitlines()[0]
 
 
 def test_interrupted_smoke_observation_is_not_treated_as_smoke_exit() -> None:
-    snapshot = _real_snapshot()
+    snapshot = _real_snapshot().model_copy(update={"smoked": None})
     situation = replace(
         _situation(),
         timeline=(
@@ -1079,7 +1099,7 @@ def test_scene_tags_cover_positive_and_negative_action_cases() -> None:
     )
     assert all(
         tag in positive
-        for tag in ("残血击杀", "白着打", "踩火杀", "一发命中", "换枪后立刻杀")
+        for tag in ("残血击杀", "白着打", "踩火杀", "一枪秒", "换枪后立刻杀")
     )
 
     ended_flash = render_event_card(
@@ -1097,19 +1117,23 @@ def test_scene_tags_cover_positive_and_negative_action_cases() -> None:
         kill,
     )
     assert "白着打" not in ended_flash
-    assert "一发命中" not in ended_flash
+    assert "一枪秒" not in ended_flash
 
 
 @pytest.mark.parametrize(
-    ("ammo_drop", "expected", "unexpected"),
+    ("ammo_drop", "expected"),
     (
-        (6, "打了半天", "一梭子扫死"),
-        (9, "打了半天", "一梭子扫死"),
-        (10, "一梭子扫死", "打了半天"),
+        (1, "一枪秒"),
+        (3, "一枪秒"),
+        (4, "一梭子秒"),
+        (7, "一梭子秒"),
+        (8, None),
+        (9, None),
+        (10, "打了多发"),
     ),
 )
-def test_ammo_scene_tag_uses_the_four_product_tiers(
-    ammo_drop: int, expected: str, unexpected: str
+def test_ammo_scene_tag_uses_the_product_tiers_and_leaves_eight_to_nine_unlabelled(
+    ammo_drop: int, expected: str | None
 ) -> None:
     snapshot = _real_snapshot()
     event = _event(snapshot).model_copy(update={"type": "kill"})
@@ -1126,8 +1150,66 @@ def test_ammo_scene_tag_uses_the_four_product_tiers(
         event,
     )
 
-    assert expected in card
-    assert unexpected not in card
+    ammo_tags = {"一枪秒", "一梭子秒", "打了多发"}
+    if expected is None:
+        assert not any(tag in card for tag in ammo_tags)
+    else:
+        assert expected in card
+        assert all(tag not in card for tag in ammo_tags - {expected})
+
+
+def test_smoke_death_and_smoke_exit_death_are_mutually_exclusive() -> None:
+    entries = (
+        TimelineEntry(0.0, "round_live", None),
+        TimelineEntry(8.0, "smoke_start", None),
+        TimelineEntry(9.0, "smoke_end", "持续1.0秒"),
+        TimelineEntry(9.5, "death", None),
+    )
+    event = _event(_real_snapshot()).model_copy(update={"type": "death"})
+    inside_card = render_event_card(
+        _real_snapshot().model_copy(update={"health": 0, "smoked": 1}),
+        _game(_real_snapshot()),
+        replace(_situation(), timeline=entries),
+        event,
+    )
+    exit_card = render_event_card(
+        _real_snapshot().model_copy(update={"health": 0, "smoked": 0}),
+        _game(_real_snapshot()),
+        replace(_situation(), timeline=entries),
+        event,
+    )
+
+    assert "烟里死" in inside_card
+    assert "出烟就没了" not in inside_card
+    assert "出烟就没了" in exit_card
+    assert "烟里死" not in exit_card
+
+
+@pytest.mark.parametrize(
+    ("ammo_drop", "fired", "expected"),
+    ((10, True, True), (9, True, False), (None, True, False), (10, False, False)),
+)
+def test_missed_shots_death_requires_lost_duel_and_ten_observed_rounds(
+    ammo_drop: int | None, fired: bool, expected: bool
+) -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 0, "smoked": 0})
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(19.0, "damage", "掉了100血 剩0血"),
+            TimelineEntry(20.0, "death", None),
+        ),
+        fire_seconds=(19.0,) if fired else (),
+        last_readable_held_ammo_at_seconds=20.0,
+        last_firing_ammo_drop=ammo_drop,
+        last_firing_ammo_at_seconds=19.0,
+    )
+
+    card = render_event_card(snapshot, _game(snapshot), situation, _event(snapshot))
+
+    assert ("马枪死" in card) is expected
+    assert ("对枪输了" in card) is fired
 
 
 def test_scene_state_tags_require_thresholds_and_survival() -> None:

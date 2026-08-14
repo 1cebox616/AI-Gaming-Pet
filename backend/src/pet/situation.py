@@ -13,10 +13,11 @@ from pet.session import GameState
 
 # Thirty health is the common CS threshold where one more solid hit is lethal.
 LOW_HEALTH_THRESHOLD = 30
-# Below 1500 cash leaves few meaningful full-buy options in the next purchase.
-ECO_MONEY_THRESHOLD = 1500
-# Below 2000 equipment value represents a materially light current loadout.
-ECO_EQUIP_THRESHOLD = 2000
+# Equipment value is the single observable used for current-buy classification:
+# below 2000 is an eco, 2000--3999 is a force buy, and 4000+ is a full buy.
+# These product thresholds deliberately avoid guessing from money or enemy economy.
+ECO_EQUIP_VALUE_LIMIT = 2000
+FORCE_BUY_EQUIP_VALUE_LIMIT = 4000
 # One chambered round is the last-shot warning point before an empty magazine.
 LOW_AMMO_THRESHOLD = 1
 # These thresholds are product-level scene definitions, not user settings.
@@ -90,10 +91,9 @@ SCENE_TAGS: frozenset[str] = frozenset(
         "换枪后立刻杀",
         "白着被打死",
         "出烟就没了",
-        "一发命中",
-        "干净解决",
-        "打了半天",
-        "一梭子扫死",
+        "一枪秒",
+        "一梭子秒",
+        "打了多发",
         "大狙空枪",
         "连续空枪",
         "白惨了",
@@ -102,6 +102,8 @@ SCENE_TAGS: frozenset[str] = frozenset(
         "对枪输了",
         "一枪没开就没了",
         "打空了还是没打过",
+        "烟里死",
+        "马枪死",
     }
 )
 
@@ -174,6 +176,10 @@ class RoundSituation:
     fire_seconds: tuple[float, ...] = ()
     last_readable_held_ammo_at_seconds: float | None = None
     weapons_fired_this_round: frozenset[str] = frozenset()
+    # The most recent uniquely attributed firing run.  Death-card rendering uses
+    # it only within the combat window; absent attribution remains unlabelled.
+    last_firing_ammo_drop: int | None = None
+    last_firing_ammo_at_seconds: float | None = None
     # Deliberate GameSnapshot duplication: spectating replaces snapshot.team with
     # the teammate's team, while round-result cards still need the player's team.
     self_team: str | None = None
@@ -314,6 +320,11 @@ class SituationTracker:
         weapons_fired_this_round = (
             self._current.weapons_fired_this_round | frozenset(fired_weapons)
         )
+        last_firing_ammo_drop = self._current.last_firing_ammo_drop
+        last_firing_ammo_at_seconds = self._current.last_firing_ammo_at_seconds
+        if ammo_drop is not None and observed_firing_weapon is not None:
+            last_firing_ammo_drop = ammo_drop
+            last_firing_ammo_at_seconds = relative_seconds
         held = held_weapon(snapshot)
         last_readable_held_ammo_at_seconds = (
             relative_seconds
@@ -578,6 +589,8 @@ class SituationTracker:
             fire_seconds=fire_seconds,
             last_readable_held_ammo_at_seconds=last_readable_held_ammo_at_seconds,
             weapons_fired_this_round=weapons_fired_this_round,
+            last_firing_ammo_drop=last_firing_ammo_drop,
+            last_firing_ammo_at_seconds=last_firing_ammo_at_seconds,
             self_team=self_team,
             timeline=tuple(timeline),
         )
@@ -693,6 +706,8 @@ class SituationTracker:
             fire_seconds=(),
             last_readable_held_ammo_at_seconds=None,
             weapons_fired_this_round=frozenset(),
+            last_firing_ammo_drop=None,
+            last_firing_ammo_at_seconds=None,
             self_team=None,
             timeline=(),
         )
@@ -1402,14 +1417,21 @@ def is_low_health(snapshot: GameSnapshot) -> bool | None:
     return 0 < snapshot.health <= LOW_HEALTH_THRESHOLD
 
 
-def is_eco_round(snapshot: GameSnapshot) -> bool | None:
-    """Return whether both known economy signals are below their thresholds."""
-    if snapshot.money is None or snapshot.equip_value is None:
+def economy_tier(snapshot: GameSnapshot) -> Literal["eco局", "强起局", "全装局"] | None:
+    """Classify the known current loadout without inferring enemy economy."""
+    if snapshot.equip_value is None:
         return None
-    return (
-        snapshot.money < ECO_MONEY_THRESHOLD
-        and snapshot.equip_value < ECO_EQUIP_THRESHOLD
-    )
+    if snapshot.equip_value < ECO_EQUIP_VALUE_LIMIT:
+        return "eco局"
+    if snapshot.equip_value < FORCE_BUY_EQUIP_VALUE_LIMIT:
+        return "强起局"
+    return "全装局"
+
+
+def is_eco_round(snapshot: GameSnapshot) -> bool | None:
+    """Return whether the shared equipment-value classifier yields an eco."""
+    tier = economy_tier(snapshot)
+    return None if tier is None else tier == "eco局"
 
 
 def held_weapon(snapshot: GameSnapshot) -> WeaponSlot | None:

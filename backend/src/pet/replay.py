@@ -256,8 +256,8 @@ _PURE_FACTS: tuple[
     (
         _DerivedFact(
             "is_eco_round",
-            "player.state.money + player.state.equip_value",
-            "金钱低于 1500 且装备价值低于 2000",
+            "player.state.equip_value",
+            "装备价值低于 2000",
         ),
         is_eco_round,
     ),

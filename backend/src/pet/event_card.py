@@ -23,6 +23,7 @@ from pet.situation import (
     WEAPON_SWITCH_KILL_WINDOW_SECONDS,
     TimelineEntry,
     armor_status,
+    economy_tier,
     held_weapon,
     is_carrying_bomb,
     is_currently_flashed,
@@ -211,6 +212,9 @@ def _model_header(snapshot: GameSnapshot, event: GameEvent) -> str:
     losses = event.facts.get("team_consecutive_round_losses")
     if isinstance(losses, int) and losses > 0:
         parts.append(f"连败{losses}")
+    economic_tier = economy_tier(snapshot)
+    if economic_tier is not None:
+        parts.append(economic_tier)
     return " ".join(parts)
 
 
@@ -641,22 +645,28 @@ def _action_scene_tags(
             and weapon is not None
             and weapon.removeprefix("weapon_").lower() in _AMMO_SCENE_WEAPONS
         ):
-            if ammo_drop == 1:
-                tags.append(_scene("一发命中"))
-            elif 2 <= ammo_drop <= 5:
-                tags.append(_scene("干净解决"))
-            elif 6 <= ammo_drop <= 9:
-                tags.append(_scene("打了半天"))
+            # Weapon lethality varies (AK one shot, M4 two, SMG three), and
+            # players commonly keep spraying after a headshot.  GSI therefore
+            # observes 1--3 spent rounds for the practical "one-shot" shape.
+            if 1 <= ammo_drop <= 3:
+                tags.append(_scene("一枪秒"))
+            elif 4 <= ammo_drop <= 7:
+                tags.append(_scene("一梭子秒"))
+            elif 8 <= ammo_drop <= 9:
+                pass
             elif ammo_drop >= 10:
-                tags.append(_scene("一梭子扫死"))
+                tags.append(_scene("打了多发"))
     elif entry.kind == "death":
         if _interval_active_at(entries, index, "flash_start", "flash_end"):
             tags.append(_scene("白着被打死"))
-        smoke_gap = _previous_completed_effect_gap(
-            entries, index, kind="smoke_end"
-        )
-        if smoke_gap is not None and 0 <= smoke_gap <= SMOKE_DEATH_WINDOW_SECONDS:
-            tags.append(_scene("出烟就没了"))
+        if snapshot.smoked is not None and snapshot.smoked > 0:
+            tags.append(_scene("烟里死"))
+        else:
+            smoke_gap = _previous_completed_effect_gap(
+                entries, index, kind="smoke_end"
+            )
+            if smoke_gap is not None and 0 <= smoke_gap <= SMOKE_DEATH_WINDOW_SECONDS:
+                tags.append(_scene("出烟就没了"))
         if event.type in {"death", "death_after_kill", "death_thrown_away"}:
             tags.extend(
                 _death_combat_scene_tags(
@@ -688,8 +698,18 @@ def _death_combat_scene_tags(
         for entry in entries[: index + 1]
     )
     tags: list[str] = []
-    if fired_in_window and damaged_in_window:
+    lost_duel = fired_in_window and damaged_in_window
+    if lost_duel:
         tags.append(_scene("对枪输了"))
+        if (
+            round_situation.last_firing_ammo_drop is not None
+            and round_situation.last_firing_ammo_drop >= 10
+            and round_situation.last_firing_ammo_at_seconds is not None
+            and window_start
+            <= round_situation.last_firing_ammo_at_seconds
+            <= death_seconds
+        ):
+            tags.append(_scene("马枪死"))
     elif (
         not fired_in_window
         and round_situation.last_readable_held_ammo_at_seconds is not None

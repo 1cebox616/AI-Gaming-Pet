@@ -15,6 +15,7 @@ from pet.situation import (
     TimelineEntry,
     TimelineKind,
     armor_status,
+    economy_tier,
     held_weapon,
     is_carrying_bomb,
     is_currently_flashed,
@@ -1219,11 +1220,25 @@ def test_round_situation_records_fire_and_held_ammo_observations() -> None:
     assert result.fire_seconds == (1.0,)
     assert result.last_readable_held_ammo_at_seconds == 2.0
     assert result.weapons_fired_this_round == frozenset({"weapon_ak47"})
+    assert result.last_firing_ammo_drop == 2
+    assert result.last_firing_ammo_at_seconds == 2.0
 
 
 def test_scene_tags_enumerate_all_death_combat_labels() -> None:
-    assert len(SCENE_TAGS) == 22
-    assert {"对枪输了", "一枪没开就没了", "打空了还是没打过"} <= SCENE_TAGS
+    assert len(SCENE_TAGS) == 23
+    assert {
+        "对枪输了",
+        "一枪没开就没了",
+        "打空了还是没打过",
+        "烟里死",
+        "马枪死",
+    } <= SCENE_TAGS
+    assert not {
+        "一发命中",
+        "干净解决",
+        "打了半天",
+        "一梭子扫死",
+    } & SCENE_TAGS
 
 
 def test_burn_damage_is_conservatively_counted_only_inside_burning_interval() -> None:
@@ -1277,6 +1292,7 @@ def test_self_team_updates_only_from_self_and_resets_with_round() -> None:
 
 PURE_FUNCTIONS: tuple[Callable[[GameSnapshot], object | None], ...] = (
     is_low_health,
+    economy_tier,
     is_eco_round,
     is_low_ammo,
     armor_status,
@@ -1317,6 +1333,7 @@ def test_pure_derivations_apply_declared_thresholds_and_weapon_state() -> None:
     )
 
     assert is_low_health(snapshot) is True
+    assert economy_tier(snapshot) == "eco局"
     assert is_eco_round(snapshot) is True
     assert is_low_ammo(snapshot) is True
     assert armor_status(snapshot) == "有甲"
@@ -1324,6 +1341,24 @@ def test_pure_derivations_apply_declared_thresholds_and_weapon_state() -> None:
     assert held_weapon(snapshot).name == "weapon_deagle"
     assert is_currently_flashed(snapshot) is True
     assert is_currently_smoked(snapshot) is True
+
+
+@pytest.mark.parametrize(
+    ("equip_value", "expected"),
+    (
+        (1999, "eco局"),
+        (2000, "强起局"),
+        (3999, "强起局"),
+        (4000, "全装局"),
+    ),
+)
+def test_economy_tier_uses_equipment_value_boundaries(
+    equip_value: int, expected: str
+) -> None:
+    snapshot = _snapshot(1.0, money=None, equip_value=equip_value)
+
+    assert economy_tier(snapshot) == expected
+    assert is_eco_round(snapshot) is (expected == "eco局")
 
 
 def test_is_carrying_bomb_distinguishes_missing_known_and_c4_lists() -> None:
