@@ -548,7 +548,7 @@ def render_fact_sentence_audit_report(
     cases: Sequence[FactSentenceAuditCase],
 ) -> str:
     """Render deterministic answer-key coverage without a model invocation."""
-    lengths = sorted(_chinese_character_count(case.fact_sentence) for case in cases)
+    lengths = sorted(_fact_process_character_count(case.fact_sentence) for case in cases)
     missing_cases = tuple(
         case.case_id
         for case in cases
@@ -559,7 +559,7 @@ def render_fact_sentence_audit_report(
     )
     median = statistics.median(lengths) if lengths else 0
     lines = [
-        "# M3-T8.14 分区事实句离线核验",
+        "# M3-T8.15 分区事实句离线核验",
         "",
         "- 模式：只渲染代码事实句；未调用模型、未读取密钥。",
         f"- 题数：{len(cases)}",

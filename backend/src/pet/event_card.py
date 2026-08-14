@@ -266,9 +266,42 @@ def _fact_process(focus_line: str, event: GameEvent, tags: list[str]) -> str:
     if "残血击杀" in tags or "血皮撑住了" in tags:
         expression = re.sub(r"掉了(\d+)血", r"掉了\1血", expression)
     expression = re.sub(r"用弹(\d+)", r"用弹\1发", expression)
+    expression = _compress_fact_process(expression)
     expression = re.sub(r"[，、｜ ]{2,}", "，", expression).strip("，； ")
     parts = ([stage] if stage and stage != "阶段不可判断" else []) + ([expression] if expression else [])
     return "，".join(parts) if parts else _plain_event_fallback(event).removeprefix("你")
+
+
+def _compress_fact_process(expression: str) -> str:
+    """Compress repeated observations without changing the observed outcome.
+
+    A focus segment can contain several damage snapshots for one exchange.  The
+    individual deltas are additive, so one total is the same fact in a shorter,
+    readable form.  Durations attached to flash and smoke state transitions are
+    navigation detail rather than a separate action; the transition itself is
+    retained while the decimal timestamp is omitted.
+    """
+    damage_matches = tuple(re.finditer(r"掉了(\d+)血", expression))
+    if len(damage_matches) > 1:
+        total_damage = sum(int(match.group(1)) for match in damage_matches)
+        for match in reversed(damage_matches[1:]):
+            prefix_start = match.start()
+            if expression[max(0, match.start() - 3) : match.start()] == "，随后":
+                prefix_start = match.start() - 3
+            elif match.start() > 0 and expression[match.start() - 1] == "，":
+                prefix_start = match.start() - 1
+            expression = expression[:prefix_start] + expression[match.end() :]
+        first = damage_matches[0]
+        expression = (
+            expression[: first.start()]
+            + f"掉了{total_damage}血"
+            + expression[first.end() :]
+        )
+    expression = re.sub(r"受闪光影响未结束\s*已持续\d+(?:\.\d+)?秒", "仍被闪", expression)
+    expression = re.sub(r"闪光影响结束\s*持续\d+(?:\.\d+)?秒", "闪光结束", expression)
+    expression = re.sub(r"出烟\s*持续\d+(?:\.\d+)?秒", "出烟", expression)
+    expression = re.sub(r"弹匣打空\s+([^，]+)", r"\1弹匣打空", expression)
+    return expression.replace("，随后", "，")
 
 
 def _fact_sentence_context(snapshot: GameSnapshot, event: GameEvent) -> str:

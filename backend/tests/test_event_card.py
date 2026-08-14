@@ -1277,7 +1277,7 @@ def test_fact_sentence_renders_neutral_kill_clauses_exactly() -> None:
 
     assert sentence == (
         "de_anubis CT 2:3 落后 全装局\n【事件】爆头击杀\n"
-        "【过程】前期，玩家掉了72血，随后使用AK47完成击杀 爆头 用弹13发\n"
+        "【过程】前期，玩家掉了72血，使用AK47完成击杀 爆头 用弹13发\n"
         "【场景标签】对枪胜利、打了多发、血皮撑住了"
     )
 
@@ -1340,6 +1340,28 @@ def test_fact_sentence_keeps_death_combat_facts_without_slang() -> None:
 
     sentence = render_fact_sentence(snapshot, _game(snapshot), situation, _event(snapshot))
 
-    assert "【过程】前期，玩家掉了100血，随后阵亡" in sentence
+    assert "【过程】前期，玩家掉了100血，阵亡" in sentence
     assert "【场景标签】对枪输了、马枪死" in sentence
     assert "可观测" not in sentence
+
+
+def test_fact_sentence_merges_repeated_damage_without_losing_the_exchange() -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 0})
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(49.0, "damage", "掉了46血 剩54血"),
+            TimelineEntry(49.1, "flash_start", None),
+            TimelineEntry(49.2, "damage", "掉了13血 剩41血"),
+            TimelineEntry(49.3, "ammo_low", "弹匣打空 M4A1-S"),
+            TimelineEntry(49.4, "damage", "掉了41血 剩0血"),
+            TimelineEntry(49.5, "death", None),
+        ),
+    )
+
+    sentence = render_fact_sentence(snapshot, _game(snapshot), situation, _event(snapshot))
+    process = sentence.splitlines()[2]
+
+    assert process == "【过程】中期，玩家掉了100血，被闪，M4A1-S弹匣打空，阵亡"
+    assert len("".join(char for char in process.removeprefix("【过程】") if "\u4e00" <= char <= "\u9fff")) <= 40
