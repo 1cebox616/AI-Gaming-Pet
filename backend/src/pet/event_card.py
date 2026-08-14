@@ -194,6 +194,208 @@ def render_model_event_card(
     return "\n".join(part for part in (header, direct_focus) if part)
 
 
+def render_fact_sentence(
+    snapshot: GameSnapshot,
+    game: GameState,
+    round_situation: RoundSituation,
+    event: GameEvent,
+    *,
+    death_after_kill_max_seconds: float = 8.0,
+) -> str:
+    """Render the focused event as plain Chinese prose for the style layer.
+
+    This is deliberately a rendering pass over the same deterministic focus used
+    by the compact event card.  It does not infer a new event, scene, player, or
+    opponent fact; the style layer receives prose instead of having to decode
+    card labels.
+    """
+    current_round = human_round_number(snapshot)
+    focus_line: str | None = None
+    if round_situation.round_number == current_round:
+        event_self_team = event.facts.get("self_team")
+        self_team = round_situation.self_team or (
+            event_self_team if isinstance(event_self_team, str) else None
+        )
+        _, focus_line = _timeline_sections(
+            round_situation.timeline,
+            self_team=self_team,
+            death_after_kill_max_seconds=death_after_kill_max_seconds,
+            event=event,
+            snapshot=snapshot,
+            round_situation=round_situation,
+        )
+    if focus_line is None:
+        focus_line = " ".join(_event_facts(event))
+
+    context = _fact_sentence_context(snapshot, event)
+    focus = _fact_sentence_focus(
+        focus_line,
+        event,
+        state_tags=_round_state_tags(snapshot, round_situation, game),
+    )
+    return "。".join(part.rstrip("。") for part in (context, focus) if part) + "。"
+
+
+def _fact_sentence_context(snapshot: GameSnapshot, event: GameEvent) -> str:
+    """Render only static, directly observable match context as one clause."""
+    parts: list[str] = []
+    round_number = event.round_number
+    if round_number is not None:
+        parts.append(f"第{round_number}回合")
+    if snapshot.map_name is not None:
+        parts.append(f"地图{snapshot.map_name}")
+    self_team = event.facts.get("self_team")
+    if self_team in {"CT", "T"}:
+        parts.append(f"你在{self_team}方")
+    self_score = event.facts.get("self_score")
+    opponent_score = event.facts.get("opponent_score")
+    if isinstance(self_score, int) and isinstance(opponent_score, int):
+        parts.append(f"比分{self_score}比{opponent_score}")
+    score_situation = event.facts.get("score_situation")
+    if isinstance(score_situation, str) and score_situation:
+        parts.append(score_situation)
+    losses = event.facts.get("team_consecutive_round_losses")
+    if isinstance(losses, int) and losses > 0:
+        parts.append(f"已连败{losses}回合")
+    tier = economy_tier(snapshot)
+    if tier is not None:
+        parts.append(f"这把是{tier}")
+    return "，".join(parts)
+
+
+def _fact_sentence_focus(
+    focus_line: str,
+    event: GameEvent,
+    *,
+    state_tags: tuple[str, ...],
+) -> str:
+    """Compose reusable factual clauses from one lossless timeline focus."""
+    match = _FOCUS_LINE_PATTERN.fullmatch(focus_line.strip())
+    if match is None:
+        return _plain_event_fallback(event)
+
+    marker = match.group("marker") or ""
+    marker_facts = tuple(
+        fact
+        for fact in marker.removeprefix("【").removesuffix("】").split("｜")
+        if fact
+    )
+    stage = next(
+        (fact for fact in marker_facts if not fact.startswith("连续事件")), None
+    )
+    duration = next(
+        (
+            fact.removeprefix("连续事件").removesuffix("秒")
+            for fact in marker_facts
+            if fact.startswith("连续事件")
+        ),
+        None,
+    )
+    seconds = match.group("seconds")
+    context: list[str] = []
+    if stage is not None and stage != "阶段不可判断":
+        context.append(f"{stage}阶段")
+    elif stage == "阶段不可判断":
+        context.append("未观测到回合阶段")
+    if seconds is not None:
+        context.append(f"回合开始后{float(seconds):.1f}秒")
+    if duration is not None:
+        context.append(f"这段连续过程持续{float(duration):.1f}秒")
+
+    expression = match.group("expression").strip()
+    expression = re.sub(r"本次焦点：[^｜）]+(?:｜)?", "", expression)
+    tags = [label for label in sorted(SCENE_TAGS) if label in focus_line]
+    tags.extend(label for label in state_tags if label not in tags)
+    for label in tags:
+        expression = expression.replace(label, "")
+    expression = expression.replace("（", "，").replace("）", "")
+    expression = expression.replace(" > ", "，随后")
+    expression = expression.replace(" + ", "；同一时刻")
+    expression = expression.replace("｜", "，")
+    expression = expression.replace("玩家", "你")
+    expression = re.sub(r"掉了(\d+)血\s*剩(\d+)血", r"掉了\1血，还剩\2血", expression)
+    expression = expression.replace("使用", "用")
+    expression = re.sub(r"用弹(\d+)", r"打了\1发", expression)
+    expression = expression.replace("完成击杀 爆头", "爆头完成击杀")
+    expression = re.sub(r"(爆头完成击杀)\s*(打了\d+发)", r"\1，\2", expression)
+    expression = re.sub(
+        r"你用([^，； ]+)完成击杀\s*爆头\s*打了(\d+)发",
+        r"你用\1爆头完成击杀，打了\2发",
+        expression,
+    )
+    expression = expression.replace("完成击杀", "完成击杀")
+    expression = re.sub(r"[、｜， ]{2,}", "，", expression).strip("，； ")
+
+    clauses = ["，".join(context)] if context else []
+    if expression:
+        clauses.append(expression)
+    clauses.extend(_scene_fact_clauses(tags, event))
+    return "；".join(dict.fromkeys(clause for clause in clauses if clause))
+
+
+def _plain_event_fallback(event: GameEvent) -> str:
+    """Keep an incomplete timeline truthful rather than manufacturing detail."""
+    labels = {
+        "kill": "你完成击杀",
+        "kill_headshot": "你爆头完成击杀",
+        "multi_kill": "你完成多杀",
+        "death": "你阵亡",
+        "death_after_kill": "你完成击杀后不久阵亡",
+        "death_thrown_away": "你在本回合早段阵亡",
+        "round_win": "本回合获胜",
+        "round_loss": "本回合失利",
+    }
+    return labels[event.type]
+
+
+def _scene_fact_clauses(tags: Iterable[str], event: GameEvent) -> list[str]:
+    """Express scene conclusions as neutral facts, never their slang labels."""
+    clauses: list[str] = []
+    for tag in tags:
+        clause = {
+            "对枪胜利": "你受伤后仍完成击杀",
+            "摸烟击杀": "你在出烟后不久完成击杀",
+            "击杀后被补枪": "你完成击杀后不久阵亡",
+            "白给": _thrown_away_clause(event),
+            "残血击杀": "你在残血时完成击杀",
+            "白着打": "你受闪光影响时完成击杀",
+            "踩火杀": "你在燃烧状态下完成击杀",
+            "换枪后立刻杀": "你换主武器后不久完成击杀",
+            "白着被打死": "你受闪光影响时阵亡",
+            "出烟就没了": "你出烟后不久阵亡",
+            "烟里死": "你仍在烟雾中时阵亡",
+            "一枪秒": "这次击杀的可观测用弹为1到3发",
+            "一梭子秒": "这次击杀的可观测用弹为4到7发",
+            "打了多发": "这次击杀的可观测用弹至少10发",
+            "大狙空枪": "本回合已观测到AWP未伴随击杀的开火",
+            "连续空枪": "本回合已多次观测到AWP未伴随击杀的开火",
+            "白惨了": "本回合受到较长或多次闪光影响",
+            "烧惨了": "本回合在燃烧期间累计掉血至少30",
+            "血皮撑住了": "本回合曾降到30血或以下仍存活",
+            "对枪输了": "你在受伤的交火后阵亡",
+            "一枪没开就没了": "可读弹匣窗口内未观测到开火就阵亡",
+            "打空了还是没打过": "阵亡时手持武器弹匣已空，且本回合该枪开过火",
+            "马枪死": "阵亡前这次交火的可观测用弹至少10发",
+        }.get(tag)
+        if clause is not None:
+            clauses.append(clause)
+    return clauses
+
+
+def _thrown_away_clause(event: GameEvent) -> str:
+    survival = event.facts.get("survival_seconds")
+    kills = event.facts.get("round_kills")
+    equip = event.facts.get("equip_value")
+    parts: list[str] = []
+    if isinstance(survival, (int, float)):
+        parts.append(f"开打{_seconds(float(survival))}秒")
+    if kills == 0:
+        parts.append("本回合零杀")
+    if isinstance(equip, int):
+        parts.append(f"装备价值{equip}")
+    return "、".join(parts) + "时阵亡" if parts else "你在本回合早段阵亡"
+
+
 def _model_header(snapshot: GameSnapshot, event: GameEvent) -> str:
     """Render the product-approved one-line static match context."""
     parts: list[str] = []

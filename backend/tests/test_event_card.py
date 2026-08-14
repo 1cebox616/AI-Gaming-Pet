@@ -11,7 +11,7 @@ from pet.events import GameEvent
 from pet.gsi import GameSnapshot, WeaponSlot, parse_snapshot
 from pet.session import GameState
 from pet.situation import RoundSituation, TimelineEntry
-from pet.event_card import render_event_card, render_model_event_card
+from pet.event_card import render_event_card, render_fact_sentence, render_model_event_card
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 
@@ -1249,3 +1249,71 @@ def test_timeline_code_labels_split_stage_multi_kills_without_model_arithmetic()
     assert "21.0s【前期】 玩家使用AK47完成击杀（本回合第1杀）" in card
     assert "52.0s【反攻包点】 玩家使用AK47完成击杀（本回合第2杀）" in card
     assert "57.0s【反攻包点】 玩家使用AK47完成击杀（本回合第3杀｜该阶段双杀）" in card
+
+
+def test_fact_sentence_renders_neutral_kill_clauses_exactly() -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 28})
+    event = _event(snapshot).model_copy(
+        update={
+            "type": "kill_headshot",
+            "facts": {
+                "self_team": "CT",
+                "self_score": 2,
+                "opponent_score": 3,
+                "score_situation": "落后",
+            },
+        }
+    )
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(19.0, "damage", "掉了72血 剩28血"),
+            TimelineEntry(19.4, "kill", "AK47 爆头 用弹13"),
+        ),
+    )
+
+    sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
+
+    assert sentence == (
+        "第6回合，地图de_anubis，你在CT方，比分2比3，落后，这把是全装局。"
+        "前期阶段，回合开始后19.4秒，这段连续过程持续0.4秒；"
+        "你掉了72血，还剩28血，随后用AK47爆头完成击杀，打了13发，本回合第1杀，间隔0.4秒；"
+        "你受伤后仍完成击杀；这次击杀的可观测用弹至少10发；"
+        "本回合曾降到30血或以下仍存活。"
+    )
+
+
+def test_fact_sentence_renders_neutral_death_and_missing_fallback() -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 0, "equip_value": None})
+    situation = replace(_situation(), timeline=())
+    event = _event(snapshot).model_copy(
+        update={"type": "death_after_kill", "facts": {"self_team": "CT"}}
+    )
+
+    sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
+
+    assert sentence == "第6回合，地图de_anubis，你在CT方。你完成击杀后不久阵亡。"
+    assert "None" not in sentence
+
+
+def test_fact_sentence_keeps_death_combat_facts_without_slang() -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 0})
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(18.0, "damage", "掉了100血 剩0血"),
+            TimelineEntry(18.1, "death", None),
+        ),
+        fire_seconds=(18.0,),
+        last_firing_ammo_drop=12,
+        last_firing_ammo_at_seconds=18.0,
+    )
+
+    sentence = render_fact_sentence(snapshot, _game(snapshot), situation, _event(snapshot))
+
+    assert "你在受伤的交火后阵亡" in sentence
+    assert "阵亡前这次交火的可观测用弹至少10发" in sentence
+    assert "对枪输了" not in sentence
+    assert "马枪死" not in sentence

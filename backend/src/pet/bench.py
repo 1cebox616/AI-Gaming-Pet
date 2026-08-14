@@ -32,7 +32,10 @@ from pet.llm import (
 )
 from pet.prompt import PROMPTS_DIRECTORY, PromptPersonality, load_system_prompt
 from pet.replay import load_recording, replay_commentary
-from pet.event_card import render_event_card, render_model_event_card
+from pet.event_card import (
+    render_event_card,
+    render_model_event_card,
+)
 
 TEMPERATURE = 0.9
 ANALYSIS_TEMPERATURE = 0.0
@@ -181,6 +184,18 @@ class BenchResult:
     truncated_event_count: int
     length_statistics: LengthStatistics
     events: tuple[BenchEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FactSentenceAuditCase:
+    """One deterministic fact sentence paired with its immutable rubric."""
+
+    case_id: str
+    fact_sentence: str
+    model_card: str
+    required_facts: tuple[str, ...]
+    forbidden_claims: tuple[str, ...]
+    omitted_facts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,6 +542,96 @@ def run_bench(
         length_statistics=length_statistics,
         events=tuple(events),
     )
+
+
+def render_fact_sentence_audit_report(
+    cases: Sequence[FactSentenceAuditCase],
+) -> str:
+    """Render deterministic answer-key coverage without a model invocation."""
+    lengths = sorted(_chinese_character_count(case.fact_sentence) for case in cases)
+    missing_cases = tuple(
+        case.case_id
+        for case in cases
+        if any(
+            not _fact_has_sentence_evidence(fact, case.fact_sentence)
+            for fact in case.required_facts
+        )
+    )
+    median = statistics.median(lengths) if lengths else 0
+    lines = [
+        "# M3-T8.13 自然语言事实句离线核验",
+        "",
+        "- 模式：只渲染代码事实句；未调用模型、未读取密钥。",
+        f"- 题数：{len(cases)}",
+        (
+            "- 汉字长度（最短 / 中位 / 最长）："
+            f"{lengths[0] if lengths else 0} / {median:g} / {lengths[-1] if lengths else 0}"
+        ),
+        "- 有必答项未覆盖的题目："
+        + ("无" if not missing_cases else "、".join(f"`{case_id}`" for case_id in missing_cases)),
+        "",
+    ]
+    for index, case in enumerate(cases, 1):
+        covered = tuple(
+            fact for fact in case.required_facts if _fact_has_sentence_evidence(fact, case.fact_sentence)
+        )
+        missing = tuple(fact for fact in case.required_facts if fact not in covered)
+        forbidden = tuple(
+            claim for claim in case.forbidden_claims if claim and claim in case.fact_sentence
+        )
+        lines.extend(
+            (
+                f"### {index}. `{case.case_id}`",
+                f"事实句：{case.fact_sentence}",
+                "必答覆盖：" + "  ".join(
+                    f"{'✅' if fact in covered else '❌'} {fact}" for fact in case.required_facts
+                ),
+                "禁项检查：" + ("✅ 无" if not forbidden else "❌ " + "、".join(forbidden)),
+                "因长度舍弃：" + ("无" if not case.omitted_facts else "、".join(case.omitted_facts)),
+                "对照——精简卡原文：",
+                "```text",
+                case.model_card,
+                "```",
+                "",
+            )
+        )
+    return "\n".join(lines)
+
+
+def _fact_has_sentence_evidence(required_fact: str, sentence: str) -> bool:
+    """Match frozen semantic atoms to their neutral prose evidence.
+
+    Answer keys deliberately retain their historical labels.  This map keeps
+    those labels immutable while checking the equivalent wording emitted by the
+    deterministic fact renderer.
+    """
+    if required_fact in sentence:
+        return True
+    evidence = {
+        "普通击杀": ("完成击杀",),
+        "爆头击杀": ("爆头", "完成击杀"),
+        "普通死亡": ("阵亡",),
+        "对枪胜利": ("受伤后仍完成击杀",),
+        "击杀后被补枪": ("完成击杀后不久阵亡",),
+        "对枪输了": ("受伤的交火后阵亡",),
+        "白着打": ("受闪光影响时完成击杀",),
+        "白着被打死": ("受闪光影响时阵亡",),
+        "受闪光影响未结束": ("受闪光影响时",),
+        "摸烟击杀": ("出烟后不久完成击杀",),
+        "出烟就没了": ("出烟后不久阵亡",),
+        "残血击杀": ("残血时完成击杀",),
+        "残血": ("降到30血或以下",),
+        "换枪后立刻杀": ("换主武器后不久完成击杀",),
+        "一枪秒": ("可观测用弹为1到3发",),
+        "一梭子秒": ("可观测用弹为4到7发",),
+        "打了多发": ("可观测用弹至少10发",),
+        "一枪没开就没了": ("未观测到开火就阵亡",),
+        "马枪死": ("交火的可观测用弹至少10发",),
+        "白给": ("本回合零杀", "时阵亡"),
+        "弹匣打空": ("弹匣已空",),
+    }
+    terms = evidence.get(required_fact, (required_fact,))
+    return all(term in sentence for term in terms)
 
 
 def run_latency_experiment(
