@@ -271,7 +271,7 @@ def _fact_sentence_focus(
 ) -> str:
     """Compose reusable factual clauses from one lossless timeline focus."""
     match = _FOCUS_LINE_PATTERN.fullmatch(focus_line.strip())
-    if match is None:
+    if match is None or (match.group("marker") is None and match.group("seconds") is None):
         return _plain_event_fallback(event)
 
     marker = match.group("marker") or ""

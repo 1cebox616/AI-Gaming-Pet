@@ -1297,6 +1297,36 @@ def test_fact_sentence_renders_neutral_death_and_missing_fallback() -> None:
     assert "None" not in sentence
 
 
+@pytest.mark.parametrize(
+    ("event_type", "expected_focus"),
+    (
+        ("kill", "你完成击杀"),
+        ("kill_headshot", "你爆头完成击杀"),
+        ("multi_kill", "你完成多杀"),
+        ("death", "你阵亡"),
+        ("death_after_kill", "你完成击杀后不久阵亡"),
+        ("death_thrown_away", "你在本回合早段阵亡"),
+    ),
+)
+def test_fact_sentence_fallback_has_exact_neutral_phrase_for_each_speech_event(
+    event_type: str, expected_focus: str
+) -> None:
+    snapshot = _real_snapshot()
+    event = _event(snapshot).model_copy(update={"type": event_type})
+
+    sentence = render_fact_sentence(
+        snapshot,
+        _game(snapshot),
+        replace(_situation(), timeline=()),
+        event,
+    )
+
+    assert sentence == (
+        "第6回合，地图de_anubis，你在CT方，比分2比3，落后，已连败2回合，这把是全装局。"
+        f"{expected_focus}。"
+    )
+
+
 def test_fact_sentence_keeps_death_combat_facts_without_slang() -> None:
     snapshot = _real_snapshot().model_copy(update={"health": 0})
     situation = replace(
