@@ -1277,7 +1277,7 @@ def test_fact_sentence_renders_neutral_kill_clauses_exactly() -> None:
 
     assert sentence == (
         "de_anubis CT 2:3 落后 全装局\n【事件】爆头击杀\n"
-        "【过程】前期，玩家掉了72血，使用AK47完成击杀 爆头 用弹13发\n"
+        "【过程】前期，玩家掉了72血，还剩28血，使用AK47完成击杀 爆头 用弹13发\n"
         "【场景标签】对枪胜利、打了多发、血皮撑住了"
     )
 
@@ -1345,7 +1345,7 @@ def test_fact_sentence_keeps_death_combat_facts_without_slang() -> None:
     assert "可观测" not in sentence
 
 
-def test_fact_sentence_merges_repeated_damage_without_losing_the_exchange() -> None:
+def test_fact_sentence_does_not_merge_damage_across_other_events() -> None:
     snapshot = _real_snapshot().model_copy(update={"health": 0})
     situation = replace(
         _situation(),
@@ -1363,5 +1363,32 @@ def test_fact_sentence_merges_repeated_damage_without_losing_the_exchange() -> N
     sentence = render_fact_sentence(snapshot, _game(snapshot), situation, _event(snapshot))
     process = sentence.splitlines()[2]
 
-    assert process == "【过程】中期，玩家掉了100血，被闪，M4A1-S弹匣打空，阵亡"
-    assert len("".join(char for char in process.removeprefix("【过程】") if "\u4e00" <= char <= "\u9fff")) <= 40
+    assert process == (
+        "【过程】中期，玩家掉了46血，被闪，掉了13血，"
+        "M4A1-S弹匣打空，掉了41血，阵亡"
+    )
+
+
+def test_fact_sentence_summarizes_multikill_without_losing_kill_count() -> None:
+    snapshot = _real_snapshot()
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(20.0, "kill", "AK47"),
+            TimelineEntry(21.0, "damage", "掉了46血 剩54血"),
+            TimelineEntry(22.0, "kill", "M4A1-S"),
+            TimelineEntry(23.0, "damage", "掉了13血 剩41血"),
+            TimelineEntry(24.0, "kill", "M4A1-S"),
+            TimelineEntry(25.0, "kill", "M4A1-S"),
+            TimelineEntry(26.0, "kill", "M4A1-S 爆头"),
+        ),
+    )
+    event = _event(snapshot).model_copy(update={"type": "multi_kill", "facts": {"count": 5}})
+
+    sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
+
+    assert sentence.splitlines()[2] == (
+        "【过程】前期，玩家用AK47，换成M4A1-S接着陆续拿到五杀，"
+        "期间掉了59血，最后一杀爆头"
+    )

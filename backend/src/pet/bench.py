@@ -559,7 +559,7 @@ def render_fact_sentence_audit_report(
     )
     median = statistics.median(lengths) if lengths else 0
     lines = [
-        "# M3-T8.15 分区事实句离线核验",
+        "# M3-T8.16 分区事实句离线核验",
         "",
         "- 模式：只渲染代码事实句；未调用模型、未读取密钥。",
         f"- 题数：{len(cases)}",
@@ -588,7 +588,7 @@ def render_fact_sentence_audit_report(
                 ),
                 "禁项检查：" + ("✅ 无" if not forbidden else "❌ " + "、".join(forbidden)),
                 "【过程】汉字数：" + str(_fact_process_character_count(case.fact_sentence)),
-                "因长度舍弃：" + ("无" if not case.omitted_facts else "、".join(case.omitted_facts)),
+                "因取舍舍弃：" + ("无" if not case.omitted_facts else "、".join(case.omitted_facts)),
                 "对照——M3-T8.13 旧事实句：",
                 "```text",
                 case.model_card,
@@ -614,8 +614,15 @@ def _fact_has_sentence_evidence(required_fact: str, sentence: str) -> bool:
     """
     if required_fact in sentence:
         return True
+    if required_fact == "残血":
+        return re.search(r"还剩(?:[0-2]?\d|30)血", sentence) is not None
     evidence = {
         "普通击杀": ("完成击杀",),
+        "本回合第2杀": ("双杀",),
+        "本回合累计3杀": ("三杀",),
+        "本回合第4杀": ("四杀",),
+        "本回合第5杀": ("五杀",),
+        "该阶段三杀": ("三杀",),
         "爆头击杀": ("爆头", "完成击杀"),
         "普通死亡": ("阵亡",),
         "对枪胜利": ("受伤后仍完成击杀",),
@@ -623,7 +630,9 @@ def _fact_has_sentence_evidence(required_fact: str, sentence: str) -> bool:
         "对枪输了": ("受伤的交火后阵亡",),
         "白着打": ("受闪光影响时完成击杀",),
         "白着被打死": ("受闪光影响时阵亡",),
-        "受闪光影响未结束": ("受闪光影响时",),
+        "受闪光影响未结束": ("仍被闪",),
+        "闪光影响结束": ("闪光结束",),
+        "进烟后出烟": ("进烟", "出烟"),
         "摸烟击杀": ("出烟后不久完成击杀",),
         "出烟就没了": ("出烟后不久阵亡",),
         "残血击杀": ("残血时完成击杀",),

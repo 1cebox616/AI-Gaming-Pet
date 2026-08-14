@@ -66,9 +66,6 @@ _ZERO_SIGNAL_EVENT_FACTS = {
 _STAGE_ANNOTATED_TIMELINE_KINDS = frozenset({"kill", "death"})
 _CARD_HIDDEN_TIMELINE_KINDS = frozenset({"reload"})
 _NEARBY_COMBAT_SECONDS = 1.0
-_REQUIRED_FACT_CHAR_BUDGET = 30
-_DROPPED_REQUIRED_PREFIX = "因字数丢弃："
-_HAN_CHARACTER = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 _CONTINUOUS_EVENT_MAX_SECONDS = 3.0
 _CONTINUOUS_EVENT_KINDS = frozenset(
     {
@@ -230,11 +227,29 @@ def render_fact_sentence(
     state_tags = _round_state_tags(snapshot, round_situation, game)
     tags = [label for label in sorted(SCENE_TAGS) if label in focus_line]
     tags.extend(label for label in state_tags if label not in tags)
+    if event.type == "multi_kill":
+        for index, entry in enumerate(round_situation.timeline):
+            if entry.kind != "kill":
+                continue
+            for label in _action_scene_tags(
+                round_situation.timeline,
+                index,
+                event=event,
+                snapshot=snapshot,
+                round_situation=round_situation,
+            ):
+                if label not in tags:
+                    tags.append(label)
+    process = (
+        _fact_multikill_process(snapshot, round_situation, event)
+        if event.type == "multi_kill"
+        else _fact_process(focus_line, event, tags)
+    )
     return "\n".join(
         (
             _model_header(snapshot, event),
             f"【事件】{_fact_event_label(event.type)}",
-            f"【过程】{_fact_process(focus_line, event, tags)}",
+            f"【过程】{process}",
             f"【场景标签】{'、'.join(tags) if tags else '无'}",
         )
     )
@@ -262,14 +277,150 @@ def _fact_process(focus_line: str, event: GameEvent, tags: list[str]) -> str:
     expression = re.sub(r"本次焦点：[^｜）]+", "", expression)
     expression = expression.replace(" > ", "，随后").replace(" + ", "，")
     expression = expression.replace("玩家", "玩家")
-    expression = re.sub(r"掉了(\d+)血\s*剩\d+血", r"掉了\1血", expression)
     if "残血击杀" in tags or "血皮撑住了" in tags:
-        expression = re.sub(r"掉了(\d+)血", r"掉了\1血", expression)
+        expression = re.sub(r"掉了(\d+)血\s*剩(\d+)血", r"掉了\1血，还剩\2血", expression)
+    else:
+        expression = re.sub(r"掉了(\d+)血\s*剩\d+血", r"掉了\1血", expression)
     expression = re.sub(r"用弹(\d+)", r"用弹\1发", expression)
     expression = _compress_fact_process(expression)
     expression = re.sub(r"[，、｜ ]{2,}", "，", expression).strip("，； ")
     parts = ([stage] if stage and stage != "阶段不可判断" else []) + ([expression] if expression else [])
     return "，".join(parts) if parts else _plain_event_fallback(event).removeprefix("你")
+
+
+def _fact_multikill_process(
+    snapshot: GameSnapshot,
+    round_situation: RoundSituation,
+    event: GameEvent,
+) -> str:
+    """Summarize every kill represented by a multi-kill event exactly once."""
+    entries = round_situation.timeline
+    focus_index = _focus_entry_index(entries, event)
+    if focus_index is None:
+        return _plain_event_fallback(event).removeprefix("你")
+    kill_indexes = tuple(
+        index
+        for index, entry in enumerate(entries[: focus_index + 1])
+        if entry.kind == "kill"
+    )
+    if not kill_indexes:
+        return _plain_event_fallback(event).removeprefix("你")
+
+    observed_live = any(entry.kind == "round_live" for entry in entries)
+    stages = _timeline_stages(
+        entries,
+        self_team=round_situation.self_team,
+        observed_live=observed_live,
+    )
+    count_fact = event.facts.get("count")
+    counted_kills = sum(_timeline_kill_increase(entries[index]) for index in kill_indexes)
+    kill_count = (
+        count_fact
+        if isinstance(count_fact, int) and count_fact >= 2
+        else max(counted_kills, 2)
+    )
+    segment_indexes = next(
+        (
+            group
+            for group in _continuous_event_groups(entries)
+            if all(index in group for index in kill_indexes)
+        ),
+        (),
+    )
+    connected = bool(segment_indexes)
+    stage_values = tuple(
+        dict.fromkeys(
+            stage
+            for index in kill_indexes
+            if (stage := stages[index]) is not None and stage != "阶段不可判断"
+        )
+    )
+    weapons = tuple(
+        dict.fromkeys(
+            weapon
+            for index in kill_indexes
+            if (weapon := _kill_weapon(entries[index].detail)) is not None
+        )
+    )
+    context = _multikill_stage_context(stage_values)
+    action = _multikill_action_phrase(weapons, kill_count, connected)
+    focus_end = focus_index
+    while (
+        focus_end + 1 < len(entries)
+        and entries[focus_end + 1].seconds == entries[focus_index].seconds
+    ):
+        focus_end += 1
+    damage_total = sum(
+        int(match.group(1))
+        for entry in entries[kill_indexes[0] : focus_end + 1]
+        for match in re.finditer(r"掉了(\d+)血", entry.detail or "")
+        if entry.kind == "damage"
+    )
+    parts = [part for part in (context, action) if part]
+    if damage_total:
+        parts.append(f"期间掉了{damage_total}血")
+    parts.extend(
+        _multikill_finish_clauses(
+            entries,
+            kill_indexes,
+            event,
+            snapshot,
+            round_situation,
+        )
+    )
+    return "，".join(parts)
+
+
+def _multikill_stage_context(stages: tuple[str, ...]) -> str | None:
+    """Describe one stage once, or make a cross-stage sequence explicit."""
+    if not stages:
+        return None
+    if len(stages) == 1:
+        return stages[0]
+    return f"从{stages[0]}打到{stages[-1]}"
+
+
+def _multikill_action_phrase(
+    weapons: tuple[str, ...], kill_count: int, connected: bool
+) -> str:
+    """State the kill total and whether it was one continuous run."""
+    kill_label = _kill_count_label(kill_count)
+    verb = f"连拿{kill_label}" if connected else f"陆续拿到{kill_label}"
+    if not weapons:
+        return "玩家" + verb
+    if len(weapons) == 1:
+        return f"玩家用{weapons[0]}{verb}"
+    return f"玩家用{weapons[0]}，换成{weapons[-1]}接着{verb}"
+
+
+def _multikill_finish_clauses(
+    entries: tuple[TimelineEntry, ...],
+    kill_indexes: tuple[int, ...],
+    event: GameEvent,
+    snapshot: GameSnapshot,
+    round_situation: RoundSituation,
+) -> tuple[str, ...]:
+    """Keep exceptional kill facts without replaying every ordinary kill."""
+    rare_tags = frozenset({"残血击杀", "白着打", "踩火杀", "摸烟击杀", "一枪秒"})
+    clauses: list[str] = []
+    for ordinal, index in enumerate(kill_indexes, 1):
+        tags = _action_scene_tags(
+            entries,
+            index,
+            event=event,
+            snapshot=snapshot,
+            round_situation=round_situation,
+        )
+        found = tuple(tag for tag in tags if tag in rare_tags)
+        if found:
+            subject = "最后一杀" if ordinal == len(kill_indexes) else f"第{ordinal}杀"
+            clauses.append(f"{subject}是{'、'.join(found)}")
+    last_detail = entries[kill_indexes[-1]].detail or ""
+    if "爆头" in last_detail:
+        clauses.append("最后一杀爆头")
+    if "弹匣仅剩1发" in last_detail:
+        clauses.append("最后一杀后弹匣仅剩1发")
+    return tuple(dict.fromkeys(clauses))
 
 
 def _compress_fact_process(expression: str) -> str:
@@ -281,21 +432,13 @@ def _compress_fact_process(expression: str) -> str:
     navigation detail rather than a separate action; the transition itself is
     retained while the decimal timestamp is omitted.
     """
-    damage_matches = tuple(re.finditer(r"掉了(\d+)血", expression))
-    if len(damage_matches) > 1:
-        total_damage = sum(int(match.group(1)) for match in damage_matches)
-        for match in reversed(damage_matches[1:]):
-            prefix_start = match.start()
-            if expression[max(0, match.start() - 3) : match.start()] == "，随后":
-                prefix_start = match.start() - 3
-            elif match.start() > 0 and expression[match.start() - 1] == "，":
-                prefix_start = match.start() - 1
-            expression = expression[:prefix_start] + expression[match.end() :]
-        first = damage_matches[0]
+    adjacent_damage = re.compile(r"掉了(\d+)血(?:，随后|，)掉了(\d+)血")
+    while match := adjacent_damage.search(expression):
+        total_damage = int(match.group(1)) + int(match.group(2))
         expression = (
-            expression[: first.start()]
+            expression[: match.start()]
             + f"掉了{total_damage}血"
-            + expression[first.end() :]
+            + expression[match.end() :]
         )
     expression = re.sub(r"受闪光影响未结束\s*已持续\d+(?:\.\d+)?秒", "仍被闪", expression)
     expression = re.sub(r"闪光影响结束\s*持续\d+(?:\.\d+)?秒", "闪光结束", expression)
@@ -1264,23 +1407,12 @@ def _bundle_required(*facts: str) -> str:
 def _prioritize_required_facts(
     primary_facts: list[str], secondary_facts: list[str]
 ) -> list[str]:
-    """Return player-first mandatory atoms in deterministic retention order."""
-    selected = list(dict.fromkeys(fact for fact in primary_facts if fact))
-    dropped: list[str] = []
-    for fact in dict.fromkeys(fact for fact in secondary_facts if fact):
-        projected = "；".join((*selected, fact))
-        if _chinese_character_count(projected) <= _REQUIRED_FACT_CHAR_BUDGET:
-            selected.append(fact)
-        else:
-            dropped.append(fact)
-    if dropped:
-        selected.append(_DROPPED_REQUIRED_PREFIX + "；".join(dropped))
-    return selected
-
-
-def _chinese_character_count(text: str) -> int:
-    """Measure the same Chinese-character budget used by the event utterance."""
-    return len(_HAN_CHARACTER.findall(text))
+    """Return all mandatory atoms in deterministic player-first order."""
+    return list(
+        dict.fromkeys(
+            fact for fact in (*primary_facts, *secondary_facts) if fact
+        )
+    )
 
 
 def _compact_bomb_result_fact(rare_facts: list[str], result_fact: str) -> str:
@@ -1814,12 +1946,12 @@ def _kill_weapon(detail: str | None) -> str | None:
     if not detail:
         return None
     marker = re.search(
-        r"(?:^| )(?=(?:爆头|\d+个爆头|增加\d+杀|击杀时满血|"
+        r"(?:^| )(?=(?:爆头|\d+个爆头|增加\d+杀|用弹\d+|击杀时满血|"
         r"击杀时剩\d+血|弹匣仅剩\d+发))",
         detail,
     )
     weapon = detail[: marker.start()].strip() if marker is not None else detail.strip()
-    return weapon or None
+    return _timeline_weapon_display(weapon) if weapon else None
 
 
 def _focus_entry_index(
@@ -2209,7 +2341,7 @@ def _timeline_kill_text(
             detail,
         ).strip()
     marker = re.search(
-        r"(?:^| )(?=(?:爆头|\d+个爆头|增加\d+杀|击杀时满血|"
+        r"(?:^| )(?=(?:爆头|\d+个爆头|增加\d+杀|用弹\d+|击杀时满血|"
         r"击杀时剩\d+血|弹匣仅剩\d+发))",
         detail,
     )
@@ -2217,8 +2349,17 @@ def _timeline_kill_text(
         return f"玩家使用{detail}完成击杀"
     weapon = detail[: marker.start()].strip()
     attributes = detail[marker.start() :].strip()
-    action = f"玩家使用{weapon}完成击杀" if weapon else "玩家完成击杀"
+    action = (
+        f"玩家使用{_timeline_weapon_display(weapon)}完成击杀"
+        if weapon
+        else "玩家完成击杀"
+    )
     return action + (f" {attributes}" if attributes else "")
+
+
+def _timeline_weapon_display(weapon: str) -> str:
+    """Normalize the few lowercase timeline names without altering display names."""
+    return {"mp7": "MP7"}.get(weapon.lower(), weapon)
 
 
 def _seconds(value: Any) -> str:

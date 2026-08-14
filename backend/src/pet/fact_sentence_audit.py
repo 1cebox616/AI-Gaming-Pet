@@ -11,6 +11,7 @@ import subprocess
 
 from pet.bench import (
     FactSentenceAuditCase,
+    _fact_has_sentence_evidence,
     load_event_answer_keys,
     render_fact_sentence_audit_report,
 )
@@ -160,7 +161,7 @@ def write_fact_sentence_audit_report(path: Path) -> None:
 
 
 def _t815_report_preamble(cases: Sequence[FactSentenceAuditCase]) -> str:
-    """Compare the new prose against the committed pre-compression report."""
+    """Compare the current prose against the committed pre-change report."""
     previous = _previous_processes()
     current = {
         case.case_id: _process_from_sentence(case.fact_sentence)
@@ -168,29 +169,28 @@ def _t815_report_preamble(cases: Sequence[FactSentenceAuditCase]) -> str:
     }
     previous_lengths = sorted(_han_count(value) for value in previous.values())
     current_lengths = sorted(_han_count(value) for value in current.values())
-    longest = sorted(
-        previous,
-        key=lambda case_id: _han_count(previous[case_id]),
-        reverse=True,
-    )[:5]
+    multikill_ids = [
+        case.case_id
+        for case in cases
+        if "【事件】多杀" in case.fact_sentence
+    ]
     sample_ids = random.Random(815).sample(sorted(current), k=10)
     lines = [
-        "# M3-T8.15 【过程】压缩与可读性复核",
+        "# M3-T8.16 多杀概括与可读性复核",
         "",
         "- 模式：仅离线重放与字符串渲染；未调用模型、未读取密钥。",
-        "- M3-T8.14 旧【过程】长度（最短 / 中位 / 最长）："
+        "- M3-T8.15 旧【过程】长度（最短 / 中位 / 最长）："
         + _length_summary(previous_lengths),
-        "- 压缩后【过程】长度（最短 / 中位 / 最长）："
+        "- 改写后【过程】长度（最短 / 中位 / 最长）："
         + _length_summary(current_lengths),
-        "- 压缩后超过 40 汉字："
-        + str(sum(length > 40 for length in current_lengths)) + " 条。",
-        "- 压缩规则：合并同一连续段的多次掉血为总掉血；移除重复“随后”；"
-        "保留被闪、弹匣打空与阵亡等独立动作，时长小数仍按 T8.14 规则省略。",
+        "- 不设字数上限；长度仅供观察。",
+        "- 掉血只在相邻且中间没有其他时间线条目时合并；"
+        "多杀的“期间掉血”则明确是整段累计。",
         "",
-        "## 压缩前后最长 5 条",
+        "## 5 条多杀前后对照",
         "",
     ]
-    for case_id in longest:
+    for case_id in multikill_ids[:5]:
         lines.extend(
             (
                 f"### `{case_id}`",
@@ -199,7 +199,30 @@ def _t815_report_preamble(cases: Sequence[FactSentenceAuditCase]) -> str:
                 "",
             )
         )
-    lines.extend(("## 随机 10 条可读性抽查", ""))
+    lines.extend(("## M3-T8.15 的 19 个未覆盖案例", ""))
+    prior_missing = _previous_missing_case_ids()
+    cases_by_id = {case.case_id: case for case in cases}
+    superseded_multikill_atoms = frozenset(
+        {"本回合第1杀", "本回合第2杀", "该阶段双杀", "该阶段三杀"}
+    )
+    for case_id in prior_missing:
+        case = cases_by_id[case_id]
+        missing = tuple(
+            fact
+            for fact in case.required_facts
+            if not _fact_has_sentence_evidence(fact, case.fact_sentence)
+        )
+        if not missing:
+            status = "已覆盖"
+        elif set(missing).issubset(superseded_multikill_atoms):
+            status = (
+                "答案本身有问题：新规则概括总杀数与跨阶段关系，"
+                "不再逐次写每一杀的编号或阶段计数"
+            )
+        else:
+            status = "仍未覆盖：" + "、".join(missing)
+        lines.append(f"- `{case_id}`：{status}")
+    lines.extend(("", "## 随机 10 条可读性抽查", ""))
     internal_terms = ("未观测", "可观测", "同一时刻", "连续过程", "阶段不可判断")
     for case_id in sample_ids:
         process = current[case_id]
@@ -236,6 +259,25 @@ def _previous_processes() -> dict[str, str]:
     if len(processes) != 55:
         raise ValueError(f"T8.14 报告中应有55条过程，实际为 {len(processes)}")
     return processes
+
+
+def _previous_missing_case_ids() -> tuple[str, ...]:
+    """Read the frozen historical failure set without editing answer keys."""
+    result = subprocess.run(
+        ["git", "show", "HEAD:backend/bench-reports/m3-t8.15-fact-sentences.md"],
+        cwd=BACKEND_ROOT.parent,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    matched = re.search(r"- 有必答项未覆盖的题目：(.*)", result.stdout)
+    if matched is None:
+        raise ValueError("T8.15 报告缺少未覆盖题目清单")
+    case_ids = tuple(re.findall(r"`([^`]+)`", matched.group(1)))
+    if len(case_ids) != 19:
+        raise ValueError(f"T8.15 未覆盖题应为19条，实际为 {len(case_ids)}")
+    return case_ids
 
 
 def _process_from_sentence(sentence: str) -> str:
