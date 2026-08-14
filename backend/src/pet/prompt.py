@@ -16,15 +16,19 @@ def load_system_prompt(
     prompts_directory: Path = PROMPTS_DIRECTORY,
     include_reading_guide: bool = True,
 ) -> str:
-    """Join the shared reading guide and one product-owned personality prompt."""
-    parts = []
-    if include_reading_guide:
-        parts.append(_read_prompt_file(prompts_directory / "reading.md"))
-    personality = _read_prompt_file(
-        prompts_directory / f"{personality_style}.md"
+    """Load one prompt and inject the product-owned vocabulary verbatim."""
+    del include_reading_guide
+    prompt = _read_prompt_file(prompts_directory / f"{personality_style}.md")
+    vocabulary_path = prompts_directory / "vocabulary.md"
+    vocabulary = (
+        _read_prompt_file(vocabulary_path)
+        if vocabulary_path.exists()
+        else ""
     )
-    parts.append(personality)
-    return "\n\n".join(parts).replace("{max_chars}", str(max_chars))
+    return (
+        prompt.replace("{{VOCABULARY}}", vocabulary)
+        .replace("{max_chars}", str(max_chars))
+    )
 
 
 def _read_prompt_file(path: Path) -> str:

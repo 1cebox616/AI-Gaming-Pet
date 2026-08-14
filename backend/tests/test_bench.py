@@ -173,7 +173,7 @@ def real_recording(tmp_path: Path) -> Path:
 def prompts_directory(tmp_path: Path) -> Path:
     directory = tmp_path / "prompts"
     directory.mkdir()
-    (directory / "reading.md").write_text("共享读卡指南", encoding="utf-8")
+    (directory / "vocabulary.md").write_text("完整词库", encoding="utf-8")
     (directory / "brother.md").write_text(
         "外置搭子提示词\n最多 {max_chars} 个汉字",
         encoding="utf-8",
@@ -183,19 +183,19 @@ def prompts_directory(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (directory / "inference.md").write_text(
-        "只复述事实，不限制字数",
+        "只复述事实，不限制字数\n\n{{VOCABULARY}}",
         encoding="utf-8",
     )
     return directory
 
 
-def test_external_prompt_joins_reading_then_personality_and_replaces_limit() -> None:
+def test_external_prompt_loads_personality_without_retired_reading_guide() -> None:
     prompt = load_system_prompt("brother", max_chars=19)
 
-    assert prompt.startswith("你会收到一份精简的 CS2 GSI 事件卡")
-    assert prompt.index("## 卡片结构") < prompt.index("你是观战朋友打 CS2")
+    assert prompt.startswith("你是观战朋友打 CS2")
+    assert "## 卡片结构" not in prompt
     assert "最多包含 19 个汉字" in prompt
-    assert "没有提供的信息不要推断，更不要编造" in prompt
+    assert "只使用下面提供的事实" in prompt
     assert "{max_chars}" not in prompt
 
 
@@ -207,24 +207,15 @@ def test_inference_prompt_without_placeholder_loads_through_same_path(
         max_chars=19,
         prompts_directory=prompts_directory,
     )
-    without_reading = load_system_prompt(
-        "inference",
-        max_chars=19,
-        prompts_directory=prompts_directory,
-        include_reading_guide=False,
-    )
-
-    assert prompt == "共享读卡指南\n\n只复述事实，不限制字数"
-    assert without_reading == "只复述事实，不限制字数"
+    assert prompt == "只复述事实，不限制字数\n\n完整词库"
 
 
 def test_missing_or_empty_prompt_raises_instead_of_falling_back(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(FileNotFoundError, match="reading.md"):
+    with pytest.raises(FileNotFoundError, match="brother.md"):
         load_system_prompt("brother", max_chars=19, prompts_directory=tmp_path)
 
-    (tmp_path / "reading.md").write_text("guide", encoding="utf-8")
     (tmp_path / "brother.md").write_text("  \n", encoding="utf-8")
     with pytest.raises(ValueError, match="系统提示词文件为空"):
         load_system_prompt("brother", max_chars=19, prompts_directory=tmp_path)
@@ -304,7 +295,7 @@ def test_report_prints_exact_full_event_card_and_single_attempt(
     assert len(client.calls) == 1
     provider, system_prompt, user_prompt, max_tokens = client.calls[0]
     assert provider == "provider-under-test"
-    assert system_prompt.startswith("共享读卡指南\n\n外置解说提示词")
+    assert system_prompt.startswith("外置解说提示词")
     assert max_tokens == 96
     assert user_prompt == result.events[0].model_card
     assert "【本回合历史】" not in user_prompt
@@ -409,8 +400,8 @@ def test_latency_experiment_runs_a_then_b_then_c_on_one_client(
 
     assert len(client.calls) == 3
     assert client.calls[0][1].startswith("外置搭子提示词")
-    assert client.calls[1][1].startswith("共享读卡指南\n\n外置搭子提示词")
-    assert client.calls[2][1].startswith("共享读卡指南\n\n只复述事实")
+    assert client.calls[1][1].startswith("外置搭子提示词")
+    assert client.calls[2][1].startswith("只复述事实，不限制字数\n\n完整词库")
     assert tuple(call[3] for call in client.calls) == (96, 96, 300)
     assert "执行顺序：A → B → C" in report
     assert "| A |" in report and "| B |" in report and "| C |" in report
@@ -475,7 +466,7 @@ def test_stream_analysis_uses_strict_protocol_settings_and_split_metrics(
         reasoning_effort,
     ) = client.calls[0]
     assert provider == "provider-under-test"
-    assert prompt == "共享读卡指南\n\n只复述事实，不限制字数"
+    assert prompt == "只复述事实，不限制字数\n\n完整词库"
     assert card == result.events[0].model_card
     assert max_tokens == 128
     assert temperature == pytest.approx(0.0)
@@ -870,12 +861,10 @@ def test_analysis_prompt_is_loaded_from_the_product_owned_files() -> None:
     prompt = load_system_prompt("inference", max_chars=ANALYSIS_MAX_EVENT_CHARS)
 
     assert "【事件必答】" not in prompt
-    assert "只对事件卡最末的【刚刚】区域作出反应" in prompt
-    assert "事件行只能使用【刚刚】" in prompt
-    assert "第一行抬头只可给场面行" in prompt
-    assert "也不得补充、累计或总结" in prompt
-    assert "提供地图、阵营、比分、局势与连败背景" in prompt
-    assert "卡上没有出现的动作" in prompt
+    assert "把输入中【过程】的一句话用网友口气重说一遍" in prompt
+    assert "【场景标签】只可帮助选择调性" in prompt
+    assert "不得说出【过程】里没有的事" in prompt
+    assert "# 网友词库" in prompt
 
 
 def test_universal_forbidden_hit_forces_whole_sentence_wrong() -> None:

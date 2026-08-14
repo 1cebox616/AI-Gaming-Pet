@@ -227,13 +227,48 @@ def render_fact_sentence(
     if focus_line is None:
         focus_line = " ".join(_event_facts(event))
 
-    context = _fact_sentence_context(snapshot, event)
-    focus = _fact_sentence_focus(
-        focus_line,
-        event,
-        state_tags=_round_state_tags(snapshot, round_situation, game),
+    state_tags = _round_state_tags(snapshot, round_situation, game)
+    tags = [label for label in sorted(SCENE_TAGS) if label in focus_line]
+    tags.extend(label for label in state_tags if label not in tags)
+    return "\n".join(
+        (
+            _model_header(snapshot, event),
+            f"【事件】{_fact_event_label(event.type)}",
+            f"【过程】{_fact_process(focus_line, event, tags)}",
+            f"【场景标签】{'、'.join(tags) if tags else '无'}",
+        )
     )
-    return "。".join(part.rstrip("。") for part in (context, focus) if part) + "。"
+
+
+def _fact_event_label(event_type: EventType) -> str:
+    return {
+        "kill": "击杀", "kill_headshot": "爆头击杀", "multi_kill": "多杀",
+        "death": "阵亡", "death_after_kill": "被补", "death_thrown_away": "白给",
+        "round_win": "回合胜利", "round_loss": "回合失败",
+    }[event_type]
+
+
+def _fact_process(focus_line: str, event: GameEvent, tags: list[str]) -> str:
+    """Render the event process once; labels remain separate style hints."""
+    match = _FOCUS_LINE_PATTERN.fullmatch(focus_line.strip())
+    if match is None or (match.group("marker") is None and match.group("seconds") is None):
+        return _plain_event_fallback(event).removeprefix("你")
+    marker = match.group("marker") or ""
+    stage = next((fact for fact in marker.removeprefix("【").removesuffix("】").split("｜") if fact and not fact.startswith("连续事件")), None)
+    expression = match.group("expression").strip()
+    expression = re.sub(r"（[^）]*）", "", expression)
+    for tag in tags:
+        expression = expression.replace(tag, "")
+    expression = re.sub(r"本次焦点：[^｜）]+", "", expression)
+    expression = expression.replace(" > ", "，随后").replace(" + ", "，")
+    expression = expression.replace("玩家", "玩家")
+    expression = re.sub(r"掉了(\d+)血\s*剩\d+血", r"掉了\1血", expression)
+    if "残血击杀" in tags or "血皮撑住了" in tags:
+        expression = re.sub(r"掉了(\d+)血", r"掉了\1血", expression)
+    expression = re.sub(r"用弹(\d+)", r"用弹\1发", expression)
+    expression = re.sub(r"[，、｜ ]{2,}", "，", expression).strip("，； ")
+    parts = ([stage] if stage and stage != "阶段不可判断" else []) + ([expression] if expression else [])
+    return "，".join(parts) if parts else _plain_event_fallback(event).removeprefix("你")
 
 
 def _fact_sentence_context(snapshot: GameSnapshot, event: GameEvent) -> str:

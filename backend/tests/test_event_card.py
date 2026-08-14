@@ -1276,11 +1276,9 @@ def test_fact_sentence_renders_neutral_kill_clauses_exactly() -> None:
     sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
 
     assert sentence == (
-        "第6回合，地图de_anubis，你在CT方，比分2比3，落后，这把是全装局。"
-        "前期阶段，回合开始后19.4秒，这段连续过程持续0.4秒；"
-        "你掉了72血，还剩28血，随后用AK47爆头完成击杀，打了13发，本回合第1杀，间隔0.4秒；"
-        "你受伤后仍完成击杀；这次击杀的可观测用弹至少10发；"
-        "本回合曾降到30血或以下仍存活。"
+        "de_anubis CT 2:3 落后 全装局\n【事件】爆头击杀\n"
+        "【过程】前期，玩家掉了72血，随后使用AK47完成击杀 爆头 用弹13发\n"
+        "【场景标签】对枪胜利、打了多发、血皮撑住了"
     )
 
 
@@ -1293,7 +1291,7 @@ def test_fact_sentence_renders_neutral_death_and_missing_fallback() -> None:
 
     sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
 
-    assert sentence == "第6回合，地图de_anubis，你在CT方。你完成击杀后不久阵亡。"
+    assert sentence == "de_anubis CT\n【事件】被补\n【过程】完成击杀后不久阵亡\n【场景标签】击杀后被补枪"
     assert "None" not in sentence
 
 
@@ -1321,10 +1319,9 @@ def test_fact_sentence_fallback_has_exact_neutral_phrase_for_each_speech_event(
         event,
     )
 
-    assert sentence == (
-        "第6回合，地图de_anubis，你在CT方，比分2比3，落后，已连败2回合，这把是全装局。"
-        f"{expected_focus}。"
-    )
+    assert sentence.splitlines()[0] == "de_anubis CT 2:3 落后 连败2 全装局"
+    assert sentence.splitlines()[2] == f"【过程】{expected_focus.removeprefix('你')}"
+    assert sentence.splitlines()[3].startswith("【场景标签】")
 
 
 def test_fact_sentence_keeps_death_combat_facts_without_slang() -> None:
@@ -1343,7 +1340,6 @@ def test_fact_sentence_keeps_death_combat_facts_without_slang() -> None:
 
     sentence = render_fact_sentence(snapshot, _game(snapshot), situation, _event(snapshot))
 
-    assert "你在受伤的交火后阵亡" in sentence
-    assert "阵亡前这次交火的可观测用弹至少10发" in sentence
-    assert "对枪输了" not in sentence
-    assert "马枪死" not in sentence
+    assert "【过程】前期，玩家掉了100血，随后阵亡" in sentence
+    assert "【场景标签】对枪输了、马枪死" in sentence
+    assert "可观测" not in sentence

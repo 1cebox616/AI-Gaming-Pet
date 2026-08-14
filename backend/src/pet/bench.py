@@ -559,7 +559,7 @@ def render_fact_sentence_audit_report(
     )
     median = statistics.median(lengths) if lengths else 0
     lines = [
-        "# M3-T8.13 自然语言事实句离线核验",
+        "# M3-T8.14 分区事实句离线核验",
         "",
         "- 模式：只渲染代码事实句；未调用模型、未读取密钥。",
         f"- 题数：{len(cases)}",
@@ -582,13 +582,14 @@ def render_fact_sentence_audit_report(
         lines.extend(
             (
                 f"### {index}. `{case.case_id}`",
-                f"事实句：{case.fact_sentence}",
+            "新格式：\n```text\n" + case.fact_sentence + "\n```",
                 "必答覆盖：" + "  ".join(
                     f"{'✅' if fact in covered else '❌'} {fact}" for fact in case.required_facts
                 ),
                 "禁项检查：" + ("✅ 无" if not forbidden else "❌ " + "、".join(forbidden)),
+                "【过程】汉字数：" + str(_fact_process_character_count(case.fact_sentence)),
                 "因长度舍弃：" + ("无" if not case.omitted_facts else "、".join(case.omitted_facts)),
-                "对照——精简卡原文：",
+                "对照——M3-T8.13 旧事实句：",
                 "```text",
                 case.model_card,
                 "```",
@@ -596,6 +597,12 @@ def render_fact_sentence_audit_report(
             )
         )
     return "\n".join(lines)
+
+
+def _fact_process_character_count(text: str) -> int:
+    """Count only the prose payload following the structured process heading."""
+    process = next((line.removeprefix("【过程】") for line in text.splitlines() if line.startswith("【过程】")), "")
+    return _chinese_character_count(process)
 
 
 def _fact_has_sentence_evidence(required_fact: str, sentence: str) -> bool:
