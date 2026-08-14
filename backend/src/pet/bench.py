@@ -196,6 +196,7 @@ class FactSentenceAuditCase:
     required_facts: tuple[str, ...]
     forbidden_claims: tuple[str, ...]
     omitted_facts: tuple[str, ...] = ()
+    discarded_scene_tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

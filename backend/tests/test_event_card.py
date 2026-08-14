@@ -1099,7 +1099,7 @@ def test_scene_tags_cover_positive_and_negative_action_cases() -> None:
     )
     assert all(
         tag in positive
-        for tag in ("残血击杀", "白着打", "踩火杀", "一枪秒", "换枪后立刻杀")
+        for tag in ("残血击杀", "白着打", "踩火杀", "秒了", "换枪后立刻杀")
     )
 
     ended_flash = render_event_card(
@@ -1117,22 +1117,22 @@ def test_scene_tags_cover_positive_and_negative_action_cases() -> None:
         kill,
     )
     assert "白着打" not in ended_flash
-    assert "一枪秒" not in ended_flash
+    assert "秒了" not in ended_flash
 
 
 @pytest.mark.parametrize(
     ("ammo_drop", "expected"),
     (
-        (1, "一枪秒"),
-        (3, "一枪秒"),
-        (4, "一梭子秒"),
-        (7, "一梭子秒"),
-        (8, None),
-        (9, None),
-        (10, "打了多发"),
+        (1, "秒了"),
+        (3, "秒了"),
+        (4, "干净击杀"),
+        (7, "干净击杀"),
+        (8, "普通击杀"),
+        (10, "普通击杀"),
+        (11, "吃力击杀"),
     ),
 )
-def test_ammo_scene_tag_uses_the_product_tiers_and_leaves_eight_to_nine_unlabelled(
+def test_ammo_scene_tag_uses_the_product_evaluation_tiers(
     ammo_drop: int, expected: str | None
 ) -> None:
     snapshot = _real_snapshot()
@@ -1150,12 +1150,16 @@ def test_ammo_scene_tag_uses_the_product_tiers_and_leaves_eight_to_nine_unlabell
         event,
     )
 
-    ammo_tags = {"一枪秒", "一梭子秒", "打了多发"}
+    ammo_tags = {"秒了", "干净击杀", "普通击杀", "吃力击杀"}
     if expected is None:
         assert not any(tag in card for tag in ammo_tags)
     else:
-        assert expected in card
-        assert all(tag not in card for tag in ammo_tags - {expected})
+        focus_tags = card.split("本次焦点：", 1)[1].split("）", 1)[0].split("｜")
+        assert expected in focus_tags
+        assert all(
+            tag not in focus_tags
+            for tag in ammo_tags - {expected, "普通击杀"}
+        )
 
 
 def test_smoke_death_and_smoke_exit_death_are_mutually_exclusive() -> None:
@@ -1277,8 +1281,8 @@ def test_fact_sentence_renders_neutral_kill_clauses_exactly() -> None:
 
     assert sentence == (
         "de_anubis CT 2:3 落后 全装局\n【事件】爆头击杀\n"
-        "【过程】前期，玩家掉了72血，还剩28血，使用AK47完成击杀 爆头 用弹13发\n"
-        "【场景标签】对枪胜利、打了多发、血皮撑住了"
+        "【过程】前期，玩家赢下对枪，打成残血，用AK47爆头完成击杀，枪法有点吃力\n"
+        "【场景标签】对枪胜利、吃力击杀、血皮撑住了"
     )
 
 
@@ -1340,8 +1344,8 @@ def test_fact_sentence_keeps_death_combat_facts_without_slang() -> None:
 
     sentence = render_fact_sentence(snapshot, _game(snapshot), situation, _event(snapshot))
 
-    assert "【过程】前期，玩家掉了100血，阵亡" in sentence
-    assert "【场景标签】对枪输了、马枪死" in sentence
+    assert "【过程】前期，玩家阵亡，开了很多枪也没打中" in sentence
+    assert "【场景标签】马枪死、对枪输了" in sentence
     assert "可观测" not in sentence
 
 
@@ -1363,10 +1367,7 @@ def test_fact_sentence_does_not_merge_damage_across_other_events() -> None:
     sentence = render_fact_sentence(snapshot, _game(snapshot), situation, _event(snapshot))
     process = sentence.splitlines()[2]
 
-    assert process == (
-        "【过程】中期，玩家掉了46血，被闪，掉了13血，"
-        "M4A1-S弹匣打空，掉了41血，阵亡"
-    )
+    assert process == "【过程】中期，玩家阵亡，被闪时阵亡"
 
 
 def test_fact_sentence_summarizes_multikill_without_losing_kill_count() -> None:
@@ -1389,6 +1390,30 @@ def test_fact_sentence_summarizes_multikill_without_losing_kill_count() -> None:
     sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
 
     assert sentence.splitlines()[2] == (
-        "【过程】前期，玩家用AK47，换成M4A1-S接着陆续拿到五杀，"
-        "期间掉了59血，最后一杀爆头"
+        "【过程】前期，连着赢下几波对枪，打成残血，"
+        "玩家用AK47，换成M4A1-S接着陆续拿到五杀，最后一杀爆头"
     )
+
+
+def test_fact_sentence_limits_scene_tags_by_product_priority() -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 20})
+    event = _event(snapshot).model_copy(update={"type": "kill"})
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(1.0, "primary_weapon", "换枪 AK47"),
+            TimelineEntry(1.1, "flash_start", None),
+            TimelineEntry(1.2, "burn_start", None),
+            TimelineEntry(2.0, "kill", "AK47 用弹1 击杀时剩20血"),
+        ),
+    )
+
+    sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
+    rendered_tags = sentence.splitlines()[3].removeprefix("【场景标签】").split("、")
+
+    assert len(rendered_tags) == 3
+    assert set(rendered_tags) <= {"残血击杀", "白着打", "踩火杀", "换枪后立刻杀"}
+    assert "秒了" not in rendered_tags
+    assert "掉了" not in sentence
+    assert "用弹" not in sentence

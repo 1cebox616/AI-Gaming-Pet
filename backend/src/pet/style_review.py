@@ -134,7 +134,7 @@ def _binding_violations(text: str, *, fact_sentence: str) -> tuple[str, ...]:
     ):
         violations.append("冲锋枪说法（非冲锋枪）")
     if _contains_any(text, ("颗秒", "一枪头", "爆头线")) and not _contains_any(
-        fact_sentence, ("爆头", "一枪秒")
+        fact_sentence, ("爆头", "秒了")
     ):
         violations.append("爆头/极少用弹说法（事实不支持）")
     if "一换一" in text and "被补" not in fact_sentence:
@@ -239,7 +239,7 @@ def render_style_review(review: StyleReview) -> str:
         bool(attempt.checks and attempt.checks.binding_violations) for attempt in attempts
     )
     lines = [
-        "# M3-T9-FIX 文风层双温度评测",
+        "# M3-T10 文风层双温度评测",
         "",
         "- 模型：`qwen/qwen3.5-122b-a10b`；上游锁定：`Alibaba`。",
         "- 温度：0.9 / 0；种子：42；单次超时：10 秒；"
@@ -270,6 +270,7 @@ def render_style_review(review: StyleReview) -> str:
                 "事实句：",
                 *_indent(case_review.case.fact_sentence),
                 f"场景标签：{scene_tags(case_review.case.fact_sentence)}",
+                "舍弃标签：" + ("、".join(case_review.case.discarded_scene_tags) or "无"),
                 "",
                 _render_attempt("宠物说（温度0.9）", case_review.hot),
                 _render_attempt("宠物说（温度0）", case_review.cold),

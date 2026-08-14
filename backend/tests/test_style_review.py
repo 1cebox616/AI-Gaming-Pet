@@ -12,9 +12,9 @@ from pet.style_review import (
 
 
 def test_scene_tags_reads_the_dedicated_line() -> None:
-    fact_sentence = "de_nuke CT 2:2 追平\n【事件】击杀\n【过程】中期，用AK完成击杀\n【场景标签】对枪胜利、打了多发"
+    fact_sentence = "de_nuke CT 2:2 追平\n【事件】击杀\n【过程】中期，用AK完成击杀\n【场景标签】对枪胜利、吃力击杀"
 
-    assert scene_tags(fact_sentence) == "对枪胜利、打了多发"
+    assert scene_tags(fact_sentence) == "对枪胜利、吃力击杀"
 
 
 def test_hard_checks_mark_length_unsupported_entities_and_bound_words() -> None:

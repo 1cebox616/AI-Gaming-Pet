@@ -16,7 +16,11 @@ from pet.bench import (
     render_fact_sentence_audit_report,
 )
 from pet.config import load_config
-from pet.event_card import render_fact_sentence, render_model_event_card
+from pet.event_card import (
+    fact_sentence_scene_tag_selection,
+    render_fact_sentence,
+    render_model_event_card,
+)
 from pet.events import EventType
 from pet.prompt import load_system_prompt
 from pet.replay import CommentaryDisposition, load_recording, replay_commentary
@@ -128,6 +132,12 @@ def _audit_case(
     game = disposition.game
     round_situation = disposition.round_situation
     event = disposition.decision.event
+    tag_selection = fact_sentence_scene_tag_selection(
+        snapshot,
+        game,
+        round_situation,
+        event,
+    )
     return FactSentenceAuditCase(
         case_id=case_id,
         fact_sentence=render_fact_sentence(
@@ -146,6 +156,7 @@ def _audit_case(
         ),
         required_facts=required,
         forbidden_claims=forbidden,
+        discarded_scene_tags=tag_selection.discarded,
     )
 
 
