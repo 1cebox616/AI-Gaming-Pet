@@ -376,8 +376,25 @@ def fact_sentence_scene_tag_selection(
             ):
                 if label not in all_tags:
                     all_tags.append(label)
+    all_tags = _resolve_fact_sentence_scene_tag_conflicts(all_tags)
     ordered = _ordered_fact_scene_tags(event.type, all_tags)
     return SceneTagSelection(selected=tuple(ordered[:3]), discarded=tuple(ordered[3:]))
+
+
+def _resolve_fact_sentence_scene_tag_conflicts(tags: Iterable[str]) -> list[str]:
+    """Remove redundant cues before the three-label product-priority selection."""
+    resolved = list(dict.fromkeys(tags))
+    utility_death_tags = {"白着被打死", "烟里死", "出烟就没了"}
+    if utility_death_tags.intersection(resolved):
+        resolved = [tag for tag in resolved if tag != "对枪输了"]
+    # An old AWP miss and no fire in the final three seconds can both be true,
+    # but adjacent labels make the latter read as a contradiction.  Keep the
+    # immediate death cue, which is the only one a focused sentence can state.
+    if "一枪没开就没了" in resolved:
+        resolved = [
+            tag for tag in resolved if tag not in {"大狙空枪", "连续空枪"}
+        ]
+    return resolved
 
 
 def _ordered_fact_scene_tags(event_type: EventType, tags: Iterable[str]) -> list[str]:
@@ -482,11 +499,11 @@ def _kill_context_clauses(tags: Iterable[str]) -> tuple[str, ...]:
 
 def _gun_evaluation_clause(tags: Iterable[str]) -> str | None:
     if "秒了" in tags:
-        return "迅速解决"
+        return "一两枪就带走"
     if "干净击杀" in tags:
-        return "枪法干净"
+        return "几枪就解决"
     if "有点吃力" in tags:
-        return "枪法有点吃力"
+        return "打了不少发"
     if "非常吃力" in tags:
         return "开了很多枪"
     return None
@@ -851,10 +868,10 @@ def _scene_fact_clauses(tags: Iterable[str], event: GameEvent) -> list[str]:
             "白着被打死": "你受闪光影响时阵亡",
             "出烟就没了": "你出烟后不久阵亡",
             "烟里死": "你仍在烟雾中时阵亡",
-            "秒了": "这次击杀迅速解决",
-            "干净击杀": "这次击杀枪法干净",
+            "秒了": "这次击杀一两枪就带走",
+            "干净击杀": "这次击杀几枪就解决",
             "普通击杀": "这次击杀没有额外枪法评价",
-            "有点吃力": "这次击杀枪法有些吃力",
+            "有点吃力": "这次击杀打了不少发",
             "非常吃力": "这次击杀开了很多枪",
             "大狙空枪": "本回合已观测到AWP未伴随击杀的开火",
             "连续空枪": "本回合已多次观测到AWP未伴随击杀的开火",

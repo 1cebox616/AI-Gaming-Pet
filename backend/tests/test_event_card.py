@@ -11,7 +11,13 @@ from pet.events import GameEvent
 from pet.gsi import GameSnapshot, WeaponSlot, parse_snapshot
 from pet.session import GameState
 from pet.situation import RoundSituation, TimelineEntry
-from pet.event_card import render_event_card, render_fact_sentence, render_model_event_card
+from pet.event_card import (
+    _fact_death_process,
+    fact_sentence_scene_tag_selection,
+    render_event_card,
+    render_fact_sentence,
+    render_model_event_card,
+)
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 
@@ -1282,7 +1288,7 @@ def test_fact_sentence_renders_neutral_kill_clauses_exactly() -> None:
 
     assert sentence == (
         "de_anubis CT 2:3 落后 全装局\n【事件】爆头击杀\n"
-        "【过程】前期，玩家赢下对枪，打成残血，用AK47爆头完成击杀，枪法有点吃力\n"
+        "【过程】前期，玩家赢下对枪，打成残血，用AK47爆头完成击杀，打了不少发\n"
         "【场景标签】对枪胜利、有点吃力、血皮撑住了"
     )
 
@@ -1348,6 +1354,44 @@ def test_fact_sentence_keeps_death_combat_facts_without_slang() -> None:
     assert "【过程】前期，玩家阵亡，开了这么多枪没打死" in sentence
     assert "【场景标签】马枪死、对枪输了" in sentence
     assert "可观测" not in sentence
+
+
+@pytest.mark.parametrize(
+    ("utility_tag", "utility_detail"),
+    (
+        ("白着被打死", "被闪时阵亡"),
+        ("烟里死", "烟里阵亡"),
+        ("出烟就没了", "出烟后不久阵亡"),
+    ),
+)
+def test_death_utility_tags_replace_redundant_lost_duel(
+    utility_tag: str, utility_detail: str
+) -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 0})
+    event = _event(snapshot).model_copy(update={"type": "death"})
+    focus_line = f"玩家阵亡（{utility_tag}｜对枪输了）"
+
+    selection = fact_sentence_scene_tag_selection(
+        snapshot, _game(snapshot), _situation(), event, focus_line=focus_line
+    )
+    sentence = _fact_death_process(event, selection.selected)
+
+    assert utility_tag in selection.selected
+    assert "对枪输了" not in selection.selected
+    assert "开火后没打过" not in sentence
+    assert utility_detail in sentence
+
+
+def test_no_fire_death_hides_older_awp_miss_labels() -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 0})
+    event = _event(snapshot).model_copy(update={"type": "death"})
+    focus_line = "玩家阵亡（一枪没开就没了｜大狙空枪｜连续空枪）"
+
+    selection = fact_sentence_scene_tag_selection(
+        snapshot, _game(snapshot), _situation(), event, focus_line=focus_line
+    )
+
+    assert selection.selected == ("一枪没开就没了",)
 
 
 def test_fact_sentence_does_not_merge_damage_across_other_events() -> None:

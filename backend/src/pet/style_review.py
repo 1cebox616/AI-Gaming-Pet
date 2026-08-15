@@ -16,7 +16,7 @@ from pet.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
 from pet.prompt import load_system_prompt
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_REPORT_PATH = BACKEND_ROOT / "bench-reports" / "m3-t9.6-style-review.md"
+DEFAULT_REPORT_PATH = BACKEND_ROOT / "bench-reports" / "m3-t9.7-style-review.md"
 MODEL = "qwen/qwen3.5-122b-a10b"
 PROVIDER = "Alibaba"
 TEMPERATURES = (0.9, 0.0)
@@ -66,6 +66,25 @@ _ROUND_RESULT_STYLE_EXCLUSIONS = frozenset(
         "postplant_triple_loss",
         "late_defuse",
         "bomb_explosion_win",
+    }
+)
+
+# These synthetic files remain valuable detector fixtures, but their named
+# centerpiece is earlier than the selected speech focus.  Label the report so
+# a reviewer does not mistake the filename for the current fact sentence.
+_OUT_OF_FOCUS_SCENARIO_IDS = frozenset(
+    {
+        "rare_reload_then_kill",
+        "rare_ammo_low_death",
+        "awp_miss_then_death",
+        "triple_kill_headshot_finish",
+        "flash_double_kill",
+        "long_smoke_then_kill",
+        "four_grenades_then_kill",
+        "double_flash_then_kill",
+        "smoke_flash_kill",
+        "bomb_pickup_then_death",
+        "bomb_planted_then_death",
     }
 )
 
@@ -288,7 +307,7 @@ def render_style_review(review: StyleReview) -> str:
         for attempt in attempts
     )
     lines = [
-        "# M3-T9.6 文风层双温度评测",
+        "# M3-T9.7 文风层双温度评测",
         "",
         "- 模型：`qwen/qwen3.5-122b-a10b`；上游锁定：`Alibaba`。",
         "- 温度：0.9 / 0；种子：42；单次超时：10 秒；"
@@ -321,6 +340,11 @@ def render_style_review(review: StyleReview) -> str:
                 *_indent(case_review.case.fact_sentence),
                 f"场景标签：{scene_tags(case_review.case.fact_sentence)}",
                 "舍弃标签：" + ("、".join(case_review.case.discarded_scene_tags) or "无"),
+                *(
+                    ("（注：该场景核心事实不在焦点范围内，场景名仅为文件名，不代表卡的内容）",)
+                    if case_review.case.case_id in _OUT_OF_FOCUS_SCENARIO_IDS
+                    else ()
+                ),
                 "",
                 _render_attempt("宠物说（温度0.9）", case_review.hot),
                 _render_attempt("宠物说（温度0）", case_review.cold),
