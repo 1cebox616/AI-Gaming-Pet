@@ -163,6 +163,23 @@ TRIPLE_CROSS_STAGE = (
     *_span(67, 73, "player.state.round_kills", 3),
 )
 
+# These files remain generated for future long-memory work.  Their intended
+# focus is a round result, which production deliberately never selects for
+# speech, so cards-only generation must not demand an impossible selection.
+_NON_SPEECH_SCENARIO_IDS = frozenset(
+    {
+        "rare_mvp_round_win",
+        "rare_assist_round_win",
+        "rare_grenade_pickup",
+        "rare_primary_switch",
+        "postplant_defuse_win",
+        "postplant_counterattack_loss",
+        "postplant_triple_loss",
+        "late_defuse",
+        "bomb_explosion_win",
+    }
+)
+
 
 def _ct_spec(
     scenario_id: str,
@@ -336,7 +353,10 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         "last_bullet_triple",
         "乙",
         "最后一发子弹完成第三次击杀",
-        (*_span(67, 71, "player.weapons.weapon_2.ammo_clip", 1),),
+        (
+            *TRIPLE_SAME_STAGE,
+            *_span(67, 71, "player.weapons.weapon_2.ammo_clip", 1),
+        ),
         ("灭队", "回合失败"),
         expected_event_type="round_loss",
     ),
@@ -344,7 +364,14 @@ SCENARIO_SPECS: tuple[ScenarioSpec, ...] = (
         "empty_mag_after_triple",
         "乙",
         "完成三杀后把弹匣打空并阵亡",
-        (),
+        (
+            *TRIPLE_SAME_STAGE,
+            # The third kill leaves two rounds.  The following snapshots drain
+            # the magazine, so this differs from last_bullet_triple where the
+            # third kill itself is the final round.
+            _set(67, "player.weapons.weapon_2.ammo_clip", 2),
+            *_span(68, 72, "player.weapons.weapon_2.ammo_clip", 0),
+        ),
         ("灭队", "回合失败"),
     ),
     _ct_spec(
@@ -1006,7 +1033,18 @@ def _cards_report(
         "",
     ]
     for spec in specs:
-        event = cards[spec.scenario_id]
+        event = cards.get(spec.scenario_id)
+        if event is None:
+            lines.extend(
+                (
+                    f"## `{spec.scenario_id}`",
+                    "",
+                    f"场景：{spec.description}",
+                    "卡片：未生成（核心为回合结果；生产策略不播报回合类事件）。",
+                    "",
+                )
+            )
+            continue
         lines.extend(
             (
                 f"## `{spec.scenario_id}`",
@@ -1057,7 +1095,8 @@ def generate_all(
         rows = synthesize_scenario(spec, constraints=constraints)
         output = write_scenario(spec, rows, scenarios_directory=scenarios_directory)
         paths.append(output)
-        cards[spec.scenario_id] = _selected_card(output, spec.expected_event_type)
+        if spec.scenario_id not in _NON_SPEECH_SCENARIO_IDS:
+            cards[spec.scenario_id] = _selected_card(output, spec.expected_event_type)
 
     reports_directory.mkdir(parents=True, exist_ok=True)
     (reports_directory / "m3-t6-scenarios.md").write_text(

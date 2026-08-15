@@ -1225,8 +1225,8 @@ def test_round_situation_records_fire_and_held_ammo_observations() -> None:
 
 
 def test_scene_tags_enumerate_all_death_combat_labels() -> None:
-    assert len(SCENE_TAGS) == 24
-    assert {"秒了", "干净击杀", "普通击杀", "吃力击杀"} <= SCENE_TAGS
+    assert len(SCENE_TAGS) == 25
+    assert {"秒了", "干净击杀", "普通击杀", "有点吃力", "非常吃力"} <= SCENE_TAGS
     assert not {"一枪秒", "一梭子秒", "打了多发"} & SCENE_TAGS
     assert {
         "对枪输了",

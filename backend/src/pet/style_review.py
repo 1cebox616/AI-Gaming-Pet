@@ -16,7 +16,7 @@ from pet.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
 from pet.prompt import load_system_prompt
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_REPORT_PATH = BACKEND_ROOT / "bench-reports" / "m3-t9-style-review.md"
+DEFAULT_REPORT_PATH = BACKEND_ROOT / "bench-reports" / "m3-t9.6-style-review.md"
 MODEL = "qwen/qwen3.5-122b-a10b"
 PROVIDER = "Alibaba"
 TEMPERATURES = (0.9, 0.0)
@@ -52,6 +52,23 @@ UNSUPPORTED_TERMS: tuple[str, ...] = (
     "伤害来源",
 )
 
+# These scenarios exercise round-result/history facts.  Round outcomes remain
+# deliberately non-speech events, so keeping them in a style-only set would
+# test a chain that production never calls.
+_ROUND_RESULT_STYLE_EXCLUSIONS = frozenset(
+    {
+        "rare_mvp_round_win",
+        "rare_assist_round_win",
+        "rare_grenade_pickup",
+        "rare_primary_switch",
+        "postplant_defuse_win",
+        "postplant_counterattack_loss",
+        "postplant_triple_loss",
+        "late_defuse",
+        "bomb_explosion_win",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class HardChecks:
@@ -61,6 +78,8 @@ class HardChecks:
     exceeds_30_chars: bool
     unsupported_terms: tuple[str, ...]
     binding_violations: tuple[str, ...]
+    economy_tier_rewrite: bool
+    eco_called_pistol_round: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +130,24 @@ def check_hard_violations(text: str, *, fact_sentence: str) -> HardChecks:
         exceeds_30_chars=chinese_character_count(text) > MAX_CHINESE_CHARS,
         unsupported_terms=tuple(term for term in UNSUPPORTED_TERMS if term in text),
         binding_violations=_binding_violations(text, fact_sentence=fact_sentence),
+        economy_tier_rewrite=_economy_tier_rewrite(text, fact_sentence),
+        eco_called_pistol_round="eco局" in fact_sentence and "手枪局" in text,
+    )
+
+
+def _economy_tier_rewrite(text: str, fact_sentence: str) -> bool:
+    """Catch only explicit economy-tier substitutions, never infer economy."""
+    tiers = {
+        "eco局": ("eco",),
+        "强起局": ("强起",),
+        "全装局": ("全装",),
+    }
+    expected = next((tier for tier in tiers if tier in fact_sentence), None)
+    return expected is not None and any(
+        alias in text
+        for tier, aliases in tiers.items()
+        if tier != expected
+        for alias in aliases
     )
 
 
@@ -171,7 +208,11 @@ def _contains_any(text: str, terms: Iterable[str]) -> bool:
 def run_style_review(client: LlmClientProtocol) -> StyleReview:
     """Call each frozen fact sentence once at each requested temperature."""
     prompt = load_system_prompt("inference", max_chars=30)
-    cases = collect_fact_sentence_audit_cases()
+    cases = tuple(
+        case
+        for case in collect_fact_sentence_audit_cases()
+        if case.case_id not in _ROUND_RESULT_STYLE_EXCLUSIONS
+    )
     reviews: list[StyleCaseReview] = []
     for case in cases:
         hot = _attempt(client, prompt, case, temperature=TEMPERATURES[0])
@@ -238,8 +279,16 @@ def render_style_review(review: StyleReview) -> str:
     binding_hits = sum(
         bool(attempt.checks and attempt.checks.binding_violations) for attempt in attempts
     )
+    economy_rewrite_hits = sum(
+        bool(attempt.checks and attempt.checks.economy_tier_rewrite)
+        for attempt in attempts
+    )
+    eco_pistol_hits = sum(
+        bool(attempt.checks and attempt.checks.eco_called_pistol_round)
+        for attempt in attempts
+    )
     lines = [
-        "# M3-T10 文风层双温度评测",
+        "# M3-T9.6 文风层双温度评测",
         "",
         "- 模型：`qwen/qwen3.5-122b-a10b`；上游锁定：`Alibaba`。",
         "- 温度：0.9 / 0；种子：42；单次超时：10 秒；"
@@ -256,7 +305,8 @@ def render_style_review(review: StyleReview) -> str:
         + (f"${sum(costs):.6f}" if costs else "上游未返回")
         + "。",
         "- 硬性检查命中（输出条数）："
-        f"超 30 汉字 {length_hits}；无依据词 {unsupported_hits}；用词绑定 {binding_hits}。",
+        f"超 30 汉字 {length_hits}；无依据词 {unsupported_hits}；用词绑定 {binding_hits}；"
+        f"经济档位改写 {economy_rewrite_hits}；eco 说成手枪局 {eco_pistol_hits}。",
         "- 用词绑定覆盖：逐条实现表中的 15 个可由事实句判断的绑定；"
         "“僵尸”依赖走位/位置，而事实句刻意不含该数据，保留为人工复核项。",
         "- 本报告不含自动打分、审美排名或筛选；下列为原样单次输出。",
@@ -299,6 +349,8 @@ def _render_attempt(label: str, attempt: StyleAttempt) -> str:
         f"字数 {checks.chinese_char_count}" + ("（超30）" if checks.exceeds_30_chars else ""),
         "无依据词：" + ("、".join(checks.unsupported_terms) or "无"),
         "用词绑定：" + ("；".join(checks.binding_violations) or "无"),
+        "经济档位改写：" + ("是" if checks.economy_tier_rewrite else "无"),
+        "eco 说成手枪局：" + ("是" if checks.eco_called_pistol_round else "无"),
     ]
     return f"{label}：{attempt.result.text}\n检查：{'；'.join(flags)}"
 

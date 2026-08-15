@@ -1129,7 +1129,8 @@ def test_scene_tags_cover_positive_and_negative_action_cases() -> None:
         (7, "干净击杀"),
         (8, "普通击杀"),
         (10, "普通击杀"),
-        (11, "吃力击杀"),
+            (11, "有点吃力"),
+            (16, "非常吃力"),
     ),
 )
 def test_ammo_scene_tag_uses_the_product_evaluation_tiers(
@@ -1150,7 +1151,7 @@ def test_ammo_scene_tag_uses_the_product_evaluation_tiers(
         event,
     )
 
-    ammo_tags = {"秒了", "干净击杀", "普通击杀", "吃力击杀"}
+    ammo_tags = {"秒了", "干净击杀", "普通击杀", "有点吃力", "非常吃力"}
     if expected is None:
         assert not any(tag in card for tag in ammo_tags)
     else:
@@ -1282,7 +1283,7 @@ def test_fact_sentence_renders_neutral_kill_clauses_exactly() -> None:
     assert sentence == (
         "de_anubis CT 2:3 落后 全装局\n【事件】爆头击杀\n"
         "【过程】前期，玩家赢下对枪，打成残血，用AK47爆头完成击杀，枪法有点吃力\n"
-        "【场景标签】对枪胜利、吃力击杀、血皮撑住了"
+        "【场景标签】对枪胜利、有点吃力、血皮撑住了"
     )
 
 
@@ -1344,7 +1345,7 @@ def test_fact_sentence_keeps_death_combat_facts_without_slang() -> None:
 
     sentence = render_fact_sentence(snapshot, _game(snapshot), situation, _event(snapshot))
 
-    assert "【过程】前期，玩家阵亡，开了很多枪也没打中" in sentence
+    assert "【过程】前期，玩家阵亡，开了这么多枪没打死" in sentence
     assert "【场景标签】马枪死、对枪输了" in sentence
     assert "可观测" not in sentence
 
@@ -1393,6 +1394,63 @@ def test_fact_sentence_summarizes_multikill_without_losing_kill_count() -> None:
         "【过程】前期，连着赢下几波对枪，打成残血，"
         "玩家用AK47，换成M4A1-S接着陆续拿到五杀，最后一杀爆头"
     )
+
+
+def test_multikill_gunplay_uses_average_shots_per_kill() -> None:
+    """Three four-shot kills are clean, not a twelve-shot hard-fought kill."""
+    snapshot = _real_snapshot()
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(20.0, "kill", "AK47 用弹4"),
+            TimelineEntry(21.0, "kill", "AK47 用弹4"),
+            TimelineEntry(22.0, "kill", "AK47 用弹4"),
+        ),
+    )
+    event = _event(snapshot).model_copy(update={"type": "multi_kill", "facts": {"count": 3}})
+
+    sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
+
+    assert "【场景标签】干净击杀" in sentence
+    assert "有点吃力" not in sentence
+    assert "非常吃力" not in sentence
+
+
+def test_multikill_keeps_last_kill_magazine_edge_without_raw_ammo_count() -> None:
+    snapshot = _real_snapshot()
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(20.0, "kill", "AK47 用弹4"),
+            TimelineEntry(21.0, "kill", "AK47 用弹4"),
+            TimelineEntry(22.0, "kill", "AK47 用弹4 弹匣仅剩1发"),
+        ),
+    )
+    event = _event(snapshot).model_copy(update={"type": "multi_kill", "facts": {"count": 3}})
+
+    sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
+
+    assert "最后一杀弹匣见底" in sentence
+    assert "仅剩1发" not in sentence
+
+
+def test_fact_sentence_only_mentions_adjacent_bomb_pickup() -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 0})
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(10.0, "bomb_pickup", "拿到炸弹"),
+            TimelineEntry(12.5, "death", None),
+        ),
+    )
+    event = _event(snapshot).model_copy(update={"type": "death"})
+
+    sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
+
+    assert "玩家拿包后阵亡" in sentence
 
 
 def test_fact_sentence_limits_scene_tags_by_product_priority() -> None:

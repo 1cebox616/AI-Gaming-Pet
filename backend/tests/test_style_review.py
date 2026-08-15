@@ -36,6 +36,14 @@ def test_hard_checks_allow_bound_awp_phrase_when_fact_supports_it() -> None:
     assert checks.binding_violations == ()
 
 
+def test_hard_checks_mark_shortened_economy_tier_rewrite() -> None:
+    fact_sentence = "de_nuke T 2:5 落后 强起局\n【事件】阵亡\n【过程】玩家阵亡\n【场景标签】白给"
+
+    checks = check_hard_violations("全装白给，寄！", fact_sentence=fact_sentence)
+
+    assert checks.economy_tier_rewrite is True
+
+
 def test_render_style_review_contains_raw_outputs_without_a_score() -> None:
     case = FactSentenceAuditCase(
         case_id="case",
