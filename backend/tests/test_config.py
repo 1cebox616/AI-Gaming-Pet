@@ -34,6 +34,9 @@ def test_missing_configuration_file_uses_validated_defaults(
     assert configuration.policy.cooldown_override_priority == 70
     assert configuration.policy.minimum_gap_seconds == 2.0
     assert configuration.personality.style == "brother"
+    assert configuration.llm.enabled is False
+    assert configuration.llm.model == ""
+    assert configuration.llm.timeout_seconds == 3.0
     assert "configuration file is missing" in caplog.text
 
 
@@ -425,3 +428,22 @@ def test_invalid_personality_falls_back_only_that_section_and_warns(
     assert "configuration section personality at personality." in caplog.text
     assert "configuration section idle" not in caplog.text
     assert "configuration section policy" not in caplog.text
+
+
+def test_llm_section_loads_runtime_tuning_without_accepting_credentials(tmp_path: Path) -> None:
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[llm]\nenabled = true\nmodel = \"vendor/model\"\n"
+        "provider = \"provider\"\ntemperature = 1.1\n"
+        "timeout_seconds = 2.5\nmax_tokens = 128\n",
+        encoding="utf-8",
+    )
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.llm.enabled is True
+    assert configuration.llm.model == "vendor/model"
+    assert configuration.llm.provider == "provider"
+    assert configuration.llm.temperature == 1.1
+    assert configuration.llm.timeout_seconds == 2.5
+    assert configuration.llm.max_tokens == 128

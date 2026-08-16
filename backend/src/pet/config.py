@@ -76,6 +76,20 @@ class PersonalityConfig(BaseModel):
     style: PersonalityStyle = "brother"
 
 
+class LlmConfig(BaseModel):
+    """Optional live-model settings; credentials never belong in this file."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    enabled: bool = False
+    model: str = ""
+    provider: str = ""
+    temperature: float = Field(default=0.9, ge=0, le=2)
+    # M3-T10: 3 seconds is over three times the offline 0.8-second event P95.
+    timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    max_tokens: int = Field(default=256, ge=1, le=2048)
+
+
 class PetConfig(BaseModel):
     """The complete runtime configuration for the local pet backend."""
 
@@ -87,6 +101,7 @@ class PetConfig(BaseModel):
     events: EventsConfig = Field(default_factory=EventsConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     personality: PersonalityConfig = Field(default_factory=PersonalityConfig)
+    llm: LlmConfig = Field(default_factory=LlmConfig)
 
 
 ConfigSection = TypeVar(
@@ -97,6 +112,7 @@ ConfigSection = TypeVar(
     EventsConfig,
     PolicyConfig,
     PersonalityConfig,
+    LlmConfig,
 )
 
 
@@ -121,6 +137,7 @@ def load_config(
         PersonalityConfig,
         merged_data.get("personality", {}),
     )
+    llm = _validate_section("llm", LlmConfig, merged_data.get("llm", {}))
     configuration = PetConfig(
         speech=speech,
         idle=idle,
@@ -128,6 +145,7 @@ def load_config(
         events=events,
         policy=policy,
         personality=personality,
+        llm=llm,
     )
 
     if configuration.idle.max_interval_seconds < configuration.idle.min_interval_seconds:
@@ -187,6 +205,7 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
         "events": EventsConfig().model_dump(),
         "policy": PolicyConfig().model_dump(),
         "personality": PersonalityConfig().model_dump(),
+        "llm": LlmConfig().model_dump(),
     }
     expected_fields = {
         "speech": ("enabled", "voice_name"),
@@ -209,6 +228,14 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
             "minimum_gap_seconds",
         ),
         "personality": ("style",),
+        "llm": (
+            "enabled",
+            "model",
+            "provider",
+            "temperature",
+            "timeout_seconds",
+            "max_tokens",
+        ),
     }
     for section_name, field_names in expected_fields.items():
         section = configuration_data.get(section_name)

@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import random
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -35,6 +35,17 @@ class BridgeStateMessage(BaseModel):
     speech_enabled: bool
     muted: bool
     game: GameState
+    llm: "LlmRuntimeStateMessage | None" = None
+
+
+class LlmRuntimeStateMessage(BaseModel):
+    """Backend-only model status for a future tray/frontend consumer."""
+
+    mode: Literal["ai", "template"]
+    reason: str
+    consecutive_failures: int
+    call_count: int
+    cost_usd: float | None
 
 
 class PetBridge:
@@ -46,6 +57,7 @@ class PetBridge:
         idle_configuration: IdleConfig | None = None,
         initial_game: GameState | None = None,
         personality_style: PersonalityStyle = "brother",
+        llm_state_provider: Callable[[], LlmRuntimeStateMessage] | None = None,
     ) -> None:
         self._connections: set[WebSocket] = set()
         self._speech_service = speech_service
@@ -59,6 +71,17 @@ class PetBridge:
         self._last_game_broadcast_at = float("-inf")
         self._pending_game_broadcast: asyncio.Task[None] | None = None
         self._utterance_broadcast_lock = asyncio.Lock()
+        self._llm_state_provider = llm_state_provider
+
+    def set_llm_state_provider(
+        self, provider: Callable[[], LlmRuntimeStateMessage] | None
+    ) -> None:
+        """Attach optional live-model telemetry without coupling bridge to LLM code."""
+        self._llm_state_provider = provider
+
+    async def publish_runtime_state(self) -> None:
+        """Push a mode/cost transition even when the game snapshot is unchanged."""
+        await self._broadcast_state()
 
     async def start_idle_broadcasts(self) -> None:
         """Start the randomized idle loop, initially paused when configured off."""
@@ -351,8 +374,12 @@ class PetBridge:
             speech_enabled=self._speech_enabled,
             muted=self._muted,
             game=self._game,
+            llm=self._llm_state_provider() if self._llm_state_provider is not None else None,
         )
-        await websocket.send_json(message.model_dump())
+        payload = message.model_dump()
+        if payload["llm"] is None:
+            del payload["llm"]
+        await websocket.send_json(payload)
 
 
 def _only_round_or_score_changed(previous: GameState, current: GameState) -> bool:

@@ -25,6 +25,7 @@ from pet.gsi import (
     ensure_gsi_config,
 )
 from pet.network import HOST, PORT
+from pet.online_commentary import OnlineCommentaryRuntime
 from pet.policy import SpeechPolicy
 from pet.session import GameSessionTracker, MatchLifecycleTracker
 from pet.situation import SituationTracker
@@ -85,6 +86,7 @@ class GameSnapshotProcessor:
         situation: SituationTracker,
         policy: SpeechPolicy,
         generator: CommentaryGenerator,
+        online_runtime: OnlineCommentaryRuntime | None = None,
     ) -> None:
         self._bridge = bridge
         self._session = session
@@ -93,6 +95,7 @@ class GameSnapshotProcessor:
         self._situation = situation
         self._policy = policy
         self._generator = generator
+        self._online_runtime = online_runtime
 
     async def observe(self, snapshot: GameSnapshot) -> None:
         """Advance facts always, then spend policy quota only for live consumers."""
@@ -101,8 +104,10 @@ class GameSnapshotProcessor:
             self._detector.reset()
             self._situation.reset()
             self._policy.reset()
+            if self._online_runtime is not None:
+                await self._online_runtime.reset_match()
 
-        self._situation.observe(snapshot, game)
+        round_situation = self._situation.observe(snapshot, game)
         self._policy.observe_snapshot(snapshot)
         events = self._detector.observe(snapshot, game)
         await self._bridge.update_game(game)
@@ -117,10 +122,15 @@ class GameSnapshotProcessor:
         )
         if policy_batch.selected_event is None:
             return
-        utterance = self._generator.generate(
-            policy_batch.selected_event,
-            map_name=snapshot.map_name,
-        )
+        if self._online_runtime is not None:
+            await self._online_runtime.submit(
+                snapshot,
+                game,
+                round_situation,
+                policy_batch.selected_event,
+            )
+            return
+        utterance = self._generator.generate(policy_batch.selected_event, map_name=snapshot.map_name)
         await self._bridge.broadcast_commentary(utterance)
 
     async def mark_offline(self, *, now: float) -> None:
@@ -130,8 +140,18 @@ class GameSnapshotProcessor:
             self._detector.reset()
             self._situation.reset()
             self._policy.reset()
+            if self._online_runtime is not None:
+                await self._online_runtime.reset_match()
         await self._bridge.update_game(game)
 
+
+commentary_generator = CommentaryGenerator(personality_style=configuration.personality.style)
+online_commentary_runtime = OnlineCommentaryRuntime(
+    configuration.llm,
+    pet_bridge,
+    commentary_generator,
+)
+pet_bridge.set_llm_state_provider(online_commentary_runtime.state)
 
 game_snapshot_processor = GameSnapshotProcessor(
     pet_bridge,
@@ -139,7 +159,8 @@ game_snapshot_processor = GameSnapshotProcessor(
     EventDetector(configuration.events),
     SituationTracker(),
     SpeechPolicy(configuration.policy),
-    CommentaryGenerator(personality_style=configuration.personality.style),
+    commentary_generator,
+    online_commentary_runtime,
 )
 
 
@@ -166,11 +187,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     await asyncio.to_thread(ensure_gsi_config)
     await asyncio.to_thread(speech_service.load)
     await pet_bridge.start_idle_broadcasts()
+    await online_commentary_runtime.start()
     await gsi_service.start()
     try:
         yield
     finally:
         await gsi_service.shutdown()
+        await online_commentary_runtime.shutdown()
         await pet_bridge.shutdown()
         speech_service.shutdown()
 
