@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "node --experimental-strip-types src/llm-status.test.ts",
     "format": "prettier --write \"src/**/*.ts\" index.html package.json package-lock.json tsconfig.json vite.config.ts src-tauri/tauri.conf.json \"src-tauri/capabilities/**/*.json\"",
     "format:check": "prettier --check \"src/**/*.ts\" index.html package.json package-lock.json tsconfig.json vite.config.ts src-tauri/tauri.conf.json \"src-tauri/capabilities/**/*.json\"",
     "tauri": "tauri"

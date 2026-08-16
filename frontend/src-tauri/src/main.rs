@@ -24,7 +24,10 @@ const SET_SPEECH_ENABLED_EVENT: &str = "set-speech-enabled";
 const SET_MUTED_EVENT: &str = "set-muted";
 const PET_WINDOW_VISIBILITY_EVENT: &str = "pet-window-visibility";
 const GAME_STATUS_ITEM_ID: &str = "game-status";
+const LLM_MODE_ITEM_ID: &str = "llm-mode";
+const LLM_COST_ITEM_ID: &str = "llm-cost";
 const DISCONNECTED_GAME_STATUS: &str = "CS2：未知（后端未连接）";
+const DISCONNECTED_LLM_STATUS: &str = "—";
 const WINDOW_MARGIN_DIP: u32 = 40;
 const CURSOR_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
@@ -98,12 +101,16 @@ enum PetMenuAction {
 #[derive(Clone, Copy)]
 enum PetMenuEntry {
     GameStatus,
+    LlmMode,
+    LlmCost,
     Action(PetMenuAction),
     Separator,
 }
 
-const PET_MENU_LAYOUT: [PetMenuEntry; 9] = [
+const PET_MENU_LAYOUT: [PetMenuEntry; 11] = [
     PetMenuEntry::GameStatus,
+    PetMenuEntry::LlmMode,
+    PetMenuEntry::LlmCost,
     PetMenuEntry::Action(PetMenuAction::Speak),
     PetMenuEntry::Action(PetMenuAction::NextExpression),
     PetMenuEntry::Separator,
@@ -160,16 +167,20 @@ impl PetMenuAction {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct BackendMenuState {
     connected: bool,
     speech_enabled: bool,
     muted: bool,
+    llm_mode: String,
+    llm_cost: String,
 }
 
 struct PetMenu {
     menu: Menu<Wry>,
     game_status_item: MenuItem<Wry>,
+    llm_mode_item: MenuItem<Wry>,
+    llm_cost_item: MenuItem<Wry>,
     speech_item: CheckMenuItem<Wry>,
     auto_speak_item: CheckMenuItem<Wry>,
     backend_state: Mutex<BackendMenuState>,
@@ -182,21 +193,37 @@ impl PetMenu {
         speech_enabled: bool,
         muted: bool,
         game_status: &str,
+        llm_mode: &str,
+        llm_cost: &str,
     ) -> Result<(), String> {
         let state = BackendMenuState {
             connected,
             speech_enabled,
             muted,
+            llm_mode: llm_mode.to_owned(),
+            llm_cost: llm_cost.to_owned(),
         };
         let mut current_state = self
             .backend_state
             .lock()
             .map_err(|_| "pet menu state lock is unavailable")?;
-        *current_state = state;
+        *current_state = state.clone();
         drop(current_state);
 
         self.game_status_item
             .set_text(game_status)
+            .map_err(|error| error.to_string())?;
+        self.llm_mode_item
+            .set_text(&state.llm_mode)
+            .map_err(|error| error.to_string())?;
+        self.llm_mode_item
+            .set_enabled(false)
+            .map_err(|error| error.to_string())?;
+        self.llm_cost_item
+            .set_text(&state.llm_cost)
+            .map_err(|error| error.to_string())?;
+        self.llm_cost_item
+            .set_enabled(false)
             .map_err(|error| error.to_string())?;
         self.game_status_item
             .set_enabled(false)
@@ -219,7 +246,7 @@ impl PetMenu {
     fn backend_state(&self) -> Result<BackendMenuState, String> {
         self.backend_state
             .lock()
-            .map(|state| *state)
+            .map(|state| state.clone())
             .map_err(|_| "pet menu state lock is unavailable".into())
     }
 }
@@ -311,6 +338,8 @@ fn unregister_shortcuts_and_exit(app: &AppHandle) {
 fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
     let menu = Menu::new(app)?;
     let mut game_status_item = None;
+    let mut llm_mode_item = None;
+    let mut llm_cost_item = None;
     let mut speech_item = None;
     let mut auto_speak_item = None;
 
@@ -326,6 +355,28 @@ fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
                 )?;
                 menu.append(&item)?;
                 game_status_item = Some(item);
+            }
+            PetMenuEntry::LlmMode => {
+                let item = MenuItem::with_id(
+                    app,
+                    LLM_MODE_ITEM_ID,
+                    DISCONNECTED_LLM_STATUS,
+                    false,
+                    None::<&str>,
+                )?;
+                menu.append(&item)?;
+                llm_mode_item = Some(item);
+            }
+            PetMenuEntry::LlmCost => {
+                let item = MenuItem::with_id(
+                    app,
+                    LLM_COST_ITEM_ID,
+                    DISCONNECTED_LLM_STATUS,
+                    false,
+                    None::<&str>,
+                )?;
+                menu.append(&item)?;
+                llm_cost_item = Some(item);
             }
             PetMenuEntry::Separator => {
                 let separator = PredefinedMenuItem::separator(app)?;
@@ -358,6 +409,8 @@ fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
         menu,
         game_status_item: game_status_item
             .expect("game status must be present in the pet menu layout"),
+        llm_mode_item: llm_mode_item.expect("LLM mode must be present in the pet menu layout"),
+        llm_cost_item: llm_cost_item.expect("LLM cost must be present in the pet menu layout"),
         speech_item: speech_item.expect("speech switch must be present in the pet menu layout"),
         auto_speak_item: auto_speak_item
             .expect("automatic speech switch must be present in the pet menu layout"),
@@ -371,9 +424,18 @@ fn update_pet_menu_state(
     speech_enabled: bool,
     muted: bool,
     game_status: String,
+    llm_mode: String,
+    llm_cost: String,
     menu: State<'_, PetMenu>,
 ) -> Result<(), String> {
-    menu.update_backend_state(connected, speech_enabled, muted, &game_status)
+    menu.update_backend_state(
+        connected,
+        speech_enabled,
+        muted,
+        &game_status,
+        &llm_mode,
+        &llm_cost,
+    )
 }
 
 #[tauri::command]
@@ -696,6 +758,20 @@ mod tests {
             assert!((logical_cursor.x - 32.0).abs() < f64::EPSILON);
             assert!((logical_cursor.y - 48.0).abs() < f64::EPSILON);
         }
+    }
+
+    #[test]
+    fn backend_menu_state_retains_the_extended_llm_display_values() {
+        let state = BackendMenuState {
+            connected: true,
+            speech_enabled: true,
+            muted: false,
+            llm_mode: "当前：AI 模式".into(),
+            llm_cost: "本次花费：$0.0123".into(),
+        };
+
+        assert_eq!(state.llm_mode, "当前：AI 模式");
+        assert_eq!(state.llm_cost, "本次花费：$0.0123");
     }
 
     #[test]

@@ -2,6 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { isPetExpression, setPetDimmed, setPetExpression } from "./pet";
 import { showSpeech } from "./bubble";
+import {
+  formatLlmCost,
+  formatLlmMode,
+  parseLlmState,
+  type LlmState,
+} from "./llm-status";
 
 const BACKEND_HOST = "127.0.0.1";
 const BACKEND_PORT = 8737;
@@ -22,6 +28,7 @@ interface StateMessage {
   speech_enabled: boolean;
   muted: boolean;
   game: GameState;
+  llm?: LlmState;
 }
 
 type GameSessionState =
@@ -53,7 +60,7 @@ let lastUtteranceId: string | undefined;
 function setPetDisconnected(): void {
   setPetExpression("speechless");
   setPetDimmed(true);
-  updatePetMenuState(false, false, false, "CS2：未知（后端未连接）");
+  updatePetMenuState(false, false, false, "CS2：未知（后端未连接）", "—", "—");
 }
 
 function updatePetMenuState(
@@ -61,12 +68,16 @@ function updatePetMenuState(
   speechEnabled: boolean,
   muted: boolean,
   gameStatus: string,
+  llmMode: string,
+  llmCost: string,
 ): void {
   void invoke("update_pet_menu_state", {
     connected,
     speechEnabled,
     muted,
     gameStatus,
+    llmMode,
+    llmCost,
   }).catch((error: unknown) => {
     console.error("failed to synchronize pet menu state", error);
   });
@@ -98,7 +109,8 @@ function isStateMessage(value: unknown): value is StateMessage {
     message.type === "state" &&
     typeof message.speech_enabled === "boolean" &&
     typeof message.muted === "boolean" &&
-    isGameState(message.game)
+    isGameState(message.game) &&
+    (message.llm === undefined || parseLlmState(message.llm) !== undefined)
   );
 }
 
@@ -223,6 +235,8 @@ function handleMessage(event: MessageEvent<unknown>): void {
       message.speech_enabled,
       message.muted,
       formatGameStatus(message.game),
+      formatLlmMode(message.llm),
+      formatLlmCost(message.llm),
     );
     return;
   }
