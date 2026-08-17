@@ -34,6 +34,7 @@ from pet.prompt import PROMPTS_DIRECTORY, PromptPersonality, load_system_prompt
 from pet.replay import load_recording, replay_commentary
 from pet.event_card import (
     render_event_card,
+    render_fact_sentence,
     render_model_event_card,
 )
 
@@ -162,6 +163,7 @@ class BenchEvent:
     category: CommentaryCategory
     event_card: str
     model_card: str
+    fact_sentence: str
     template_text: str
     attempt: BenchAttempt | None
 
@@ -501,6 +503,15 @@ def run_bench(
                 configuration.events.death_after_kill_max_seconds
             ),
         )
+        fact_sentence = render_fact_sentence(
+            disposition.snapshot,
+            disposition.game,
+            disposition.round_situation,
+            event,
+            death_after_kill_max_seconds=(
+                configuration.events.death_after_kill_max_seconds
+            ),
+        )
         attempt = None
         if not cards_only:
             assert model is not None
@@ -522,6 +533,7 @@ def run_bench(
                 category=commentary_category(event),
                 event_card=card,
                 model_card=model_card,
+                fact_sentence=fact_sentence,
                 template_text=disposition.utterance.text,
                 attempt=attempt,
             )
@@ -1025,6 +1037,10 @@ def render_report(result: BenchResult) -> str:
                 "发给模型的精简事件卡：",
                 "",
                 *(f"    {line}" for line in item.model_card.splitlines()),
+                "",
+                "当前线上使用的事实句：",
+                "",
+                *(f"    {line}" for line in item.fact_sentence.splitlines()),
                 "",
                 "人工核对用完整 GSI 事件卡：",
                 "",

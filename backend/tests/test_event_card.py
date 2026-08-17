@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import replace
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -1105,7 +1106,7 @@ def test_scene_tags_cover_positive_and_negative_action_cases() -> None:
     )
     assert all(
         tag in positive
-        for tag in ("残血击杀", "白着打", "踩火杀", "秒了", "换枪后立刻杀")
+        for tag in ("白着打", "踩火杀", "颗秒", "换枪后立刻杀")
     )
 
     ended_flash = render_event_card(
@@ -1123,24 +1124,25 @@ def test_scene_tags_cover_positive_and_negative_action_cases() -> None:
         kill,
     )
     assert "白着打" not in ended_flash
-    assert "秒了" not in ended_flash
+    assert "颗秒" not in ended_flash
 
 
 @pytest.mark.parametrize(
-    ("ammo_drop", "expected"),
+    ("weapon", "ammo_drop", "expected"),
     (
-        (1, "秒了"),
-        (3, "秒了"),
-        (4, "干净击杀"),
-        (7, "干净击杀"),
-        (8, "普通击杀"),
-        (10, "普通击杀"),
-            (11, "有点吃力"),
-            (16, "非常吃力"),
+        ("AK47", 1, "颗秒"),
+        ("M4A1-S", 1, "秒杀"),
+        ("AK47", 2, "秒杀"),
+        ("AK47", 5, "秒杀"),
+        ("AK47", 6, "普通击杀"),
+        ("AK47", 9, "普通击杀"),
+        ("AK47", 10, "有些吃力"),
+        ("AK47", 14, "有些吃力"),
+        ("AK47", 15, "马完了"),
     ),
 )
 def test_ammo_scene_tag_uses_the_product_evaluation_tiers(
-    ammo_drop: int, expected: str | None
+    weapon: str, ammo_drop: int, expected: str | None
 ) -> None:
     snapshot = _real_snapshot()
     event = _event(snapshot).model_copy(update={"type": "kill"})
@@ -1151,13 +1153,13 @@ def test_ammo_scene_tag_uses_the_product_evaluation_tiers(
             _situation(),
             timeline=(
                 TimelineEntry(0.0, "round_live", None),
-                TimelineEntry(2.0, "kill", f"AK47 用弹{ammo_drop}"),
+                TimelineEntry(2.0, "kill", f"{weapon} 用弹{ammo_drop}"),
             ),
         ),
         event,
     )
 
-    ammo_tags = {"秒了", "干净击杀", "普通击杀", "有点吃力", "非常吃力"}
+    ammo_tags = {"颗秒", "秒杀", "普通击杀", "有些吃力", "马完了"}
     if expected is None:
         assert not any(tag in card for tag in ammo_tags)
     else:
@@ -1198,7 +1200,7 @@ def test_smoke_death_and_smoke_exit_death_are_mutually_exclusive() -> None:
 
 @pytest.mark.parametrize(
     ("ammo_drop", "fired", "expected"),
-    ((10, True, True), (9, True, False), (None, True, False), (10, False, False)),
+    ((12, True, True), (11, True, False), (None, True, False), (12, False, False)),
 )
 def test_missed_shots_death_requires_lost_duel_and_ten_observed_rounds(
     ammo_drop: int | None, fired: bool, expected: bool
@@ -1289,7 +1291,7 @@ def test_fact_sentence_renders_neutral_kill_clauses_exactly() -> None:
     assert sentence == (
         "de_anubis CT 2:3 落后 全装局\n【事件】爆头击杀\n"
         "【过程】前期，玩家赢下对枪，打成残血，用AK47爆头完成击杀，打了不少发\n"
-        "【场景标签】对枪胜利、有点吃力、血皮撑住了"
+        "【场景标签】对枪胜利、有些吃力、血皮撑住了"
     )
 
 
@@ -1382,7 +1384,7 @@ def test_death_utility_tags_replace_redundant_lost_duel(
     assert utility_detail in sentence
 
 
-def test_no_fire_death_hides_older_awp_miss_labels() -> None:
+def test_awp_miss_hides_no_fire_death_label() -> None:
     snapshot = _real_snapshot().model_copy(update={"health": 0})
     event = _event(snapshot).model_copy(update={"type": "death"})
     focus_line = "玩家阵亡（一枪没开就没了｜大狙空枪｜连续空枪）"
@@ -1391,7 +1393,7 @@ def test_no_fire_death_hides_older_awp_miss_labels() -> None:
         snapshot, _game(snapshot), _situation(), event, focus_line=focus_line
     )
 
-    assert selection.selected == ("一枪没开就没了",)
+    assert selection.selected == ("大狙空枪", "连续空枪")
 
 
 def test_fact_sentence_does_not_merge_damage_across_other_events() -> None:
@@ -1456,9 +1458,10 @@ def test_multikill_gunplay_uses_average_shots_per_kill() -> None:
 
     sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
 
-    assert "【场景标签】干净击杀" in sentence
-    assert "有点吃力" not in sentence
-    assert "非常吃力" not in sentence
+    assert "连续三杀" in sentence
+    assert "秒杀" in sentence
+    assert "有些吃力" not in sentence
+    assert "马完了" not in sentence
 
 
 def test_multikill_keeps_last_kill_magazine_edge_without_raw_ammo_count() -> None:
@@ -1515,7 +1518,217 @@ def test_fact_sentence_limits_scene_tags_by_product_priority() -> None:
     rendered_tags = sentence.splitlines()[3].removeprefix("【场景标签】").split("、")
 
     assert len(rendered_tags) == 3
-    assert set(rendered_tags) <= {"残血击杀", "白着打", "踩火杀", "换枪后立刻杀"}
-    assert "秒了" not in rendered_tags
+    assert set(rendered_tags) <= {"白着打", "踩火杀", "换枪后立刻杀"}
+    assert "颗秒" not in rendered_tags
     assert "掉了" not in sentence
     assert "用弹" not in sentence
+
+
+def test_flash_death_afterglow_is_still_tagged_but_later_death_is_not() -> None:
+    snapshot = _real_snapshot().model_copy(update={"health": 0})
+    event = _event(snapshot).model_copy(update={"type": "death"})
+    within_afterglow = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(10.0, "flash_end", "持续1.0秒"),
+            TimelineEntry(11.0, "death", None),
+        ),
+    )
+    later = replace(
+        within_afterglow,
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(10.0, "flash_end", "持续1.0秒"),
+            TimelineEntry(11.1, "death", None),
+        ),
+    )
+
+    assert "白着被打死" in render_fact_sentence(snapshot, _game(snapshot), within_afterglow, event)
+    assert "白着被打死" not in render_fact_sentence(snapshot, _game(snapshot), later, event)
+
+
+def test_streak_window_is_independent_from_multikill_accumulation() -> None:
+    snapshot = _real_snapshot()
+    event = _event(snapshot).model_copy(update={"type": "multi_kill", "facts": {"count": 2}})
+    burst = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(20.0, "kill", "AK47 用弹4"),
+            TimelineEntry(25.0, "kill", "AK47 用弹4"),
+        ),
+    )
+    accumulated = replace(
+        burst,
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(20.0, "kill", "AK47 用弹4"),
+            TimelineEntry(25.1, "kill", "AK47 用弹4"),
+        ),
+    )
+
+    burst_sentence = render_fact_sentence(snapshot, _game(snapshot), burst, event)
+    accumulated_sentence = render_fact_sentence(snapshot, _game(snapshot), accumulated, event)
+
+    assert "连续双杀" in burst_sentence
+    assert "多杀2" not in burst_sentence
+    assert "多杀2" in accumulated_sentence
+    assert "连续双杀" not in accumulated_sentence
+
+
+@pytest.mark.parametrize(
+    ("kill_count", "expected"),
+    (
+        (2, "连续双杀"),
+        (3, "连续三杀"),
+        (4, "连续四杀"),
+        (5, "连续五杀"),
+    ),
+)
+def test_each_streak_band_is_selected_for_five_second_bursts(
+    kill_count: int, expected: str
+) -> None:
+    snapshot = _real_snapshot()
+    timeline = (TimelineEntry(0.0, "round_live", None),) + tuple(
+        TimelineEntry(20.0 + index, "kill", "AK47 用弹4")
+        for index in range(kill_count)
+    )
+    event = _event(snapshot).model_copy(
+        update={"type": "multi_kill", "facts": {"count": kill_count}}
+    )
+
+    sentence = render_fact_sentence(
+        snapshot, _game(snapshot), replace(_situation(), timeline=timeline), event
+    )
+
+    assert expected in sentence
+
+
+@pytest.mark.parametrize(
+    ("kill_count", "expected"),
+    ((2, "多杀2"), (3, "多杀3"), (4, "多杀4"), (5, "多杀5+")),
+)
+def test_each_multikill_band_is_selected_without_a_five_second_burst(
+    kill_count: int, expected: str
+) -> None:
+    snapshot = _real_snapshot()
+    timeline = (TimelineEntry(0.0, "round_live", None),) + tuple(
+        TimelineEntry(20.0 + index * 5.1, "kill", "AK47 用弹4")
+        for index in range(kill_count)
+    )
+    event = _event(snapshot).model_copy(
+        update={"type": "multi_kill", "facts": {"count": kill_count}}
+    )
+
+    sentence = render_fact_sentence(
+        snapshot, _game(snapshot), replace(_situation(), timeline=timeline), event
+    )
+
+    assert expected in sentence
+    assert "连续" not in sentence.splitlines()[3]
+
+
+def test_competitive_five_kill_multikill_logs_the_impossible_observation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="pet.event_card")
+    snapshot = _real_snapshot().model_copy(update={"map_mode": "competitive"})
+    timeline = (TimelineEntry(0.0, "round_live", None),) + tuple(
+        TimelineEntry(20.0 + index * 5.1, "kill", "AK47 用弹4")
+        for index in range(5)
+    )
+    event = _event(snapshot).model_copy(
+        update={"type": "multi_kill", "facts": {"count": 5}}
+    )
+
+    sentence = render_fact_sentence(
+        snapshot, _game(snapshot), replace(_situation(), timeline=timeline), event
+    )
+
+    assert "多杀5+" in sentence
+    assert "observed 5 round kills outside casual mode" in caplog.text
+
+
+def test_sniper_kill_suppresses_all_gunplay_tier_tags() -> None:
+    snapshot = _real_snapshot().model_copy(
+        update={
+            "weapons": (
+                WeaponSlot("weapon_awp", "SniperRifle", 4, 5, 20, "active"),
+            )
+        }
+    )
+    situation = replace(
+        _situation(),
+        timeline=(
+            TimelineEntry(0.0, "round_live", None),
+            TimelineEntry(20.0, "kill", "AWP 用弹1"),
+        ),
+    )
+
+    sentence = render_fact_sentence(
+        snapshot,
+        _game(snapshot),
+        situation,
+        _event(snapshot).model_copy(update={"type": "kill"}),
+    )
+
+    assert "狙击击杀" in sentence
+    assert not {"颗秒", "秒杀", "普通击杀", "有些吃力", "马完了"}.intersection(
+        sentence.splitlines()[3]
+    )
+
+
+def test_send_awp_uses_round_inventory_even_when_death_holds_knife() -> None:
+    snapshot = _real_snapshot().model_copy(
+        update={
+            "health": 0,
+            "weapons": (
+                WeaponSlot("weapon_knife", "Knife", None, None, None, "active"),
+            ),
+        }
+    )
+    event = _event(snapshot).model_copy(update={"type": "death", "facts": {"round_kills": 0}})
+    situation = replace(
+        _situation(),
+        awp_seen_this_round=True,
+        timeline=(TimelineEntry(0.0, "round_live", None), TimelineEntry(20.0, "death", None)),
+    )
+
+    sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
+
+    assert "送狙" in sentence
+    assert "切刀时被打死" in sentence
+    killed = render_fact_sentence(
+        snapshot,
+        _game(snapshot),
+        situation,
+        event.model_copy(update={"facts": {"round_kills": 1}}),
+    )
+    assert "送狙" not in killed
+
+
+@pytest.mark.parametrize(
+    ("weapon_type", "expected"),
+    (("Grenade", "切雷时被打死"), ("Knife", "切刀时被打死")),
+)
+def test_death_weapon_switch_tags_require_the_matching_active_weapon(
+    weapon_type: str, expected: str
+) -> None:
+    snapshot = _real_snapshot().model_copy(
+        update={
+            "health": 0,
+            "weapons": (WeaponSlot("weapon_test", weapon_type, None, None, None, "active"),),
+        }
+    )
+    situation = replace(
+        _situation(),
+        timeline=(TimelineEntry(0.0, "round_live", None), TimelineEntry(20.0, "death", None)),
+    )
+    event = _event(snapshot).model_copy(update={"type": "death", "facts": {"round_kills": 1}})
+
+    sentence = render_fact_sentence(snapshot, _game(snapshot), situation, event)
+
+    assert expected in sentence
+    other = "切刀时被打死" if expected == "切雷时被打死" else "切雷时被打死"
+    assert other not in sentence

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
+import logging
 import re
 from typing import Any
 
@@ -16,9 +17,11 @@ from pet.situation import (
     RoundSituation,
     BURN_BAD_LUCK_DAMAGE,
     DEATH_COMBAT_WINDOW_SECONDS,
+    FLASH_DEATH_AFTERGLOW_SECONDS,
     FLASH_BAD_LUCK_COUNT,
     FLASH_BAD_LUCK_SECONDS,
     RESIDUAL_KILL_HEALTH,
+    MISFIRE_DEATH_MIN_AMMO,
     SCENE_TAGS,
     SMOKE_DEATH_WINDOW_SECONDS,
     WEAPON_SWITCH_KILL_WINDOW_SECONDS,
@@ -91,12 +94,16 @@ _CONTINUOUS_EVENT_KINDS = frozenset(
     }
 )
 
+logger = logging.getLogger(__name__)
+
 _KILL_SPECIAL_SCENE_TAGS = frozenset(
-    {"残血击杀", "白着打", "踩火杀", "摸烟击杀", "换枪后立刻杀"}
+    {"狙击击杀", "白着打", "踩火杀", "摸烟击杀", "换枪后立刻杀"}
 )
-_KILL_GUN_SCENE_TAGS = frozenset({"秒了", "干净击杀", "有点吃力", "非常吃力"})
+_KILL_STREAK_SCENE_TAGS = frozenset({"连续双杀", "连续三杀", "连续四杀", "连续五杀"})
+_KILL_MULTI_SCENE_TAGS = frozenset({"多杀2", "多杀3", "多杀4", "多杀5+"})
+_KILL_GUN_SCENE_TAGS = frozenset({"颗秒", "秒杀", "有些吃力", "马完了"})
 _KILL_LOWEST_PRIORITY_SCENE_TAGS = frozenset({"普通击杀"})
-_DEATH_NATURE_SCENE_TAGS = frozenset({"白给", "击杀后被补枪", "马枪死"})
+_DEATH_NATURE_SCENE_TAGS = frozenset({"白给", "击杀后被补枪", "马枪死", "送狙", "切雷时被打死", "切刀时被打死"})
 _DEATH_RETALIATION_SCENE_TAGS = frozenset(
     {"对枪输了", "一枪没开就没了", "打空了还是没打过"}
 )
@@ -361,7 +368,15 @@ def fact_sentence_scene_tag_selection(
         kill_count = event.facts.get("count")
         divisor = kill_count if isinstance(kill_count, int) and kill_count > 0 else len(ammo_drops)
         if ammo_drops and divisor:
-            ammo_tag = _ammo_evaluation_tag(sum(ammo_drops) / divisor)
+            weapons = {
+                _kill_weapon_name(entry.detail)
+                for entry in entries_before_focus
+                if entry.kind == "kill" and _kill_weapon_name(entry.detail) is not None
+            }
+            ammo_tag = _ammo_evaluation_tag(
+                sum(ammo_drops) / divisor,
+                next(iter(weapons)) if len(weapons) == 1 else None,
+            )
             if ammo_tag is not None and ammo_tag not in all_tags:
                 all_tags.append(ammo_tag)
     else:
@@ -376,6 +391,24 @@ def fact_sentence_scene_tag_selection(
             ):
                 if label not in all_tags:
                     all_tags.append(label)
+    focus_index = _focus_entry_index(round_situation.timeline, event)
+    if event.type in {"kill", "kill_headshot", "multi_kill"} and focus_index is not None:
+        kill_progress_tag = _kill_progress_scene_tag(
+            round_situation.timeline, focus_index, snapshot.map_mode
+        )
+        if kill_progress_tag is not None and kill_progress_tag not in all_tags:
+            all_tags.append(kill_progress_tag)
+        gun_evaluation_entries = (
+            round_situation.timeline[: focus_index + 1]
+            if event.type == "multi_kill"
+            else (round_situation.timeline[focus_index],)
+        )
+        if any(
+            _is_sniper_weapon_name(_kill_weapon(entry.detail))
+            for entry in gun_evaluation_entries
+            if entry.kind == "kill"
+        ):
+            all_tags = [tag for tag in all_tags if tag not in _KILL_GUN_SCENE_TAGS]
     all_tags = _resolve_fact_sentence_scene_tag_conflicts(all_tags)
     ordered = _ordered_fact_scene_tags(event.type, all_tags)
     return SceneTagSelection(selected=tuple(ordered[:3]), discarded=tuple(ordered[3:]))
@@ -387,13 +420,12 @@ def _resolve_fact_sentence_scene_tag_conflicts(tags: Iterable[str]) -> list[str]
     utility_death_tags = {"白着被打死", "烟里死", "出烟就没了"}
     if utility_death_tags.intersection(resolved):
         resolved = [tag for tag in resolved if tag != "对枪输了"]
-    # An old AWP miss and no fire in the final three seconds can both be true,
-    # but adjacent labels make the latter read as a contradiction.  Keep the
-    # immediate death cue, which is the only one a focused sentence can state.
-    if "一枪没开就没了" in resolved:
-        resolved = [
-            tag for tag in resolved if tag not in {"大狙空枪", "连续空枪"}
-        ]
+    # AWP misses are a stronger round-level spectator cue than the narrower
+    # final-three-seconds no-fire observation.  Keep that signal unambiguous.
+    if {"大狙空枪", "连续空枪"}.intersection(resolved):
+        resolved = [tag for tag in resolved if tag != "一枪没开就没了"]
+    if any(tag in _KILL_STREAK_SCENE_TAGS for tag in resolved):
+        resolved = [tag for tag in resolved if tag not in _KILL_MULTI_SCENE_TAGS]
     return resolved
 
 
@@ -402,15 +434,19 @@ def _ordered_fact_scene_tags(event_type: EventType, tags: Iterable[str]) -> list
     unique = list(dict.fromkeys(tags))
     if event_type in {"kill", "kill_headshot", "multi_kill"}:
         def rank(label: str) -> tuple[int, str]:
-            if label in _KILL_SPECIAL_SCENE_TAGS:
+            if label in _KILL_STREAK_SCENE_TAGS:
                 return 1, label
-            if label == "对枪胜利":
+            if label in _KILL_SPECIAL_SCENE_TAGS:
                 return 2, label
-            if label in _KILL_GUN_SCENE_TAGS:
+            if label == "对枪胜利":
                 return 3, label
-            if label in _KILL_LOWEST_PRIORITY_SCENE_TAGS:
+            if label in _KILL_GUN_SCENE_TAGS:
+                return 4, label
+            if label in _KILL_MULTI_SCENE_TAGS:
                 return 5, label
-            return 4, label
+            if label in _KILL_LOWEST_PRIORITY_SCENE_TAGS:
+                return 6, label
+            return 5, label
     elif event_type in {"death", "death_after_kill", "death_thrown_away"}:
         def rank(label: str) -> tuple[int, str]:
             if label in _DEATH_NATURE_SCENE_TAGS:
@@ -471,7 +507,7 @@ def _fact_kill_process(
     contexts = _kill_context_clauses(tags)
     context_phrase = "、".join(contexts)
     action = f"{weapon_phrase}{headshot}完成击杀" or "完成击杀"
-    if "残血击杀" in tags and tier in {"丝血", "残血"}:
+    if tier in {"丝血", "残血"} and "对枪胜利" not in tags:
         sentence = f"玩家{tier}还{context_phrase}{action}"
     elif "对枪胜利" in tags:
         outcome = f"打成{tier}" if tier in {"丝血", "残血"} else ""
@@ -498,13 +534,13 @@ def _kill_context_clauses(tags: Iterable[str]) -> tuple[str, ...]:
 
 
 def _gun_evaluation_clause(tags: Iterable[str]) -> str | None:
-    if "秒了" in tags:
-        return "一两枪就带走"
-    if "干净击杀" in tags:
+    if "颗秒" in tags:
+        return "一发就带走"
+    if "秒杀" in tags:
         return "几枪就解决"
-    if "有点吃力" in tags:
+    if "有些吃力" in tags:
         return "打了不少发"
-    if "非常吃力" in tags:
+    if "马完了" in tags:
         return "开了很多枪"
     return None
 
@@ -664,7 +700,7 @@ def _multikill_finish_clauses(
         if found:
             subject = "最后一杀" if ordinal == len(kill_indexes) else f"第{ordinal}杀"
             labels = {
-                "残血击杀": "残血完成击杀",
+                "狙击击杀": "使用狙击枪完成击杀",
                 "白着打": "被闪时完成击杀",
                 "踩火杀": "踩火时完成击杀",
                 "摸烟击杀": "出烟后不久完成击杀",
@@ -861,18 +897,17 @@ def _scene_fact_clauses(tags: Iterable[str], event: GameEvent) -> list[str]:
             "摸烟击杀": "你在出烟后不久完成击杀",
             "击杀后被补枪": "你完成击杀后不久阵亡",
             "白给": _thrown_away_clause(event),
-            "残血击杀": "你在残血时完成击杀",
             "白着打": "你受闪光影响时完成击杀",
             "踩火杀": "你在燃烧状态下完成击杀",
             "换枪后立刻杀": "你换主武器后不久完成击杀",
             "白着被打死": "你受闪光影响时阵亡",
             "出烟就没了": "你出烟后不久阵亡",
             "烟里死": "你仍在烟雾中时阵亡",
-            "秒了": "这次击杀一两枪就带走",
-            "干净击杀": "这次击杀几枪就解决",
+            "颗秒": "这次击杀一发就带走",
+            "秒杀": "这次击杀几枪就解决",
             "普通击杀": "这次击杀没有额外枪法评价",
-            "有点吃力": "这次击杀打了不少发",
-            "非常吃力": "这次击杀开了很多枪",
+            "有些吃力": "这次击杀打了不少发",
+            "马完了": "这次击杀开了很多枪",
             "大狙空枪": "本回合已观测到AWP未伴随击杀的开火",
             "连续空枪": "本回合已多次观测到AWP未伴随击杀的开火",
             "白惨了": "本回合受到较长或多次闪光影响",
@@ -881,7 +916,10 @@ def _scene_fact_clauses(tags: Iterable[str], event: GameEvent) -> list[str]:
             "对枪输了": "你在受伤的交火后阵亡",
             "一枪没开就没了": "可读弹匣窗口内未观测到开火就阵亡",
             "打空了还是没打过": "阵亡时手持武器弹匣已空，且本回合该枪开过火",
-            "马枪死": "阵亡前这次交火的可观测用弹至少10发",
+            "马枪死": "阵亡前这次交火开了很多枪仍未击杀",
+            "送狙": "本回合拿过AWP且零杀阵亡",
+            "切雷时被打死": "切道具时阵亡",
+            "切刀时被打死": "切刀时阵亡",
         }.get(tag)
         if clause is not None:
             clauses.append(clause)
@@ -1343,10 +1381,6 @@ def _action_scene_tags(
     entry = entries[index]
     tags: list[str] = []
     if entry.kind == "kill":
-        same_group = _same_continuous_group_has_kind(entries, index, "damage")
-        health = _kill_health_value(entry.detail)
-        if health is not None and health <= RESIDUAL_KILL_HEALTH and not same_group:
-            tags.append(_scene("残血击杀"))
         if _interval_active_at(entries, index, "flash_start", "flash_end"):
             tags.append(_scene("白着打"))
         if _interval_active_at(entries, index, "burn_start", "burn_end"):
@@ -1358,20 +1392,32 @@ def _action_scene_tags(
                 tags.append(_scene("换枪后立刻杀"))
         ammo_drop = _ammo_drop(entry.detail)
         weapon = _kill_weapon_name(entry.detail)
+        if _is_sniper_weapon_name(weapon):
+            tags.append(_scene("狙击击杀"))
         if (
             ammo_drop is not None
             and weapon is not None
             and weapon.removeprefix("weapon_").lower() in _AMMO_SCENE_WEAPONS
+            and not _is_sniper_weapon_name(weapon)
         ):
             # Weapon lethality varies (AK one shot, M4 two, SMG three), and
             # players commonly keep spraying after a headshot. GSI therefore
             # observes more rounds than the lethal burst; these are product
             # evaluation bands, not a claim about the exact fatal bullet.
-            ammo_tag = _ammo_evaluation_tag(ammo_drop)
+            ammo_tag = _ammo_evaluation_tag(ammo_drop, weapon)
             if ammo_tag is not None:
                 tags.append(_scene(ammo_tag))
     elif entry.kind == "death":
-        if _interval_active_at(entries, index, "flash_start", "flash_end"):
+        flash_afterglow = _previous_completed_effect_gap(
+            entries, index, kind="flash_end"
+        )
+        if (
+            _interval_active_at(entries, index, "flash_start", "flash_end")
+            or (
+                flash_afterglow is not None
+                and 0 <= flash_afterglow <= FLASH_DEATH_AFTERGLOW_SECONDS
+            )
+        ):
             tags.append(_scene("白着被打死"))
         if snapshot.smoked is not None and snapshot.smoked > 0:
             tags.append(_scene("烟里死"))
@@ -1382,6 +1428,16 @@ def _action_scene_tags(
             if smoke_gap is not None and 0 <= smoke_gap <= SMOKE_DEATH_WINDOW_SECONDS:
                 tags.append(_scene("出烟就没了"))
         if event.type in {"death", "death_after_kill", "death_thrown_away"}:
+            held = held_weapon(snapshot)
+            if held is not None and held.type == "Grenade":
+                tags.append(_scene("切雷时被打死"))
+            elif held is not None and held.type == "Knife":
+                tags.append(_scene("切刀时被打死"))
+            if (
+                round_situation.awp_seen_this_round
+                and event.facts.get("round_kills") == 0
+            ):
+                tags.append(_scene("送狙"))
             tags.extend(
                 _death_combat_scene_tags(
                     entries,
@@ -1393,19 +1449,57 @@ def _action_scene_tags(
     return tuple(tags)
 
 
-def _ammo_evaluation_tag(ammo_per_kill: float) -> str | None:
+def _ammo_evaluation_tag(
+    ammo_per_kill: float, weapon_name: str | None = None
+) -> str | None:
     """Map observed shots per kill to the product's coarse gunplay bands."""
-    if 1 <= ammo_per_kill <= 3:
-        return "秒了"
-    if 4 <= ammo_per_kill <= 7:
-        return "干净击杀"
-    if 8 <= ammo_per_kill <= 10:
+    if ammo_per_kill == 1:
+        normalized = (weapon_name or "").removeprefix("weapon_").lower()
+        return "颗秒" if normalized in {"ak47", "deagle", "沙鹰"} else "秒杀"
+    if 2 <= ammo_per_kill <= 5:
+        return "秒杀"
+    if 6 <= ammo_per_kill <= 9:
         return "普通击杀"
-    if 11 <= ammo_per_kill <= 15:
-        return "有点吃力"
-    if ammo_per_kill > 15:
-        return "非常吃力"
+    if 10 <= ammo_per_kill <= 14:
+        return "有些吃力"
+    if ammo_per_kill >= 15:
+        return "马完了"
     return None
+
+
+def _is_sniper_weapon_name(weapon_name: str | None) -> bool:
+    normalized = (weapon_name or "").removeprefix("weapon_").lower()
+    return normalized in {"awp", "ssg08", "ssg 08"}
+
+
+def _kill_progress_scene_tag(
+    entries: tuple[TimelineEntry, ...], index: int, map_mode: str | None
+) -> str | None:
+    """Prefer a five-second burst label over the round's cumulative kill count."""
+    kill_indexes = [
+        item for item in range(index + 1) if entries[item].kind == "kill"
+    ]
+    if not kill_indexes:
+        return None
+    total = sum(_timeline_kill_increase(entries[item]) for item in kill_indexes)
+    streak = _timeline_kill_increase(entries[kill_indexes[-1]])
+    following = kill_indexes[-1]
+    for item in reversed(kill_indexes[:-1]):
+        if entries[following].seconds - entries[item].seconds > 5.0:
+            break
+        streak += _timeline_kill_increase(entries[item])
+        following = item
+    if streak >= 2:
+        return {
+            2: "连续双杀", 3: "连续三杀", 4: "连续四杀"
+        }.get(streak, "连续五杀")
+    if total < 2:
+        return None
+    if total >= 5:
+        if map_mode != "casual":
+            logger.warning("observed %s round kills outside casual mode", total)
+        return "多杀5+"
+    return {2: "多杀2", 3: "多杀3", 4: "多杀4"}[total]
 
 
 def _death_combat_scene_tags(
@@ -1432,7 +1526,7 @@ def _death_combat_scene_tags(
         tags.append(_scene("对枪输了"))
         if (
             round_situation.last_firing_ammo_drop is not None
-            and round_situation.last_firing_ammo_drop >= 10
+            and round_situation.last_firing_ammo_drop >= MISFIRE_DEATH_MIN_AMMO
             and round_situation.last_firing_ammo_at_seconds is not None
             and window_start
             <= round_situation.last_firing_ammo_at_seconds

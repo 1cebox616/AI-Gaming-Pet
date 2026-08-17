@@ -139,8 +139,20 @@ def test_every_scenario_replays_and_renders_declared_facts() -> None:
             if item.event.type == spec.expected_event_type
         )
         assert matching_cards, spec.scenario_id
-        card = matching_cards[-1].event_card
-        assert all(fact in card for fact in spec.required_facts), spec.scenario_id
+        item = matching_cards[-1]
+        card = item.event_card
+        # M3-T11 removes the internal ``残血击杀`` label while retaining
+        # the underlying fact in the online natural-language sentence.
+        # Keep the frozen scenario requirement intact and verify its new
+        # rendering contract instead of resurrecting the retired label.
+        assert all(
+            (
+                "丝血" in item.fact_sentence
+                if fact == "残血击杀"
+                else fact in card
+            )
+            for fact in spec.required_facts
+        ), spec.scenario_id
         assert spec.forbidden_claims
 
 

@@ -444,6 +444,26 @@ def test_primary_weapons_used_filters_deduplicates_and_preserves_first_order() -
     )
 
 
+def test_awp_seen_this_round_persists_after_switching_away() -> None:
+    result = _observe_all(
+        (
+            _snapshot(
+                10.0,
+                weapon_slots=(
+                    ("weapon_awp", "SniperRifle", "active"),
+                    ("weapon_knife", "Knife", "holstered"),
+                ),
+            ),
+            _snapshot(
+                11.0,
+                weapon_slots=(("weapon_knife", "Knife", "active"),),
+            ),
+        )
+    )
+
+    assert result.awp_seen_this_round is True
+
+
 def test_unknown_weapon_type_warns_once_and_is_not_primary(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -1225,8 +1245,8 @@ def test_round_situation_records_fire_and_held_ammo_observations() -> None:
 
 
 def test_scene_tags_enumerate_all_death_combat_labels() -> None:
-    assert len(SCENE_TAGS) == 25
-    assert {"秒了", "干净击杀", "普通击杀", "有点吃力", "非常吃力"} <= SCENE_TAGS
+    assert len(SCENE_TAGS) == 36
+    assert {"颗秒", "秒杀", "普通击杀", "有些吃力", "马完了"} <= SCENE_TAGS
     assert not {"一枪秒", "一梭子秒", "打了多发"} & SCENE_TAGS
     assert {
         "对枪输了",
@@ -1234,8 +1254,18 @@ def test_scene_tags_enumerate_all_death_combat_labels() -> None:
         "打空了还是没打过",
         "烟里死",
         "马枪死",
+        "送狙",
+        "切雷时被打死",
+        "切刀时被打死",
     } <= SCENE_TAGS
+    assert {"连续双杀", "连续三杀", "连续四杀", "连续五杀"} <= SCENE_TAGS
+    assert {"多杀2", "多杀3", "多杀4", "多杀5+", "狙击击杀"} <= SCENE_TAGS
     assert not {
+        "残血击杀",
+        "秒了",
+        "干净击杀",
+        "有点吃力",
+        "非常吃力",
         "一发命中",
         "干净解决",
         "打了半天",

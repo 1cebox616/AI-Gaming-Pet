@@ -190,7 +190,7 @@ def _binding_violations(text: str, *, fact_sentence: str) -> tuple[str, ...]:
     ):
         violations.append("冲锋枪说法（非冲锋枪）")
     if _contains_any(text, ("颗秒", "一枪头", "爆头线")) and not _contains_any(
-        fact_sentence, ("爆头", "秒了")
+        fact_sentence, ("爆头", "颗秒", "秒杀")
     ):
         violations.append("爆头/极少用弹说法（事实不支持）")
     if "一换一" in text and "被补" not in fact_sentence:

@@ -28,6 +28,8 @@ WEAPON_SWITCH_KILL_WINDOW_SECONDS = 3.0
 # enough to describe the death exchange, without treating earlier probing fire
 # as part of it.
 DEATH_COMBAT_WINDOW_SECONDS = 3.0
+FLASH_DEATH_AFTERGLOW_SECONDS = 1.0
+MISFIRE_DEATH_MIN_AMMO = 12
 FLASH_BAD_LUCK_SECONDS = 1.5
 FLASH_BAD_LUCK_COUNT = 3
 BURN_BAD_LUCK_DAMAGE = 30
@@ -85,17 +87,16 @@ SCENE_TAGS: frozenset[str] = frozenset(
         "摸烟击杀",
         "击杀后被补枪",
         "白给",
-        "残血击杀",
         "白着打",
         "踩火杀",
         "换枪后立刻杀",
         "白着被打死",
         "出烟就没了",
-        "秒了",
-        "干净击杀",
+        "颗秒",
+        "秒杀",
         "普通击杀",
-        "有点吃力",
-        "非常吃力",
+        "有些吃力",
+        "马完了",
         "大狙空枪",
         "连续空枪",
         "白惨了",
@@ -106,6 +107,18 @@ SCENE_TAGS: frozenset[str] = frozenset(
         "打空了还是没打过",
         "烟里死",
         "马枪死",
+        "送狙",
+        "连续双杀",
+        "连续三杀",
+        "连续四杀",
+        "连续五杀",
+        "多杀2",
+        "多杀3",
+        "多杀4",
+        "多杀5+",
+        "狙击击杀",
+        "切雷时被打死",
+        "切刀时被打死",
     }
 )
 
@@ -182,6 +195,7 @@ class RoundSituation:
     # it only within the combat window; absent attribution remains unlabelled.
     last_firing_ammo_drop: int | None = None
     last_firing_ammo_at_seconds: float | None = None
+    awp_seen_this_round: bool = False
     # Deliberate GameSnapshot duplication: spectating replaces snapshot.team with
     # the teammate's team, while round-result cards still need the player's team.
     self_team: str | None = None
@@ -339,6 +353,9 @@ class SituationTracker:
                 TimelineEntry(relative_seconds, "ammo_low", ammo_detail),
             )
         awp_miss_count = self._current.awp_miss_count
+        awp_seen_this_round = self._current.awp_seen_this_round or any(
+            weapon.name == "weapon_awp" for weapon in (snapshot.weapons or ())
+        )
         if awp_miss:
             awp_miss_count += 1
             timeline = _append_timeline(
@@ -593,6 +610,7 @@ class SituationTracker:
             weapons_fired_this_round=weapons_fired_this_round,
             last_firing_ammo_drop=last_firing_ammo_drop,
             last_firing_ammo_at_seconds=last_firing_ammo_at_seconds,
+            awp_seen_this_round=awp_seen_this_round,
             self_team=self_team,
             timeline=tuple(timeline),
         )
@@ -710,6 +728,7 @@ class SituationTracker:
             weapons_fired_this_round=frozenset(),
             last_firing_ammo_drop=None,
             last_firing_ammo_at_seconds=None,
+            awp_seen_this_round=False,
             self_team=None,
             timeline=(),
         )
