@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
+import logging
 from pathlib import Path
 import re
 import statistics
@@ -14,8 +15,10 @@ from pet.bench import FactSentenceAuditCase
 from pet.fact_sentence_audit import collect_fact_sentence_audit_cases
 from pet.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
 from pet.prompt import load_system_prompt
+from pet.situation import SCENE_TAGS
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
+VOCABULARY_PATH = BACKEND_ROOT / "prompts" / "vocabulary.md"
 DEFAULT_REPORT_PATH = BACKEND_ROOT / "bench-reports" / "m3-t9.7-style-review.md"
 MODEL = "qwen/qwen3.5-122b-a10b"
 PROVIDER = "Alibaba"
@@ -29,6 +32,35 @@ MAX_TOKENS = 256
 REASONING_EFFORT = "none"
 MAX_CHINESE_CHARS = 30
 _HAN_PATTERN = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+_BINDING_HEADING = "# 用词绑定（说错了就是事实错误）"
+_BINDING_HEADER = ("说法", "只能用在", "需要的标签")
+_TERM_SEPARATOR_PATTERN = re.compile(r"[、，,/／]")
+
+logger = logging.getLogger(__name__)
+
+_WEAPON_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "AWP": ("awp",),
+    "DEAGLE": ("deagle", "沙鹰"),
+    "自动武器": (
+        "ak47",
+        "m4a4",
+        "m4a1-s",
+        "galil ar",
+        "famas",
+        "sg 553",
+        "aug",
+        "mp9",
+        "mac-10",
+        "mp7",
+        "mp5-sd",
+        "ump-45",
+        "p90",
+        "pp-bizon",
+        "negev",
+        "m249",
+    ),
+    "冲锋枪": ("mp9", "mac-10", "mp7", "mp5-sd", "ump-45", "p90", "pp-bizon"),
+}
 
 # These terms cover the prohibited entity categories for the hard, literal check.
 # They intentionally do not infer style or causal exaggeration; that remains manual review.
@@ -102,6 +134,16 @@ class HardChecks:
 
 
 @dataclass(frozen=True, slots=True)
+class VocabularyBinding:
+    """One machine-readable row from vocabulary.md's final binding table."""
+
+    terms: tuple[str, ...]
+    human_condition: str
+    requirement_kind: str
+    requirement_values: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class StyleAttempt:
     """One unfiltered call result or its single upstream failure."""
 
@@ -171,7 +213,175 @@ def _economy_tier_rewrite(text: str, fact_sentence: str) -> bool:
 
 
 def _binding_violations(text: str, *, fact_sentence: str) -> tuple[str, ...]:
-    """Apply every literal binding row from vocabulary.md's final table."""
+    """Apply the cached vocabulary table, with the legacy checks only as fallback."""
+    if _BINDING_RULES is None:
+        return _fallback_binding_violations(text, fact_sentence=fact_sentence)
+    return _table_binding_violations(
+        text,
+        fact_sentence=fact_sentence,
+        bindings=_BINDING_RULES,
+    )
+
+
+def _table_binding_violations(
+    text: str,
+    *,
+    fact_sentence: str,
+    bindings: Iterable[VocabularyBinding],
+) -> tuple[str, ...]:
+    lower = text.lower()
+    tags = _fact_scene_tags(fact_sentence)
+    fact_lower = fact_sentence.lower()
+    violations: list[str] = []
+    for binding in bindings:
+        matched = tuple(term for term in binding.terms if term.lower() in lower)
+        if not matched or binding.requirement_kind == "unmapped":
+            continue
+        requirement_met = False
+        if binding.requirement_kind == "forbidden":
+            requirement_met = False
+        elif binding.requirement_kind == "labels":
+            requirement_met = bool(tags.intersection(binding.requirement_values))
+        elif binding.requirement_kind == "weapon":
+            requirement_met = any(
+                any(alias in fact_lower for alias in _WEAPON_REQUIREMENTS[value])
+                for value in binding.requirement_values
+            )
+        if not requirement_met:
+            phrase = "、".join(matched)
+            requirement = _binding_requirement_description(binding)
+            violations.append(f"{phrase}（需要{requirement}）")
+    return tuple(dict.fromkeys(violations))
+
+
+def _binding_requirement_description(binding: VocabularyBinding) -> str:
+    if binding.requirement_kind == "forbidden":
+        return "不得使用"
+    if binding.requirement_kind == "weapon":
+        return "武器：" + "或".join(binding.requirement_values)
+    return "标签：" + "或".join(binding.requirement_values)
+
+
+def _fact_scene_tags(fact_sentence: str) -> frozenset[str]:
+    rendered = scene_tags(fact_sentence)
+    if rendered == "无":
+        return frozenset()
+    return frozenset(tag.strip() for tag in rendered.split("、") if tag.strip())
+
+
+def _parse_vocabulary_bindings(text: str) -> tuple[VocabularyBinding, ...]:
+    """Parse only the final three-column table; never interpret its prose column."""
+    if _BINDING_HEADING not in text:
+        raise ValueError(f"missing binding heading: {_BINDING_HEADING}")
+    section = text.split(_BINDING_HEADING, 1)[1]
+    # The product-owned prose has one Markdown continuation escaped with a
+    # trailing backslash. Join it before recognizing table rows.
+    section = section.replace("\\\r\n", "").replace("\\\n", "")
+    lines = section.splitlines()
+    header_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if _split_markdown_row(line) == _BINDING_HEADER
+        ),
+        None,
+    )
+    if header_index is None:
+        raise ValueError("missing three-column vocabulary binding header")
+    if header_index + 1 >= len(lines) or not _is_markdown_separator(
+        lines[header_index + 1]
+    ):
+        raise ValueError("missing vocabulary binding table separator")
+
+    bindings: list[VocabularyBinding] = []
+    for row_number, line in enumerate(lines[header_index + 2 :], start=header_index + 3):
+        if not line.lstrip().startswith("|"):
+            break
+        cells = _split_markdown_row(line)
+        if len(cells) != 3:
+            raise ValueError(f"binding row {row_number} has {len(cells)} columns, expected 3")
+        phrases, human_condition, requirement = cells
+        terms = tuple(
+            term.strip()
+            for term in _TERM_SEPARATOR_PATTERN.split(phrases)
+            if term.strip()
+        )
+        if not terms:
+            raise ValueError(f"binding row {row_number} has no phrases")
+        kind, values = _parse_binding_requirement(requirement, row_number=row_number)
+        bindings.append(
+            VocabularyBinding(
+                terms=terms,
+                human_condition=human_condition,
+                requirement_kind=kind,
+                requirement_values=values,
+            )
+        )
+    if not bindings:
+        raise ValueError("vocabulary binding table has no data rows")
+    return tuple(bindings)
+
+
+def _split_markdown_row(line: str) -> tuple[str, ...]:
+    sentinel = "\x00PIPE\x00"
+    protected = line.strip().replace("\\|", sentinel)
+    if not protected.startswith("|") or not protected.endswith("|"):
+        return ()
+    return tuple(
+        cell.strip().replace(sentinel, "|")
+        for cell in protected[1:-1].split("|")
+    )
+
+
+def _is_markdown_separator(line: str) -> bool:
+    cells = _split_markdown_row(line)
+    return len(cells) == 3 and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+
+
+def _parse_binding_requirement(
+    requirement: str, *, row_number: int
+) -> tuple[str, tuple[str, ...]]:
+    if requirement == "不得使用":
+        return "forbidden", ()
+    if requirement == "无法映射":
+        return "unmapped", ()
+    if requirement.startswith("武器:"):
+        values = tuple(
+            value.strip()
+            for value in requirement.removeprefix("武器:").split("|")
+            if value.strip()
+        )
+        unknown = tuple(value for value in values if value not in _WEAPON_REQUIREMENTS)
+        if not values or unknown:
+            raise ValueError(
+                f"binding row {row_number} has unknown weapon requirement: "
+                f"{unknown or requirement}"
+            )
+        return "weapon", values
+    labels = tuple(value.strip() for value in requirement.split("|") if value.strip())
+    unknown_labels = tuple(label for label in labels if label not in SCENE_TAGS)
+    if not labels or unknown_labels:
+        raise ValueError(
+            f"binding row {row_number} has unknown scene tags: "
+            f"{unknown_labels or requirement}"
+        )
+    return "labels", labels
+
+
+def _load_vocabulary_bindings(path: Path) -> tuple[VocabularyBinding, ...] | None:
+    try:
+        return _parse_vocabulary_bindings(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        logger.error(
+            "Failed to parse vocabulary binding table from %s; using legacy hard-coded fallback: %s",
+            path,
+            error,
+        )
+        return None
+
+
+def _fallback_binding_violations(text: str, *, fact_sentence: str) -> tuple[str, ...]:
+    """Keep the pre-table checks solely for startup parse failures."""
     lower = text.lower()
     facts = fact_sentence.lower()
     violations: list[str] = []
@@ -227,6 +437,9 @@ def _binding_violations(text: str, *, fact_sentence: str) -> tuple[str, ...]:
     # The final “僵尸” row needs movement/position data, which GSI fact sentences
     # deliberately lack. It is recorded as manually reviewable rather than guessed.
     return tuple(violations)
+
+
+_BINDING_RULES = _load_vocabulary_bindings(VOCABULARY_PATH)
 
 
 def _contains_any(text: str, terms: Iterable[str]) -> bool:
@@ -335,8 +548,8 @@ def render_style_review(review: StyleReview) -> str:
         "- 硬性检查命中（输出条数）："
         f"超 30 汉字 {length_hits}；无依据词 {unsupported_hits}；用词绑定 {binding_hits}；"
         f"经济档位改写 {economy_rewrite_hits}；eco 说成手枪局 {eco_pistol_hits}。",
-        "- 用词绑定覆盖：逐条实现表中的 15 个可由事实句判断的绑定；"
-        "“僵尸”依赖走位/位置，而事实句刻意不含该数据，保留为人工复核项。",
+        "- 用词绑定覆盖：启动时解析 `vocabulary.md` 的三列表格并缓存；"
+        f"当前解析 {len(_BINDING_RULES or ())} 行，标为“无法映射”的行保留人工复核。",
         "- 本报告不含自动打分、审美排名或筛选；下列为原样单次输出。",
         "",
     ]
