@@ -231,6 +231,7 @@ def _table_binding_violations(
 ) -> tuple[str, ...]:
     lower = text.lower()
     tags = _fact_scene_tags(fact_sentence)
+    event_name = _fact_event_name(fact_sentence)
     fact_lower = fact_sentence.lower()
     violations: list[str] = []
     for binding in bindings:
@@ -242,6 +243,13 @@ def _table_binding_violations(
             requirement_met = False
         elif binding.requirement_kind == "labels":
             requirement_met = bool(tags.intersection(binding.requirement_values))
+        elif binding.requirement_kind == "conditions":
+            requirement_met = any(
+                value.removeprefix("事件:") == event_name
+                if value.startswith("事件:")
+                else value in tags
+                for value in binding.requirement_values
+            )
         elif binding.requirement_kind == "weapon":
             requirement_met = any(
                 any(alias in fact_lower for alias in _WEAPON_REQUIREMENTS[value])
@@ -250,7 +258,10 @@ def _table_binding_violations(
         if not requirement_met:
             phrase = "、".join(matched)
             requirement = _binding_requirement_description(binding)
-            violations.append(f"{phrase}（需要{requirement}）")
+            if binding.requirement_kind == "forbidden":
+                violations.append(f"{phrase}（{requirement}）")
+            else:
+                violations.append(f"{phrase}（需要{requirement}）")
     return tuple(dict.fromkeys(violations))
 
 
@@ -259,6 +270,13 @@ def _binding_requirement_description(binding: VocabularyBinding) -> str:
         return "不得使用"
     if binding.requirement_kind == "weapon":
         return "武器：" + "或".join(binding.requirement_values)
+    if binding.requirement_kind == "conditions":
+        return "或".join(
+            value.replace("事件:", "事件：", 1)
+            if value.startswith("事件:")
+            else f"标签：{value}"
+            for value in binding.requirement_values
+        )
     return "标签：" + "或".join(binding.requirement_values)
 
 
@@ -267,6 +285,13 @@ def _fact_scene_tags(fact_sentence: str) -> frozenset[str]:
     if rendered == "无":
         return frozenset()
     return frozenset(tag.strip() for tag in rendered.split("、") if tag.strip())
+
+
+def _fact_event_name(fact_sentence: str) -> str | None:
+    for line in fact_sentence.splitlines():
+        if line.startswith("【事件】"):
+            return line.removeprefix("【事件】").strip() or None
+    return None
 
 
 def _parse_vocabulary_bindings(text: str) -> tuple[VocabularyBinding, ...]:
@@ -359,6 +384,23 @@ def _parse_binding_requirement(
             )
         return "weapon", values
     labels = tuple(value.strip() for value in requirement.split("|") if value.strip())
+    if any(value.startswith("事件:") for value in labels):
+        unknown_labels = tuple(
+            value
+            for value in labels
+            if not value.startswith("事件:") and value not in SCENE_TAGS
+        )
+        invalid_events = tuple(
+            value
+            for value in labels
+            if value.startswith("事件:") and not value.removeprefix("事件:").strip()
+        )
+        if unknown_labels or invalid_events:
+            raise ValueError(
+                f"binding row {row_number} has invalid mixed requirements: "
+                f"{unknown_labels + invalid_events}"
+            )
+        return "conditions", labels
     unknown_labels = tuple(label for label in labels if label not in SCENE_TAGS)
     if not labels or unknown_labels:
         raise ValueError(

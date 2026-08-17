@@ -58,8 +58,70 @@ def test_product_vocabulary_binding_table_is_parsed_and_cached() -> None:
     bindings = style_review_module._BINDING_RULES
 
     assert bindings is not None
-    assert len(bindings) == 27
-    assert sum(binding.requirement_kind == "unmapped" for binding in bindings) == 3
+    assert len(bindings) == 28
+    assert sum(binding.requirement_kind == "unmapped" for binding in bindings) == 1
+
+
+@pytest.mark.parametrize("phrase", ("一枪头", "爆头线"))
+def test_binding_table_can_require_an_event_type(phrase: str) -> None:
+    unsupported = check_hard_violations(
+        phrase,
+        fact_sentence="【事件】击杀\n【场景标签】普通击杀",
+    )
+    headshot = check_hard_violations(
+        phrase,
+        fact_sentence="【事件】爆头击杀\n【场景标签】普通击杀",
+    )
+    assert unsupported.binding_violations
+    assert headshot.binding_violations == ()
+
+
+def test_specific_pellet_kill_row_remains_stricter_than_general_headshot_row() -> None:
+    headshot_without_pellet_tag = check_hard_violations(
+        "颗秒",
+        fact_sentence="【事件】爆头击杀\n【场景标签】普通击杀",
+    )
+    pellet_kill = check_hard_violations(
+        "颗秒",
+        fact_sentence="【事件】击杀\n【场景标签】颗秒",
+    )
+
+    assert headshot_without_pellet_tag.binding_violations == (
+        "颗秒（需要标签：颗秒）",
+    )
+    assert pellet_kill.binding_violations == ()
+
+
+def test_revised_binding_rows_keep_positive_and_negative_flash_scenes_separate() -> None:
+    positive = "【事件】击杀\n【场景标签】白着打"
+    negative = "【事件】阵亡\n【场景标签】白着被打死"
+    flash_bad_luck = "【事件】阵亡\n【场景标签】白惨了"
+
+    assert check_hard_violations(
+        "被白到死", fact_sentence=positive
+    ).binding_violations
+    assert check_hard_violations(
+        "被白到死", fact_sentence=negative
+    ).binding_violations == ()
+    assert check_hard_violations(
+        "白屏战神", fact_sentence=positive
+    ).binding_violations
+    assert check_hard_violations(
+        "白屏战神", fact_sentence=flash_bad_luck
+    ).binding_violations == ()
+
+
+def test_revised_binding_rows_do_not_allow_misfire_or_zombie_terms() -> None:
+    hard_kill = "【事件】击杀\n【场景标签】马完了"
+    misfire_death = "【事件】阵亡\n【场景标签】马枪死"
+
+    assert check_hard_violations("马枪", fact_sentence=hard_kill).binding_violations
+    assert check_hard_violations(
+        "马枪", fact_sentence=misfire_death
+    ).binding_violations == ()
+    assert check_hard_violations(
+        "这走位像僵尸", fact_sentence="【事件】阵亡\n【场景标签】对枪输了"
+    ).binding_violations == ("僵尸（不得使用）",)
 
 
 def test_new_vocabulary_binding_row_takes_effect_without_code_change(
