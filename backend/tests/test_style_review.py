@@ -1,3 +1,5 @@
+import pytest
+
 from pet.bench import FactSentenceAuditCase
 from pet.llm import LlmResult, LlmUsage
 from pet.style_review import (
@@ -34,6 +36,27 @@ def test_hard_checks_allow_bound_awp_phrase_when_fact_supports_it() -> None:
     checks = check_hard_violations("这把黄色闪光真架住了", fact_sentence=fact_sentence)
 
     assert checks.binding_violations == ()
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "开了这么多枪没打死一个",
+        "开了很多枪没打死，寄了",
+        "这波没打死一个",
+    ),
+)
+def test_hard_checks_bind_heavy_fire_phrases_to_misfire_death(
+    text: str,
+) -> None:
+    ordinary_duel = "【事件】阵亡\n【过程】玩家阵亡，开火后没打过\n【场景标签】对枪输了"
+    misfire_death = "【事件】阵亡\n【过程】玩家阵亡，开了这么多枪没打死\n【场景标签】马枪死、对枪输了"
+
+    rejected = check_hard_violations(text, fact_sentence=ordinary_duel)
+    accepted = check_hard_violations(text, fact_sentence=misfire_death)
+
+    assert rejected.binding_violations == ("马枪说法（事实非大量开火未中）",)
+    assert accepted.binding_violations == ()
 
 
 def test_hard_checks_mark_shortened_economy_tier_rewrite() -> None:

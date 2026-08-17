@@ -147,6 +147,30 @@ def test_empty_response_and_hard_gate_each_fall_back() -> None:
     asyncio.run(exercise())
 
 
+def test_heavy_fire_phrase_without_misfire_death_fact_falls_back() -> None:
+    async def exercise() -> None:
+        bridge = _Bridge()
+        client = _Client(_result("开了这么多枪没打死一个"))
+        runtime = OnlineCommentaryRuntime(
+            _config(), bridge, _Generator(), client_factory=lambda _: client  # type: ignore[arg-type]
+        )
+        await runtime.start()
+        request = _Request(
+            0,
+            _event(),
+            None,
+            "【事件】阵亡\n【过程】玩家阵亡，开火后没打过\n【场景标签】对枪输了",
+        )
+
+        await runtime._complete(request)
+
+        assert bridge.utterances[-1].id == "template-event-1"
+        assert runtime.state().consecutive_failures == 1
+        await runtime.shutdown()
+
+    asyncio.run(exercise())
+
+
 def test_three_failures_hold_template_mode_until_next_match() -> None:
     async def exercise() -> None:
         bridge = _Bridge()

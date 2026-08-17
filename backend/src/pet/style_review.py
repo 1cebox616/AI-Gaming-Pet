@@ -197,7 +197,16 @@ def _binding_violations(text: str, *, fact_sentence: str) -> tuple[str, ...]:
         violations.append("一换一（非刚杀完即被补）")
     if _contains_any(text, ("白给", "欢乐送", "全装秒躺")) and "白给" not in fact_sentence:
         violations.append("白给说法（事实非白给）")
-    if _contains_any(text, ("马枪", "人体描边", "马完了")) and "马枪死" not in fact_sentence:
+    if _contains_any(
+        text,
+        (
+            "马枪",
+            "人体描边",
+            "马完了",
+            "开了很多枪没打死",
+            "没打死一个",
+        ),
+    ) and "马枪死" not in fact_sentence:
         violations.append("马枪说法（事实非大量开火未中）")
     if "武器大师" in text and "换枪后立刻杀" not in fact_sentence:
         violations.append("武器大师（非换枪后击杀）")
