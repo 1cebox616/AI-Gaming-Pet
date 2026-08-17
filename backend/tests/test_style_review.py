@@ -1,16 +1,14 @@
 import pytest
 
-from pet import style_review as style_review_module
+from pet import hard_gate as hard_gate_module
 from pet.bench import FactSentenceAuditCase
+from pet.hard_gate import MAX_CHINESE_CHARS, check_hard_violations, scene_tags
 from pet.llm import LlmResult, LlmUsage
 from pet.style_review import (
-    MAX_CHINESE_CHARS,
     MAX_TOKENS,
     REASONING_EFFORT,
     StyleReview,
-    check_hard_violations,
     render_style_review,
-    scene_tags,
 )
 
 
@@ -55,7 +53,7 @@ def test_hard_checks_bind_heavy_fire_phrase_to_misfire_death() -> None:
 
 
 def test_product_vocabulary_binding_table_is_parsed_and_cached() -> None:
-    bindings = style_review_module._BINDING_RULES
+    bindings = hard_gate_module.VOCABULARY_BINDINGS
 
     assert bindings is not None
     assert len(bindings) == 28
@@ -135,9 +133,9 @@ def test_new_vocabulary_binding_row_takes_effect_without_code_change(
         "| 测试暗号 | 只用于对枪胜利 | 对枪胜利 |\n",
         encoding="utf-8",
     )
-    bindings = style_review_module._load_vocabulary_bindings(vocabulary)
+    bindings = hard_gate_module._load_vocabulary_bindings(vocabulary)
     assert bindings is not None
-    monkeypatch.setattr(style_review_module, "_BINDING_RULES", bindings)
+    monkeypatch.setattr(hard_gate_module, "VOCABULARY_BINDINGS", bindings)
 
     rejected = check_hard_violations(
         "测试暗号", fact_sentence="【事件】击杀\n【场景标签】普通击杀"
@@ -155,9 +153,9 @@ def test_invalid_vocabulary_table_logs_error_and_uses_legacy_fallback(
 ) -> None:
     vocabulary = tmp_path / "vocabulary.md"
     vocabulary.write_text("# 用词绑定（说错了就是事实错误）\n表坏了\n", encoding="utf-8")
-    bindings = style_review_module._load_vocabulary_bindings(vocabulary)
+    bindings = hard_gate_module._load_vocabulary_bindings(vocabulary)
     assert bindings is None
-    monkeypatch.setattr(style_review_module, "_BINDING_RULES", bindings)
+    monkeypatch.setattr(hard_gate_module, "VOCABULARY_BINDINGS", bindings)
 
     checks = check_hard_violations(
         "这波白给", fact_sentence="【事件】阵亡\n【场景标签】对枪输了"
@@ -165,6 +163,49 @@ def test_invalid_vocabulary_table_logs_error_and_uses_legacy_fallback(
 
     assert "missing three-column vocabulary binding header" in caplog.text
     assert checks.binding_violations == ("白给说法（事实非白给）",)
+
+
+@pytest.mark.parametrize("requirement", ("不存在的标签", "事件:不存在的事件"))
+def test_unknown_binding_requirement_rejects_the_entire_table(
+    requirement: str, tmp_path, caplog
+) -> None:
+    vocabulary = tmp_path / "vocabulary.md"
+    vocabulary.write_text(
+        "# 用词绑定（说错了就是事实错误）\n\n"
+        "| 说法 | 只能用在 | 需要的标签 |\n"
+        "|---|---|---|\n"
+        f"| 测试暗号 | 不供机器读取 | {requirement} |\n",
+        encoding="utf-8",
+    )
+
+    assert hard_gate_module._load_vocabulary_bindings(vocabulary) is None
+    assert "unknown requirements" in caplog.text
+
+
+def test_binding_parser_supports_escaped_pipes_and_prose_continuations() -> None:
+    bindings = hard_gate_module._parse_vocabulary_bindings(
+        "# 用词绑定（说错了就是事实错误）\n\n"
+        "| 说法 | 只能用在 | 需要的标签 |\n"
+        "|---|---|---|\n"
+        "| 测试暗号 | 这列自然语言续行；\\\n"
+        "机器不得解释 | 马枪死\\|白给 |\n"
+    )
+
+    assert len(bindings) == 1
+    assert bindings[0].terms == ("测试暗号",)
+    assert bindings[0].requirement_values == ("马枪死", "白给")
+    assert not hasattr(bindings[0], "human_condition")
+
+
+def test_noncontiguous_binding_rows_reject_the_entire_table() -> None:
+    with pytest.raises(ValueError, match="appears after the table ended"):
+        hard_gate_module._parse_vocabulary_bindings(
+            "# 用词绑定（说错了就是事实错误）\n\n"
+            "| 说法 | 只能用在 | 需要的标签 |\n"
+            "|---|---|---|\n"
+            "| 第一条 | 不供机器读取 | 白给 |\n\n"
+            "| 第二条 | 不供机器读取 | 马枪死 |\n"
+        )
 
 
 def test_hard_checks_mark_shortened_economy_tier_rewrite() -> None:

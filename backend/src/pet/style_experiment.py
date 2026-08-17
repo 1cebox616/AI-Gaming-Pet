@@ -10,6 +10,7 @@ import statistics
 
 from pet.bench import FactSentenceAuditCase
 from pet.fact_sentence_audit import collect_fact_sentence_audit_cases
+from pet.hard_gate import check_hard_violations
 from pet.llm import LlmError, LlmResult, OpenRouterClient
 from pet.prompt import load_system_prompt
 from pet.style_diversity import _CASE_IDS, _percentile, _vocabulary_entries
@@ -21,7 +22,6 @@ from pet.style_review import (
     SEED,
     TIMEOUT_SECONDS,
     _ROUND_RESULT_STYLE_EXCLUSIONS,
-    check_hard_violations,
 )
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]

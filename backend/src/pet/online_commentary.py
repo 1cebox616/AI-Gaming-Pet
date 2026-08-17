@@ -13,12 +13,12 @@ from pet.config import LlmConfig
 from pet.event_card import render_fact_sentence
 from pet.events import GameEvent
 from pet.gsi import GameSnapshot
+from pet.hard_gate import check_hard_violations
 from pet.lines import Utterance
 from pet.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
 from pet.prompt import load_system_prompt
 from pet.session import GameState
 from pet.situation import RoundSituation
-from pet.style_review import check_hard_violations
 
 logger = logging.getLogger(__name__)
 
