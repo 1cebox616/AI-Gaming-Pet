@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pet.config import load_config
+from pet.core.config import load_config
 
 
 def test_missing_configuration_file_uses_validated_defaults(
@@ -13,7 +13,7 @@ def test_missing_configuration_file_uses_validated_defaults(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A missing default file leaves the backend usable with model defaults."""
-    caplog.set_level(logging.WARNING, logger="pet.config")
+    caplog.set_level(logging.WARNING, logger="pet.core.config")
 
     configuration = load_config(
         tmp_path / "missing-config.toml",
@@ -91,7 +91,7 @@ def test_missing_field_uses_its_default_and_logs_warning(
         "[idle]\nenabled = false\nmin_interval_seconds = 45\nmax_interval_seconds = 120\n",
         encoding="utf-8",
     )
-    caplog.set_level(logging.WARNING, logger="pet.config")
+    caplog.set_level(logging.WARNING, logger="pet.core.config")
 
     configuration = load_config(default_path, tmp_path / "missing-local.toml")
 
@@ -111,7 +111,7 @@ def test_invalid_sections_fall_back_independently_and_log_warning(
         "[idle]\nenabled = true\nmin_interval_seconds = 4\nmax_interval_seconds = 120\n",
         encoding="utf-8",
     )
-    caplog.set_level(logging.WARNING, logger="pet.config")
+    caplog.set_level(logging.WARNING, logger="pet.core.config")
 
     configuration = load_config(default_path, tmp_path / "missing-local.toml")
 
@@ -133,7 +133,7 @@ def test_invalid_idle_section_preserves_valid_speech_customization(
         "[idle]\nenabled = true\nmin_interval_seconds = 5\nmax_interval_seconds = 120\n",
         encoding="utf-8",
     )
-    caplog.set_level(logging.WARNING, logger="pet.config")
+    caplog.set_level(logging.WARNING, logger="pet.core.config")
 
     configuration = load_config(default_path, tmp_path / "missing-local.toml")
 
@@ -157,7 +157,7 @@ def test_invalid_speech_section_preserves_valid_idle_customization(
         "[idle]\nenabled = false\nmin_interval_seconds = 30\nmax_interval_seconds = 60\n",
         encoding="utf-8",
     )
-    caplog.set_level(logging.WARNING, logger="pet.config")
+    caplog.set_level(logging.WARNING, logger="pet.core.config")
 
     configuration = load_config(default_path, tmp_path / "missing-local.toml")
 
@@ -182,7 +182,7 @@ def test_unknown_field_falls_back_only_its_section_and_logs_field_name(
         "[idle]\nenabled = false\nmin_interval_seconds = 30\nmax_interval_seconds = 60\n",
         encoding="utf-8",
     )
-    caplog.set_level(logging.WARNING, logger="pet.config")
+    caplog.set_level(logging.WARNING, logger="pet.core.config")
 
     configuration = load_config(default_path, tmp_path / "missing-local.toml")
 
@@ -208,7 +208,7 @@ def test_unknown_top_level_section_warns_without_discarding_known_values(
         "[unknown_top]\nvalue = 42\n",
         encoding="utf-8",
     )
-    caplog.set_level(logging.WARNING, logger="pet.config")
+    caplog.set_level(logging.WARNING, logger="pet.core.config")
 
     configuration = load_config(default_path, tmp_path / "missing-local.toml")
 
@@ -284,7 +284,7 @@ def test_invalid_events_section_falls_back_alone_and_logs_warning(
         + events_section,
         encoding="utf-8",
     )
-    caplog.set_level(logging.WARNING, logger="pet.config")
+    caplog.set_level(logging.WARNING, logger="pet.core.config")
 
     configuration = load_config(default_path, tmp_path / "missing-local.toml")
 
@@ -367,7 +367,7 @@ def test_invalid_policy_section_falls_back_alone_and_logs_warning(
         + policy_section,
         encoding="utf-8",
     )
-    caplog.set_level(logging.WARNING, logger="pet.config")
+    caplog.set_level(logging.WARNING, logger="pet.core.config")
 
     configuration = load_config(default_path, tmp_path / "missing-local.toml")
 
@@ -428,7 +428,7 @@ def test_invalid_personality_falls_back_only_that_section_and_warns(
         + personality_section,
         encoding="utf-8",
     )
-    caplog.set_level(logging.WARNING, logger="pet.config")
+    caplog.set_level(logging.WARNING, logger="pet.core.config")
 
     configuration = load_config(default_path, tmp_path / "missing-local.toml")
 
@@ -458,3 +458,32 @@ def test_llm_section_loads_runtime_tuning_without_accepting_credentials(tmp_path
     assert configuration.llm.temperature == 1.1
     assert configuration.llm.timeout_seconds == 2.5
     assert configuration.llm.max_tokens == 128
+
+
+def test_nested_active_game_configuration_and_llm_profile_load(tmp_path: Path) -> None:
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        '[active]\ngame = "demo"\n\n'
+        "[llm]\nenabled = true\nmodel = \"base/model\"\nprovider = \"\"\n"
+        "temperature = 0.9\ntimeout_seconds = 3.0\nmax_tokens = 256\n\n"
+        "[llm.profiles.fast]\nmodel = \"fast/model\"\nmax_tokens = 64\n\n"
+        "[games.demo.gsi]\nrecord = true\n\n"
+        "[games.demo.events]\nthrown_away_max_survival_seconds = 20\n"
+        "thrown_away_min_equip_value = 3000\ndeath_after_kill_max_seconds = 8\n\n"
+        "[games.demo.policy]\ncooldown_seconds = 4\nmax_lines_per_round = 4\n"
+        "alive_priority_threshold = 0\ncooldown_override_priority = 70\n"
+        "minimum_gap_seconds = 2\nfollow_up_max_age_seconds = 5\n"
+        "streak_settle_seconds = 2.5\n\n"
+        '[games.demo.personality]\nstyle = "caster"\n',
+        encoding="utf-8",
+    )
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.active.game == "demo"
+    assert configuration.gsi.record is True
+    assert configuration.events.thrown_away_max_survival_seconds == 20
+    assert configuration.policy.cooldown_seconds == 4
+    assert configuration.personality.style == "caster"
+    assert configuration.llm.profiles["fast"].model == "fast/model"
+    assert configuration.llm.profiles["fast"].max_tokens == 64

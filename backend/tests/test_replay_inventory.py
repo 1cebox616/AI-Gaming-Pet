@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 
-from pet.replay import generate_data_inventory
+from pet.games.cs2.eval.replay import generate_data_inventory
 
 
 def test_inventory_counts_raw_paths_ranges_and_all_derivations(tmp_path: Path) -> None:

@@ -8,11 +8,11 @@ from typing import Any
 
 import pytest
 
-from pet.events import GameEvent
-from pet.gsi import GameSnapshot, WeaponSlot, parse_snapshot
-from pet.session import GameState
-from pet.situation import RoundSituation, TimelineEntry
-from pet.event_card import (
+from pet.games.cs2.events import GameEvent
+from pet.games.cs2.gsi import GameSnapshot, WeaponSlot, parse_snapshot
+from pet.games.cs2.session import GameState
+from pet.games.cs2.situation import RoundSituation, TimelineEntry
+from pet.games.cs2.fact_sentences import (
     _fact_death_process,
     fact_sentence_scene_tag_selection,
     render_event_card,
@@ -1632,7 +1632,7 @@ def test_each_multikill_band_is_selected_without_a_five_second_burst(
 def test_competitive_five_kill_multikill_logs_the_impossible_observation(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.WARNING, logger="pet.event_card")
+    caplog.set_level(logging.WARNING, logger="pet.games.cs2.fact_sentences")
     snapshot = _real_snapshot().model_copy(update={"map_mode": "competitive"})
     timeline = (TimelineEntry(0.0, "round_live", None),) + tuple(
         TimelineEntry(20.0 + index * 5.1, "kill", "AK47 用弹4")

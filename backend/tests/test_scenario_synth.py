@@ -7,10 +7,10 @@ from typing import Any
 
 import pytest
 
-from pet.bench import run_bench
-from pet.config import load_config
-from pet.replay import load_recording, replay_policy, replay_recording
-from pet.scenario_synth import (
+from pet.games.cs2.eval.bench import run_bench
+from pet.core.config import load_config
+from pet.games.cs2.eval.replay import load_recording, replay_policy, replay_recording
+from pet.games.cs2.eval.scenario_synth import (
     INVENTORY_PATHS,
     OBSERVED_CONSTRAINTS_PATH,
     RECORDINGS_DIRECTORY,

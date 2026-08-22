@@ -9,10 +9,10 @@ from typing import Any
 from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 
-from pet.bridge import PetBridge
-from pet.config import IdleConfig, SpeechConfig
-from pet.session import GameState
-from pet.speech import SpeechService
+from pet.core.bridge import PetBridge
+from pet.core.config import IdleConfig, SpeechConfig
+from pet.games.cs2.session import GameState
+from pet.core.speech import SpeechService
 
 TEST_IDLE_INTERVAL_SECONDS = 1
 
@@ -81,14 +81,9 @@ def _receive_initial_messages(websocket: Any) -> None:
         "speech_enabled": False,
         "muted": False,
         "game": {
+            "game_id": "",
             "state": "offline",
-            "mode": None,
-            "map": None,
-            "round": None,
-            "score_ct": None,
-            "score_t": None,
-            "subject_steamid": None,
-            "subject_is_self": None,
+            "summary": {},
         },
     }
     _assert_utterance(websocket.receive_json())

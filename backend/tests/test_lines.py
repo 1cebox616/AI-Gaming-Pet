@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from pet.lines import Utterance
+from pet.core.lines import Utterance
 
 
 @pytest.mark.parametrize(

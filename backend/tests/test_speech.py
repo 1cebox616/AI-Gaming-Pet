@@ -7,8 +7,8 @@ from concurrent.futures import Future
 
 import pytest
 
-from pet.lines import IDLE_UTTERANCES_BY_PERSONALITY
-from pet.speech import SpeechMetrics, SpeechService
+from pet.core.lines import IDLE_UTTERANCES_BY_PERSONALITY
+from pet.core.speech import SpeechMetrics, SpeechService
 
 INTERRUPTION_LIMIT_SECONDS = 1.3
 STOP_AFTER_PLAYBACK_SECONDS = 1.0

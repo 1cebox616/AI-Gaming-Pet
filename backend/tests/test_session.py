@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from pet.gsi import GSI_SILENCE_SECONDS, parse_snapshot
-from pet.session import GameSessionTracker, GameState
+from pet.games.cs2.gsi import GSI_SILENCE_SECONDS, parse_snapshot
+from pet.games.cs2.session import GameSessionTracker, GameState
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_session_samples.json"
 

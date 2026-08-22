@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from pet.llm import LlmError, OpenRouterClient, parse_analysis_text
+from pet.core.llm import LlmError, OpenRouterClient, parse_analysis_text
 
 
 class _StepClock:

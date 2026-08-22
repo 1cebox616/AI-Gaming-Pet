@@ -27,28 +27,14 @@ interface StateMessage {
   type: "state";
   speech_enabled: boolean;
   muted: boolean;
-  game: GameState;
+  game: GameStatus;
   llm?: LlmState;
 }
 
-type GameSessionState =
-  | "offline"
-  | "menu"
-  | "warmup"
-  | "playing"
-  | "spectating"
-  | "round_over"
-  | "match_over";
-
-interface GameState {
-  state: GameSessionState;
-  mode: string | null;
-  map: string | null;
-  round: number | null;
-  score_ct: number | null;
-  score_t: number | null;
-  subject_steamid: string | null;
-  subject_is_self: boolean | null;
+interface GameStatus {
+  game_id: string;
+  state: string;
+  summary: Record<string, string | number | null>;
 }
 
 let connection: WebSocket | undefined;
@@ -109,82 +95,78 @@ function isStateMessage(value: unknown): value is StateMessage {
     message.type === "state" &&
     typeof message.speech_enabled === "boolean" &&
     typeof message.muted === "boolean" &&
-    isGameState(message.game) &&
+    isGameStatus(message.game) &&
     (message.llm === undefined || parseLlmState(message.llm) !== undefined)
   );
 }
 
-function isGameState(value: unknown): value is GameState {
+function isGameStatus(value: unknown): value is GameStatus {
   if (typeof value !== "object" || value === null) {
     return false;
   }
 
-  const game = value as Partial<GameState>;
+  const game = value as Partial<GameStatus>;
   return (
-    isGameSessionState(game.state) &&
-    isNullableString(game.mode) &&
-    isNullableString(game.map) &&
-    isNullableNumber(game.round) &&
-    isNullableNumber(game.score_ct) &&
-    isNullableNumber(game.score_t) &&
-    isNullableString(game.subject_steamid) &&
-    (typeof game.subject_is_self === "boolean" || game.subject_is_self === null)
+    typeof game.game_id === "string" &&
+    game.game_id.length > 0 &&
+    typeof game.state === "string" &&
+    game.state.length > 0 &&
+    isGameSummary(game.summary)
   );
 }
 
-function isGameSessionState(value: unknown): value is GameSessionState {
+function isGameSummary(
+  value: unknown,
+): value is Record<string, string | number | null> {
   return (
-    value === "offline" ||
-    value === "menu" ||
-    value === "warmup" ||
-    value === "playing" ||
-    value === "spectating" ||
-    value === "round_over" ||
-    value === "match_over"
+    typeof value === "object" &&
+    value !== null &&
+    Object.values(value).every(
+      (entry) =>
+        entry === null ||
+        typeof entry === "string" ||
+        typeof entry === "number",
+    )
   );
 }
 
-function isNullableString(value: unknown): value is string | null {
-  return typeof value === "string" || value === null;
-}
-
-function isNullableNumber(value: unknown): value is number | null {
-  return typeof value === "number" || value === null;
-}
-
-function formatGameStatus(game: GameState): string {
+function formatGameStatus(game: GameStatus): string {
+  const displayName = game.game_id === "cs2" ? "CS2" : game.game_id;
   if (game.state === "offline") {
-    return "CS2：未运行";
+    return `${displayName}：未运行`;
   }
   if (game.state === "menu") {
-    return "CS2：主菜单";
+    return `${displayName}：主菜单`;
   }
 
-  const mode = formatGameMode(game.mode);
+  const mode = formatGameMode(summaryString(game, "mode"));
   if (game.state === "warmup") {
-    return formatGameParts(mode, "热身");
+    return formatGameParts(displayName, mode, "热身");
   }
   if (game.state === "spectating") {
-    return formatGameParts(mode, "观战中");
+    return formatGameParts(displayName, mode, "观战中");
   }
   if (game.state === "round_over") {
-    return formatGameParts(mode, "回合结束");
+    return formatGameParts(displayName, mode, "回合结束");
   }
   if (game.state === "match_over") {
-    return formatGameParts(mode, "比赛结束");
+    return formatGameParts(displayName, mode, "比赛结束");
   }
 
   const parts = mode.length > 0 ? [mode] : [];
-  if (game.round !== null) {
-    parts.push(`第 ${game.round} 回合`);
+  const round = summaryNumber(game, "round");
+  if (round !== null) {
+    parts.push(`第 ${round} 回合`);
   }
-  if (game.score_ct !== null && game.score_t !== null) {
-    parts.push(`${game.score_ct}:${game.score_t}`);
+  const scoreCt = summaryNumber(game, "score_ct");
+  const scoreT = summaryNumber(game, "score_t");
+  if (scoreCt !== null && scoreT !== null) {
+    parts.push(`${scoreCt}:${scoreT}`);
   }
   if (parts.length === 0) {
     parts.push("游戏中");
   }
-  return `CS2：${parts.join(" · ")}`;
+  return `${displayName}：${parts.join(" · ")}`;
 }
 
 function formatGameMode(mode: string | null): string {
@@ -194,8 +176,22 @@ function formatGameMode(mode: string | null): string {
   return mode ?? "";
 }
 
-function formatGameParts(mode: string, state: string): string {
-  return `CS2：${mode.length > 0 ? `${mode} · ` : ""}${state}`;
+function formatGameParts(
+  displayName: string,
+  mode: string,
+  state: string,
+): string {
+  return `${displayName}：${mode.length > 0 ? `${mode} · ` : ""}${state}`;
+}
+
+function summaryString(game: GameStatus, key: string): string | null {
+  const value = game.summary[key];
+  return typeof value === "string" ? value : null;
+}
+
+function summaryNumber(game: GameStatus, key: string): number | null {
+  const value = game.summary[key];
+  return typeof value === "number" ? value : null;
 }
 
 function scheduleReconnect(): void {

@@ -6,9 +6,9 @@ from typing import get_args
 
 import pytest
 
-from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, WeaponSlot, parse_snapshot
-from pet.session import GameSessionTracker, GameState, MatchLifecycleTracker
-from pet.situation import (
+from pet.games.cs2.gsi import GSI_SILENCE_SECONDS, GameSnapshot, WeaponSlot, parse_snapshot
+from pet.games.cs2.session import GameSessionTracker, GameState, MatchLifecycleTracker
+from pet.games.cs2.situation import (
     RoundSituation,
     SCENE_TAGS,
     SituationTracker,
@@ -467,7 +467,7 @@ def test_awp_seen_this_round_persists_after_switching_away() -> None:
 def test_unknown_weapon_type_warns_once_and_is_not_primary(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.WARNING, logger="pet.situation")
+    caplog.set_level(logging.WARNING, logger="pet.games.cs2.situation")
     snapshots = (
         _snapshot(
             1.0,

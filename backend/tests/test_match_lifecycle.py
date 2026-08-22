@@ -4,11 +4,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from pet.config import EventsConfig, PolicyConfig
-from pet.events import EventDetector, GameEvent
-from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, parse_snapshot
-from pet.policy import PolicyDecision, SpeechPolicy
-from pet.session import GameSessionTracker, MatchLifecycleTracker
+from pet.core.config import EventsConfig, PolicyConfig
+from pet.games.cs2.events import EventDetector, GameEvent
+from pet.games.cs2.gsi import GSI_SILENCE_SECONDS, GameSnapshot, parse_snapshot
+from pet.games.cs2.policy import PolicyDecision, SpeechPolicy
+from pet.games.cs2.session import GameSessionTracker, MatchLifecycleTracker
 
 EVENT_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 SESSION_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_session_samples.json"

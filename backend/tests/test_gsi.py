@@ -9,7 +9,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 import pytest
 
-from pet.gsi import (
+from pet.games.cs2.gsi import (
     GSI_CONFIG_CONTENT,
     RawGsiRecorder,
     RoundWin,
@@ -182,7 +182,7 @@ def test_type_errors_are_isolated_and_warn_once(caplog: pytest.LogCaptureFixture
     payload["map"]["round"] = "six"  # type: ignore[index]
     payload["map"]["team_ct"] = []  # type: ignore[index]
     payload["player"]["state"]["health"] = "full"  # type: ignore[index]
-    caplog.set_level(logging.WARNING, logger="pet.gsi")
+    caplog.set_level(logging.WARNING, logger="pet.games.cs2.gsi")
 
     first = parse_snapshot(payload, received_at=2.0)
     parse_snapshot(payload, received_at=3.0)

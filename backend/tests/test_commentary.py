@@ -12,19 +12,21 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.testclient import TestClient
 import pytest
 
-from pet.bridge import PetBridge
-from pet.commentary import (
+from pet.core.adapter_api import CoreServices, SpeechRequest
+from pet.core.bridge import PetBridge
+from pet.games.cs2.template_speech import (
     CommentaryGenerator,
     commentary_category,
     templates_for_map,
 )
-from pet.commentary_rules import CALLOUT_TERMS, find_forbidden_raw_curses
-from pet.commentary_templates import (
+from pet.games.cs2.template_rules import CALLOUT_TERMS, find_forbidden_raw_curses
+from pet.games.cs2.template_lines import (
     COMMENTARY_TEMPLATES,
     CommentaryCategory,
     CommentaryTemplate,
 )
-from pet.config import (
+from pet.core.config import (
+    AdapterConfig,
     EventsConfig,
     GsiConfig,
     IdleConfig,
@@ -32,21 +34,21 @@ from pet.config import (
     PolicyConfig,
     SpeechConfig,
 )
-from pet.events import EventDetector, EventType, GameEvent
-from pet.gsi import (
+from pet.games.cs2.events import EventDetector, EventType, GameEvent
+from pet.games.cs2.gsi import (
     GSI_SILENCE_SECONDS,
     GameSnapshot,
     GsiAck,
     GsiService,
     parse_snapshot,
 )
-from pet.lines import IDLE_UTTERANCES_BY_PERSONALITY, Utterance
-from pet.main import GameSnapshotProcessor
-from pet.policy import SpeechPolicy
-from pet.replay import format_commentary_replay, replay_commentary
-from pet.session import GameSessionTracker
-from pet.situation import SituationTracker
-from pet.speech import SpeechService
+from pet.core.lines import IDLE_UTTERANCES_BY_PERSONALITY, Utterance
+from pet.games.cs2.adapter import GameSnapshotProcessor
+from pet.games.cs2.policy import SpeechPolicy
+from pet.games.cs2.eval.replay import format_commentary_replay, replay_commentary
+from pet.games.cs2.session import GameSessionTracker
+from pet.games.cs2.situation import SituationTracker
+from pet.core.speech import SpeechService
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 PERSONAL_ACTION_PHRASES = (
@@ -369,13 +371,39 @@ def _create_real_gsi_commentary_app(
     bridge = PetBridge(speech_service, IdleConfig(enabled=True))
     session = GameSessionTracker(GSI_SILENCE_SECONDS)
     generator = _CountingCommentaryGenerator(random.Random(31))
+
+    async def submit_speech(request: SpeechRequest) -> None:
+        if request.fallback_text is None:
+            return
+        await bridge.broadcast_commentary(
+            Utterance(
+                id=f"game-{request.request_id}",
+                text=request.fallback_text,
+                emotion=request.fallback_emotion or "neutral",
+            )
+        )
+
+    async def reset_speech_session() -> None:
+        return
+
+    core = CoreServices(
+        submit_speech=submit_speech,
+        publish_status=bridge.update_game,
+        can_submit_speech=bridge.has_consumers,
+        speech_is_muted=bridge.is_muted,
+        reset_speech_session=reset_speech_session,
+    )
     processor = GameSnapshotProcessor(
-        bridge,
-        session,
-        EventDetector(EventsConfig()),
-        SituationTracker(),
-        SpeechPolicy(policy_config or PolicyConfig()),
-        generator,
+        core,
+        AdapterConfig(
+            events=EventsConfig(),
+            policy=policy_config or PolicyConfig(),
+        ),
+        session=session,
+        detector=EventDetector(EventsConfig()),
+        situation=SituationTracker(),
+        policy=SpeechPolicy(policy_config or PolicyConfig()),
+        generator=generator,
     )
 
     async def observe(snapshot: GameSnapshot) -> None:

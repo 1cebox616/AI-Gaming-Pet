@@ -1,10 +1,10 @@
 import pytest
 
-from pet import hard_gate as hard_gate_module
-from pet.bench import FactSentenceAuditCase
-from pet.hard_gate import MAX_CHINESE_CHARS, check_hard_violations, scene_tags
-from pet.llm import LlmResult, LlmUsage
-from pet.style_review import (
+from pet.core import gate as hard_gate_module
+from pet.games.cs2.eval.bench import FactSentenceAuditCase
+from pet.core.gate import MAX_CHINESE_CHARS, check_hard_violations, scene_tags
+from pet.core.llm import LlmResult, LlmUsage
+from pet.games.cs2.eval.style_review import (
     MAX_TOKENS,
     REASONING_EFFORT,
     StyleReview,
@@ -231,7 +231,7 @@ def test_render_style_review_contains_raw_outputs_without_a_score() -> None:
         model="model",
         provider="Alibaba",
     )
-    from pet.style_review import StyleAttempt, StyleCaseReview
+    from pet.games.cs2.eval.style_review import StyleAttempt, StyleCaseReview
 
     attempt = StyleAttempt(
         result=result,

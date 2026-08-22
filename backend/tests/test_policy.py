@@ -6,12 +6,12 @@ from typing import Any
 
 import pytest
 
-from pet.config import EventsConfig, PolicyConfig
-from pet.events import EventDetector, EventType, GameEvent
-from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, parse_snapshot
-from pet.policy import PolicyDecision, SpeechPolicy
-from pet.replay import format_decision_reason, replay_policy
-from pet.session import GameSessionTracker, GameState
+from pet.core.config import EventsConfig, PolicyConfig
+from pet.games.cs2.events import EventDetector, EventType, GameEvent
+from pet.games.cs2.gsi import GSI_SILENCE_SECONDS, GameSnapshot, parse_snapshot
+from pet.games.cs2.policy import PolicyDecision, SpeechPolicy
+from pet.games.cs2.eval.replay import format_decision_reason, replay_policy
+from pet.games.cs2.session import GameSessionTracker, GameState
 
 EVENT_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 SESSION_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_session_samples.json"

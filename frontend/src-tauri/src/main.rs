@@ -10,7 +10,7 @@ use std::{
 };
 
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     App, AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, RunEvent, State,
     WebviewWindow, Wry,
@@ -101,14 +101,16 @@ enum PetMenuAction {
 #[derive(Clone, Copy)]
 enum PetMenuEntry {
     GameStatus,
+    CurrentGame,
     LlmMode,
     LlmCost,
     Action(PetMenuAction),
     Separator,
 }
 
-const PET_MENU_LAYOUT: [PetMenuEntry; 11] = [
+const PET_MENU_LAYOUT: [PetMenuEntry; 12] = [
     PetMenuEntry::GameStatus,
+    PetMenuEntry::CurrentGame,
     PetMenuEntry::LlmMode,
     PetMenuEntry::LlmCost,
     PetMenuEntry::Action(PetMenuAction::Speak),
@@ -178,6 +180,7 @@ struct BackendMenuState {
 
 struct PetMenu {
     menu: Menu<Wry>,
+    current_game_item: CheckMenuItem<Wry>,
     game_status_item: MenuItem<Wry>,
     llm_mode_item: MenuItem<Wry>,
     llm_cost_item: MenuItem<Wry>,
@@ -338,6 +341,7 @@ fn unregister_shortcuts_and_exit(app: &AppHandle) {
 fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
     let menu = Menu::new(app)?;
     let mut game_status_item = None;
+    let mut current_game_item = None;
     let mut llm_mode_item = None;
     let mut llm_cost_item = None;
     let mut speech_item = None;
@@ -355,6 +359,28 @@ fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
                 )?;
                 menu.append(&item)?;
                 game_status_item = Some(item);
+            }
+            PetMenuEntry::CurrentGame => {
+                let current_game = Submenu::new(app, "当前游戏", true)?;
+                let selected = CheckMenuItem::with_id(
+                    app,
+                    "current-game-cs2",
+                    "CS2",
+                    true,
+                    true,
+                    None::<&str>,
+                )?;
+                let unavailable = MenuItem::with_id(
+                    app,
+                    "current-game-warthunder",
+                    "战争雷霆（未安装）",
+                    false,
+                    None::<&str>,
+                )?;
+                current_game.append(&selected)?;
+                current_game.append(&unavailable)?;
+                menu.append(&current_game)?;
+                current_game_item = Some(selected);
             }
             PetMenuEntry::LlmMode => {
                 let item = MenuItem::with_id(
@@ -407,6 +433,8 @@ fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
 
     Ok(PetMenu {
         menu,
+        current_game_item: current_game_item
+            .expect("current game must be present in the pet menu layout"),
         game_status_item: game_status_item
             .expect("game status must be present in the pet menu layout"),
         llm_mode_item: llm_mode_item.expect("LLM mode must be present in the pet menu layout"),
@@ -654,6 +682,13 @@ fn configure_tray(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
 fn main() {
     let application = tauri::Builder::default()
         .on_menu_event(|app, event| {
+            if event.id().as_ref() == "current-game-cs2" {
+                let menu = app.state::<PetMenu>();
+                if let Err(error) = menu.current_game_item.set_checked(true) {
+                    eprintln!("failed to restore the selected game menu item: {error}");
+                }
+                return;
+            }
             if let Some(action) = PetMenuAction::from_id(event.id().as_ref()) {
                 let menu = app.state::<PetMenu>();
                 action.handle(app, &menu);

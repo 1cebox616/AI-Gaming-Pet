@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from pet.bench import (
+from pet.games.cs2.eval.bench import (
     ANALYSIS_MAX_EVENT_CHARS,
     AnalysisBenchResult,
     AnalysisScoreFile,
@@ -37,18 +37,22 @@ from pet.bench import (
     write_report,
     _score_summary_lines_for_ids,
 )
-from pet.prompt import load_system_prompt
-from pet.commentary_templates import COMMENTARY_TEMPLATES
-from pet.llm import LlmAnalysisResult, LlmError, LlmResult, LlmUsage
+from pet.core.prompt import load_system_prompt
+from pet.games.cs2.template_lines import COMMENTARY_TEMPLATES
+from pet.core.llm import LlmAnalysisResult, LlmError, LlmResult, LlmUsage
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 ANSWER_KEY_PATH = (
     Path(__file__).parents[1]
+    / "data"
+    / "cs2"
     / "eval-assets"
     / "m3-t5.6-event-answer-keys.json"
 )
 UNIVERSAL_FORBIDDEN_PATH = (
     Path(__file__).parents[1]
+    / "data"
+    / "cs2"
     / "eval-assets"
     / "m3-t5.9-universal-forbidden.json"
 )
@@ -858,7 +862,7 @@ def test_universal_forbidden_file_has_both_factual_categories() -> None:
 
 
 def test_analysis_prompt_is_loaded_from_the_product_owned_files() -> None:
-    prompt = load_system_prompt("inference", max_chars=ANALYSIS_MAX_EVENT_CHARS)
+    prompt = load_system_prompt("cs2", max_chars=ANALYSIS_MAX_EVENT_CHARS)
 
     assert "【事件必答】" not in prompt
     assert "把输入中【过程】的一句话用网友口气重说一遍" in prompt

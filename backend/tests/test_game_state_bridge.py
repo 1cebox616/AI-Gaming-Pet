@@ -7,10 +7,10 @@ import time
 from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 
-from pet.bridge import PetBridge
-from pet.config import IdleConfig, SpeechConfig
-from pet.session import GameState
-from pet.speech import SpeechService
+from pet.core.bridge import PetBridge
+from pet.core.config import IdleConfig, SpeechConfig
+from pet.games.cs2.session import GameState
+from pet.core.speech import SpeechService
 
 
 def _create_app() -> FastAPI:
@@ -51,6 +51,25 @@ def _game(*, state: str = "playing", round_number: int = 6) -> dict[str, object]
     }
 
 
+def _status(*, state: str = "playing", round_number: int = 6) -> dict[str, object]:
+    game = _game(state=state, round_number=round_number)
+    return {
+        "game_id": "",
+        "state": state,
+        "summary": {
+            key: game[key]
+            for key in (
+                "mode",
+                "map",
+                "round",
+                "score_ct",
+                "score_t",
+                "subject_steamid",
+            )
+        },
+    }
+
+
 def test_state_changes_are_immediate_and_progress_updates_are_coalesced() -> None:
     with TestClient(_create_app()) as client:
         with client.websocket_connect("/ws") as websocket:
@@ -58,7 +77,7 @@ def test_state_changes_are_immediate_and_progress_updates_are_coalesced() -> Non
             websocket.receive_json()
 
             assert client.post("/game", json=_game()).status_code == 200
-            assert websocket.receive_json()["game"] == _game()
+            assert websocket.receive_json()["game"] == _status()
 
             started_at = time.perf_counter()
             assert client.post("/game", json=_game(round_number=7)).status_code == 200
@@ -67,5 +86,5 @@ def test_state_changes_are_immediate_and_progress_updates_are_coalesced() -> Non
             coalesced = websocket.receive_json()
             elapsed = time.perf_counter() - started_at
 
-    assert coalesced["game"] == _game(round_number=8)
+    assert coalesced["game"] == _status(round_number=8)
     assert elapsed >= 0.8

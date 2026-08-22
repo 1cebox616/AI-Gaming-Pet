@@ -7,11 +7,11 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from pet.config import LlmConfig
-from pet.events import GameEvent
-from pet.lines import Utterance
-from pet.llm import LlmError, LlmResult, LlmUsage
-from pet.online_commentary import OnlineCommentaryRuntime, _Request
+from pet.core.adapter_api import SpeechRequest
+from pet.core.config import LlmConfig, LlmProfileConfig
+from pet.core.lines import Utterance
+from pet.core.llm import LlmError, LlmResult, LlmUsage
+from pet.core.speaker import OnlineCommentaryRuntime, _Request
 
 
 @dataclass
@@ -26,12 +26,6 @@ class _Bridge:
         self.state_updates += 1
 
 
-class _Generator:
-    def generate(self, event: GameEvent, *, map_name: str | None = None) -> Utterance:
-        del map_name
-        return Utterance(id=f"template-{event.id}", text="模板兜底", emotion="neutral")
-
-
 class _Client:
     def __init__(self, result: LlmResult | Exception) -> None:
         self._result = result
@@ -44,20 +38,28 @@ class _Client:
         return self._result
 
 
-def _event() -> GameEvent:
-    return GameEvent(
-        id="event-1",
-        type="death",
+def _speech(
+    fact_text: str = "【过程】玩家阵亡\n【场景标签】无",
+    *,
+    llm_profile: str | None = None,
+) -> SpeechRequest:
+    return SpeechRequest(
+        request_id="event-1",
+        game_id="cs2",
+        fact_text=fact_text,
+        urgency=45,
+        interrupt=True,
+        supersedes_request_id=None,
+        vocabulary_id="cs2",
+        llm_profile=llm_profile,
+        fallback_text="模板兜底",
+        fallback_emotion="neutral",
         ts=1.0,
-        subject_steamid="self",
-        subject_is_self=True,
-        round_number=1,
-        facts={},
     )
 
 
 def _request() -> _Request:
-    return _Request(0, _event(), None, "【过程】玩家阵亡\n【场景标签】无")
+    return _Request(0, _speech())
 
 
 def _config() -> LlmConfig:
@@ -80,11 +82,10 @@ def test_disabled_configuration_uses_template_without_constructing_client() -> N
         runtime = OnlineCommentaryRuntime(
             LlmConfig(enabled=False),
             bridge,  # type: ignore[arg-type]
-            _Generator(),  # type: ignore[arg-type]
             client_factory=lambda _: (_ for _ in ()).throw(AssertionError("must not build")),
         )
         await runtime.start()
-        await runtime._fallback(_event(), None)
+        await runtime._fallback(_speech())
         assert runtime.state().mode == "template"
         assert runtime.state().reason == "未启用"
         assert bridge.utterances[0].id == "template-event-1"
@@ -100,7 +101,7 @@ def test_transport_failures_fall_back_to_template_and_pass_explicit_reasoning_no
         bridge = _Bridge()
         client = _Client(LlmError(failure))
         runtime = OnlineCommentaryRuntime(
-            _config(), bridge, _Generator(), client_factory=lambda _: client  # type: ignore[arg-type]
+            _config(), bridge, client_factory=lambda _: client  # type: ignore[arg-type]
         )
         await runtime.start()
         await runtime._complete(_request())
@@ -118,13 +119,12 @@ def test_missing_environment_client_falls_back_to_template_mode() -> None:
         runtime = OnlineCommentaryRuntime(
             _config(),
             bridge,  # type: ignore[arg-type]
-            _Generator(),  # type: ignore[arg-type]
             client_factory=lambda _: (_ for _ in ()).throw(LlmError("环境变量缺失")),
         )
         await runtime.start()
         assert runtime.state().mode == "template"
         assert runtime.state().reason == "环境变量缺失"
-        await runtime._fallback(_event(), None)
+        await runtime._fallback(_speech())
         assert bridge.utterances[-1].id == "template-event-1"
 
     asyncio.run(exercise())
@@ -136,7 +136,7 @@ def test_empty_response_and_hard_gate_each_fall_back() -> None:
             bridge = _Bridge()
             client = _Client(_result(text))
             runtime = OnlineCommentaryRuntime(
-                _config(), bridge, _Generator(), client_factory=lambda _: client  # type: ignore[arg-type]
+                _config(), bridge, client_factory=lambda _: client  # type: ignore[arg-type]
             )
             await runtime.start()
             await runtime._complete(_request())
@@ -152,14 +152,14 @@ def test_heavy_fire_phrase_without_misfire_death_fact_falls_back() -> None:
         bridge = _Bridge()
         client = _Client(_result("开了这么多枪没打死一个"))
         runtime = OnlineCommentaryRuntime(
-            _config(), bridge, _Generator(), client_factory=lambda _: client  # type: ignore[arg-type]
+            _config(), bridge, client_factory=lambda _: client  # type: ignore[arg-type]
         )
         await runtime.start()
         request = _Request(
             0,
-            _event(),
-            None,
-            "【事件】阵亡\n【过程】玩家阵亡，开火后没打过\n【场景标签】对枪输了",
+            _speech(
+                "【事件】阵亡\n【过程】玩家阵亡，开火后没打过\n【场景标签】对枪输了"
+            ),
         )
 
         await runtime._complete(request)
@@ -176,7 +176,7 @@ def test_three_failures_hold_template_mode_until_next_match() -> None:
         bridge = _Bridge()
         client = _Client(LlmError("timeout"))
         runtime = OnlineCommentaryRuntime(
-            _config(), bridge, _Generator(), client_factory=lambda _: client  # type: ignore[arg-type]
+            _config(), bridge, client_factory=lambda _: client  # type: ignore[arg-type]
         )
         await runtime.start()
         for _ in range(3):
@@ -196,13 +196,51 @@ def test_success_accumulates_reported_cost_and_broadcasts_model_line() -> None:
         bridge = _Bridge()
         client = _Client(_result())
         runtime = OnlineCommentaryRuntime(
-            _config(), bridge, _Generator(), client_factory=lambda _: client  # type: ignore[arg-type]
+            _config(), bridge, client_factory=lambda _: client  # type: ignore[arg-type]
         )
         await runtime.start()
         await runtime._complete(_request())
         assert bridge.utterances[-1].id == "llm-event-1"
         assert runtime.state().call_count == 1
         assert runtime.state().cost_usd == 0.001
+        await runtime.shutdown()
+
+    asyncio.run(exercise())
+
+
+def test_named_profile_overrides_only_declared_model_settings() -> None:
+    async def exercise() -> None:
+        bridge = _Bridge()
+        client = _Client(_result())
+        timeouts: list[float] = []
+
+        def create_client(timeout_seconds: float) -> _Client:
+            timeouts.append(timeout_seconds)
+            return client
+
+        configuration = _config().model_copy(
+            update={
+                "profiles": {
+                    "fast": LlmProfileConfig(
+                        model="profile/model",
+                        timeout_seconds=1.5,
+                        max_tokens=64,
+                    )
+                }
+            }
+        )
+        runtime = OnlineCommentaryRuntime(
+            configuration,
+            bridge,  # type: ignore[arg-type]
+            client_factory=create_client,
+        )
+        await runtime.start()
+        await runtime._complete(_Request(0, _speech(llm_profile="fast")))
+
+        assert client.calls[-1]["model"] == "profile/model"
+        assert client.calls[-1]["max_tokens"] == 64
+        assert client.calls[-1]["temperature"] == 0.9
+        assert timeouts == [3.0, 1.5]
         await runtime.shutdown()
 
     asyncio.run(exercise())

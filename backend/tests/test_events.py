@@ -6,11 +6,11 @@ from typing import Any
 
 import pytest
 
-from pet.config import EventsConfig, load_config
-from pet.events import EventDetector, GameEvent
-from pet.gsi import GSI_SILENCE_SECONDS, GameSnapshot, parse_snapshot
-from pet.replay import format_replay, replay_recording
-from pet.session import GameSessionTracker
+from pet.core.config import EventsConfig, load_config
+from pet.games.cs2.events import EventDetector, GameEvent
+from pet.games.cs2.gsi import GSI_SILENCE_SECONDS, GameSnapshot, parse_snapshot
+from pet.games.cs2.eval.replay import format_replay, replay_recording
+from pet.games.cs2.session import GameSessionTracker
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 T7_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_t7_samples.json"
