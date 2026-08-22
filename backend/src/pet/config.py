@@ -66,6 +66,9 @@ class PolicyConfig(BaseModel):
     # Five seconds matches the player-approved multi-kill streak window: a
     # delayed follow-up beyond that point is no longer timely commentary.
     follow_up_max_age_seconds: float = Field(default=5.0, ge=0, le=30)
+    # Synthetic streaks arrive about 1.8 seconds apart; wait 2.5 seconds to
+    # make one final multi-kill callout instead of interrupting each upgrade.
+    streak_settle_seconds: float = Field(default=2.5, ge=0, le=10)
 
 
 PersonalityStyle = Literal["brother", "caster"]
@@ -230,6 +233,7 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
             "cooldown_override_priority",
             "minimum_gap_seconds",
             "follow_up_max_age_seconds",
+            "streak_settle_seconds",
         ),
         "personality": ("style",),
         "llm": (

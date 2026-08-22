@@ -9,7 +9,7 @@ import pytest
 
 from pet.bench import run_bench
 from pet.config import load_config
-from pet.replay import load_recording, replay_recording
+from pet.replay import load_recording, replay_policy, replay_recording
 from pet.scenario_synth import (
     INVENTORY_PATHS,
     OBSERVED_CONSTRAINTS_PATH,
@@ -138,6 +138,23 @@ def test_every_scenario_replays_and_renders_declared_facts() -> None:
             for item in cards.events
             if item.event.type == spec.expected_event_type
         )
+        if spec.scenario_id == "weapon_switch_double_kill":
+            # The synthetic fixture has no snapshot in the usable 2.5–5.0s
+            # release window after its final multi-kill.  The policy must
+            # therefore expire the deferred callout rather than speak a stale
+            # double kill in the next round; direct policy tests cover release.
+            assert not matching_cards
+            policy_replay = replay_policy(
+                snapshots,
+                configuration.events,
+                configuration.policy,
+            )
+            assert any(
+                decision.event.type == "multi_kill"
+                and decision.reason_code == "deferred"
+                for decision in policy_replay.decisions
+            )
+            continue
         assert matching_cards, spec.scenario_id
         item = matching_cards[-1]
         card = item.event_card

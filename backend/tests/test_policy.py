@@ -131,7 +131,7 @@ def _playing_game(round_number: int = 1) -> GameState:
     return GameState(state="spectating", round=round_number, subject_is_self=True)
 
 
-def test_alive_combat_drops_normal_kills_but_allows_three_kill(
+def test_alive_combat_drops_normal_kills_and_defers_three_kill(
     recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
     decisions = _decisions(
@@ -149,9 +149,9 @@ def test_alive_combat_drops_normal_kills_but_allows_three_kill(
     assert all(decision.selected is False for decision in normal_kills)
     assert all(decision.reason_code == "alive_threshold" for decision in normal_kills)
     assert format_decision_reason(normal_kills[0]) == "交火中，优先级 20 未达门槛 75"
-    assert three_kill.selected is True
+    assert three_kill.selected is False
     assert three_kill.priority == 80
-    assert format_decision_reason(three_kill) == "优先级 80"
+    assert three_kill.reason_code == "deferred"
 
 
 def test_round_result_is_detected_but_excluded_from_speech_candidates(
@@ -228,7 +228,7 @@ def test_muted_switch_drops_every_game_event(
     )
 
 
-def test_cooldown_drops_normal_events_but_not_multi_kills(
+def test_cooldown_drops_normal_events_while_multi_kills_settle(
     recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
     decisions = _decisions(
@@ -245,7 +245,7 @@ def test_cooldown_drops_normal_events_but_not_multi_kills(
         decision for decision in decisions if decision.reason_code == "cooldown"
     ]
 
-    assert [decision.event.type for decision in selected] == ["multi_kill", "multi_kill"]
+    assert [decision.event.type for decision in selected] == ["kill"]
     assert any(
         decision.event.type == "round_win"
         and decision.reason_code == "round_event"
@@ -259,7 +259,7 @@ def test_cooldown_drops_normal_events_but_not_multi_kills(
     )
 
 
-def test_round_limit_drops_normal_events_but_not_multi_kills(
+def test_round_limit_drops_normal_events_while_multi_kills_settle(
     recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
     decisions = _decisions(
@@ -276,8 +276,7 @@ def test_round_limit_drops_normal_events_but_not_multi_kills(
     ]
 
     assert [(decision.event.round_number, decision.event.type) for decision in selected] == [
-        (6, "multi_kill"),
-        (6, "multi_kill"),
+        (6, "kill"),
     ]
     assert limit_rejections
     assert all(
@@ -286,7 +285,7 @@ def test_round_limit_drops_normal_events_but_not_multi_kills(
     )
 
 
-def test_same_batch_selects_highest_priority_and_marks_every_other_event(
+def test_same_batch_defers_multi_kill_and_selects_best_remaining_event(
     recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
     decisions = _decisions(
@@ -297,15 +296,13 @@ def test_same_batch_selects_highest_priority_and_marks_every_other_event(
     rejected = [decision for decision in decisions if not decision.selected]
 
     assert len(selected) == 1
-    assert selected[0].event.type == "multi_kill"
-    assert selected[0].event.facts["count"] == 3
-    assert selected[0].priority == 80
+    assert selected[0].event.type == "kill"
+    assert selected[0].priority == 20
     assert rejected
-    assert all(decision.reason_code == "higher_priority" for decision in rejected)
-    assert all(
-        format_decision_reason(decision) == "已有更高优先级事件"
-        for decision in rejected
+    multi_kill = next(
+        decision for decision in rejected if decision.event.type == "multi_kill"
     )
+    assert multi_kill.reason_code == "deferred"
 
 
 def test_alive_threshold_config_changes_same_real_batch(
@@ -316,35 +313,21 @@ def test_alive_threshold_config_changes_same_real_batch(
     permissive = _decisions(snapshots, PolicyConfig(alive_priority_threshold=0))
 
     assert not any(decision.selected for decision in quiet)
-    assert [decision.event.type for decision in permissive if decision.selected] == [
-        "multi_kill"
-    ]
+    assert [decision.event.type for decision in permissive if decision.selected] == ["kill"]
 
 
-def test_cooldown_config_does_not_block_multi_kill_timeline(
-    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
-) -> None:
-    snapshots = _same_round_timeline(recorded_fixtures)
-    cooled = _decisions(
-        snapshots,
-        PolicyConfig(
-            cooldown_seconds=20,
-            max_lines_per_round=20,
-            alive_priority_threshold=0,
-            cooldown_override_priority=101,
-        ),
-    )
-    immediate = _decisions(
-        snapshots,
-        PolicyConfig(
-            cooldown_seconds=0,
-            max_lines_per_round=20,
-            alive_priority_threshold=0,
-        ),
-    )
+def test_cooldown_config_still_controls_normal_events() -> None:
+    game = _playing_game()
+    first = _policy_event("first", "kill", ts=10)
+    second = _policy_event("second", "death", ts=12)
+    cooled = SpeechPolicy(PolicyConfig(cooldown_seconds=20))
+    immediate = SpeechPolicy(PolicyConfig(cooldown_seconds=0))
 
-    assert sum(decision.selected for decision in cooled) == 2
-    assert sum(decision.selected for decision in immediate) == 2
+    cooled.decide((first,), game, now=10, muted=False)
+    immediate.decide((first,), game, now=10, muted=False)
+
+    assert cooled.decide((second,), game, now=12, muted=False).decisions[0].reason_code == "cooldown"
+    assert immediate.decide((second,), game, now=12, muted=False).selected_event == second
 
 
 def test_low_priority_event_is_still_dropped_during_cooldown(
@@ -371,7 +354,7 @@ def test_low_priority_event_is_still_dropped_during_cooldown(
     assert normal_kill.reason_code == "cooldown"
 
 
-def test_high_priority_event_overrides_regular_cooldown(
+def test_multi_kill_is_deferred_even_with_high_priority(
     recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
 ) -> None:
     decisions = _cooldown_override_decisions(
@@ -390,73 +373,51 @@ def test_high_priority_event_overrides_regular_cooldown(
     )
 
     assert three_kill.priority == 80
-    assert three_kill.selected is True
-    assert three_kill.reason_code == "selected"
+    assert three_kill.selected is False
+    assert three_kill.reason_code == "deferred"
 
 
-def test_multi_kill_upgrade_bypasses_minimum_gap() -> None:
-    """An escalation follows the previous multi-kill immediately, not via pending."""
+def test_multi_kill_is_deferred_when_it_arrives() -> None:
     policy = SpeechPolicy(PolicyConfig(minimum_gap_seconds=2))
     game = _playing_game()
     double_kill = _policy_event("double", "multi_kill", ts=10, count=2)
+
+    deferred = policy.decide((double_kill,), game, now=10, muted=False)
+
+    assert deferred.selected_event is None
+    assert deferred.decisions[0].reason_code == "deferred"
+
+
+def test_settled_multi_kill_ignores_round_limit() -> None:
+    policy = SpeechPolicy(
+        PolicyConfig(max_lines_per_round=1, streak_settle_seconds=2.5)
+    )
+    game = _playing_game()
+    first = _policy_event("first", "kill", ts=10)
     triple_kill = _policy_event("triple", "multi_kill", ts=11, count=3)
 
-    first = policy.decide((double_kill,), game, now=10, muted=False)
-    upgrade = policy.decide((triple_kill,), game, now=11, muted=False)
+    policy.decide((first,), game, now=10, muted=False)
+    policy.decide((triple_kill,), game, now=11, muted=False)
+    released = policy.decide((), game, now=13.5, muted=False)
 
-    assert first.selected_event == double_kill
-    assert upgrade.selected_event == triple_kill
-    assert upgrade.decisions[0].reason_code == "selected"
-
-
-def test_multi_kill_ignores_round_limit(
-    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
-) -> None:
-    decisions = _cooldown_override_decisions(
-        recorded_fixtures,
-        PolicyConfig(
-            cooldown_seconds=20,
-            max_lines_per_round=1,
-            cooldown_override_priority=70,
-            minimum_gap_seconds=2,
-        ),
-    )
-    three_kill = next(
-        decision
-        for decision in decisions
-        if decision.event.type == "multi_kill" and decision.event.facts["count"] == 3
-    )
-
-    assert three_kill.selected is True
-    assert three_kill.reason_code == "selected"
+    assert released.selected_event == triple_kill
+    assert released.decisions[0].reason_code == "selected"
 
 
-def test_round_limit_config_does_not_block_multi_kill_timeline(
-    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
-) -> None:
-    snapshots = _timeline_with_next_round(recorded_fixtures)
-    one_line = _decisions(
-        snapshots,
-        PolicyConfig(
-            cooldown_seconds=0,
-            max_lines_per_round=1,
-            alive_priority_threshold=0,
-        ),
-    )
-    three_lines = _decisions(
-        snapshots,
-        PolicyConfig(
-            cooldown_seconds=0,
-            max_lines_per_round=3,
-            alive_priority_threshold=0,
-        ),
-    )
+def test_round_limit_does_not_discard_a_waiting_multi_kill() -> None:
+    policy = SpeechPolicy(PolicyConfig(max_lines_per_round=1))
+    game = _playing_game()
+    first = _policy_event("first", "kill", ts=10)
+    double_kill = _policy_event("double", "multi_kill", ts=11, count=2)
 
-    assert sum(decision.selected for decision in one_line) == 2
-    assert sum(decision.selected for decision in three_lines) == 2
+    policy.decide((first,), game, now=10, muted=False)
+    policy.decide((double_kill,), game, now=11, muted=False)
+    released = policy.decide((), game, now=13.5, muted=False)
+
+    assert released.selected_event == double_kill
 
 
-def test_multi_kill_ignores_cooldown_but_respects_minimum_gap() -> None:
+def test_settled_multi_kill_ignores_cooldown_but_respects_minimum_gap() -> None:
     policy = SpeechPolicy(
         PolicyConfig(cooldown_seconds=6, minimum_gap_seconds=2, max_lines_per_round=4)
     )
@@ -465,8 +426,10 @@ def test_multi_kill_ignores_cooldown_but_respects_minimum_gap() -> None:
     double_kill = _policy_event("double", "multi_kill", ts=13, count=2)
 
     assert policy.decide((first,), game, now=10, muted=False).selected_event == first
-    outcome = policy.decide((double_kill,), game, now=13, muted=False)
+    deferred = policy.decide((double_kill,), game, now=13, muted=False)
+    outcome = policy.decide((), game, now=15.5, muted=False)
 
+    assert deferred.decisions[0].reason_code == "deferred"
     assert outcome.selected_event == double_kill
     assert outcome.decisions[0].reason_code == "selected"
 
@@ -481,7 +444,7 @@ def test_multi_kill_deferred_for_minimum_gap_is_selected_on_empty_batch() -> Non
 
     policy.decide((first,), game, now=10, muted=False)
     deferred = policy.decide((triple_kill,), game, now=11, muted=False)
-    followed_up = policy.decide((), game, now=12, muted=False)
+    followed_up = policy.decide((), game, now=13.5, muted=False)
 
     assert deferred.selected_event is None
     assert deferred.decisions[0].reason_code == "deferred"
@@ -489,20 +452,71 @@ def test_multi_kill_deferred_for_minimum_gap_is_selected_on_empty_batch() -> Non
     assert followed_up.decisions[0].selected is True
 
 
-def test_four_kill_upgrade_bypasses_gap_after_selected_triple() -> None:
-    policy = SpeechPolicy(PolicyConfig(minimum_gap_seconds=2))
+def test_multi_kill_upgrades_refresh_the_settle_timer() -> None:
+    policy = SpeechPolicy(PolicyConfig(minimum_gap_seconds=2, streak_settle_seconds=2.5))
     game = _playing_game()
     double_kill = _policy_event("double", "multi_kill", ts=10, count=2)
     triple_kill = _policy_event("triple", "multi_kill", ts=11, count=3)
-    four_kill = _policy_event("four", "multi_kill", ts=11.7, count=4)
 
     policy.decide((double_kill,), game, now=10, muted=False)
-    triple = policy.decide((triple_kill,), game, now=11, muted=False)
-    upgrade = policy.decide((four_kill,), game, now=11.7, muted=False)
+    upgrade = policy.decide((triple_kill,), game, now=11, muted=False)
+    before_settled = policy.decide((), game, now=12.5, muted=False)
+    settled = policy.decide((), game, now=13.5, muted=False)
 
-    assert triple.selected_event == triple_kill
-    assert upgrade.selected_event == four_kill
-    assert upgrade.decisions[0].reason_code == "selected"
+    assert upgrade.decisions[0].reason_code == "deferred"
+    assert before_settled.selected_event is None
+    assert settled.selected_event == triple_kill
+    assert [decision.event.id for decision in settled.decisions] == ["triple"]
+
+
+def test_streak_of_double_triple_four_kill_releases_only_four_kill() -> None:
+    policy = SpeechPolicy(PolicyConfig(streak_settle_seconds=2.5))
+    game = _playing_game()
+    double_kill = _policy_event("double", "multi_kill", ts=10, count=2)
+    triple_kill = _policy_event("triple", "multi_kill", ts=11.8, count=3)
+    four_kill = _policy_event("four", "multi_kill", ts=13.6, count=4)
+
+    double = policy.decide((double_kill,), game, now=10, muted=False)
+    triple = policy.decide((triple_kill,), game, now=11.8, muted=False)
+    four = policy.decide((four_kill,), game, now=13.6, muted=False)
+    released = policy.decide((), game, now=16.1, muted=False)
+
+    assert all(outcome.selected_event is None for outcome in (double, triple, four))
+    assert released.selected_event == four_kill
+    assert released.selected_event.facts["count"] == 4
+
+
+def test_terminal_event_releases_unsettled_pending_multi_kill() -> None:
+    policy = SpeechPolicy(PolicyConfig(cooldown_seconds=0, streak_settle_seconds=2.5))
+    game = _playing_game()
+    triple_kill = _policy_event("triple", "multi_kill", ts=10, count=3)
+    death = _policy_event("death", "death", ts=11)
+
+    policy.decide((triple_kill,), game, now=10, muted=False)
+    released = policy.decide((death,), game, now=11, muted=False)
+
+    assert released.selected_event == triple_kill
+    assert any(
+        decision.event == death and decision.reason_code == "higher_priority"
+        for decision in released.decisions
+    )
+
+
+def test_pending_multi_kill_waits_for_minimum_gap_before_release() -> None:
+    policy = SpeechPolicy(
+        PolicyConfig(minimum_gap_seconds=2, streak_settle_seconds=0)
+    )
+    game = _playing_game()
+    first = _policy_event("first", "kill", ts=10)
+    double_kill = _policy_event("double", "multi_kill", ts=10.5, count=2)
+
+    policy.decide((first,), game, now=10, muted=False)
+    policy.decide((double_kill,), game, now=10.5, muted=False)
+    too_early = policy.decide((), game, now=10.5, muted=False)
+    released = policy.decide((), game, now=12, muted=False)
+
+    assert too_early.selected_event is None
+    assert released.selected_event == double_kill
 
 
 def test_equal_or_lower_multi_kill_does_not_bypass_minimum_gap() -> None:
@@ -527,7 +541,7 @@ def test_muted_pending_follow_up_waits_without_being_discarded() -> None:
     policy.decide((first,), game, now=10, muted=False)
     policy.decide((double_kill,), game, now=11, muted=False)
     muted = policy.decide((), game, now=12, muted=True)
-    followed_up = policy.decide((), game, now=12.1, muted=False)
+    followed_up = policy.decide((), game, now=13.6, muted=False)
 
     assert muted.selected_event is None
     assert muted.decisions == ()
@@ -549,7 +563,7 @@ def test_non_multi_kill_selection_resets_upgrade_exemption() -> None:
     assert deferred.decisions[0].reason_code == "deferred"
 
 
-def test_round_change_resets_multi_kill_upgrade_exemption() -> None:
+def test_round_change_clears_unsettled_multi_kill() -> None:
     policy = SpeechPolicy(PolicyConfig(minimum_gap_seconds=2))
     first_round = _playing_game(1)
     double_kill = _policy_event(
@@ -576,7 +590,7 @@ def test_higher_multi_kill_replaces_pending_follow_up() -> None:
     policy.decide((first,), game, now=10, muted=False)
     policy.decide((triple_kill,), game, now=11, muted=False)
     replacement = policy.decide((four_kill,), game, now=11.5, muted=False)
-    followed_up = policy.decide((), game, now=12, muted=False)
+    followed_up = policy.decide((), game, now=14, muted=False)
 
     assert replacement.decisions[0].reason_code == "deferred"
     assert followed_up.selected_event == four_kill
@@ -593,7 +607,7 @@ def test_lower_multi_kill_keeps_existing_pending_follow_up() -> None:
     policy.decide((first,), game, now=10, muted=False)
     policy.decide((four_kill,), game, now=11, muted=False)
     policy.decide((triple_kill,), game, now=11.5, muted=False)
-    followed_up = policy.decide((), game, now=12, muted=False)
+    followed_up = policy.decide((), game, now=13.5, muted=False)
 
     assert followed_up.selected_event == four_kill
 
@@ -644,7 +658,8 @@ def test_multi_kill_ignores_full_round_quota_and_still_counts() -> None:
     double_kill = _policy_event("double", "multi_kill", ts=13, count=2)
 
     policy.decide((first,), game, now=10, muted=False)
-    selected = policy.decide((double_kill,), game, now=13, muted=False)
+    policy.decide((double_kill,), game, now=13, muted=False)
+    selected = policy.decide((), game, now=15.5, muted=False)
     ordinary = policy.decide(
         (_policy_event("later-kill", "kill", ts=20),), game, now=20, muted=False
     )

@@ -34,6 +34,7 @@ def test_missing_configuration_file_uses_validated_defaults(
     assert configuration.policy.cooldown_override_priority == 70
     assert configuration.policy.minimum_gap_seconds == 2.0
     assert configuration.policy.follow_up_max_age_seconds == 5.0
+    assert configuration.policy.streak_settle_seconds == 2.5
     assert configuration.personality.style == "brother"
     assert configuration.llm.enabled is False
     assert configuration.llm.model == ""
@@ -307,7 +308,8 @@ def test_policy_section_loads_custom_limits(tmp_path: Path) -> None:
     default_path.write_text(
         "[policy]\ncooldown_seconds = 12.5\nmax_lines_per_round = 7\n"
         "alive_priority_threshold = 90\ncooldown_override_priority = 85\n"
-        "minimum_gap_seconds = 3.5\nfollow_up_max_age_seconds = 4.5\n",
+        "minimum_gap_seconds = 3.5\nfollow_up_max_age_seconds = 4.5\n"
+        "streak_settle_seconds = 1.5\n",
         encoding="utf-8",
     )
 
@@ -319,6 +321,7 @@ def test_policy_section_loads_custom_limits(tmp_path: Path) -> None:
     assert configuration.policy.cooldown_override_priority == 85
     assert configuration.policy.minimum_gap_seconds == 3.5
     assert configuration.policy.follow_up_max_age_seconds == 4.5
+    assert configuration.policy.streak_settle_seconds == 1.5
 
 
 @pytest.mark.parametrize(
@@ -340,6 +343,8 @@ def test_policy_section_loads_custom_limits(tmp_path: Path) -> None:
         "alive_priority_threshold = 75\nminimum_gap_seconds = \"2\"\n",
         "cooldown_seconds = 8\nmax_lines_per_round = 3\n"
         "alive_priority_threshold = 75\nfollow_up_max_age_seconds = 31\n",
+        "cooldown_seconds = 8\nmax_lines_per_round = 3\n"
+        "alive_priority_threshold = 75\nstreak_settle_seconds = 11\n",
         "cooldown_seconds = 8\nmax_lines_per_round = 3\n"
         "alive_priority_threshold = 75\nunknown_limit = 1\n",
     ),
@@ -372,6 +377,7 @@ def test_invalid_policy_section_falls_back_alone_and_logs_warning(
     assert configuration.policy.cooldown_override_priority == 70
     assert configuration.policy.minimum_gap_seconds == 2.0
     assert configuration.policy.follow_up_max_age_seconds == 5.0
+    assert configuration.policy.streak_settle_seconds == 2.5
     assert configuration.speech.enabled is False
     assert configuration.idle.enabled is False
     assert configuration.gsi.record is True

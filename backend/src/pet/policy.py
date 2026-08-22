@@ -75,7 +75,6 @@ class SpeechPolicy:
         self._counted_round_number: int | None = None
         self._lines_this_round = 0
         self._pending_multi_kill: GameEvent | None = None
-        self._last_multi_kill_count: int | None = None
 
     def observe_snapshot(self, snapshot: GameSnapshot) -> None:
         """Remember health only when the snapshot describes the local player."""
@@ -96,7 +95,6 @@ class SpeechPolicy:
         self._counted_round_number = None
         self._lines_this_round = 0
         self._pending_multi_kill = None
-        self._last_multi_kill_count = None
 
     def decide(
         self,
@@ -114,27 +112,10 @@ class SpeechPolicy:
         if batch_round != self._counted_round_number:
             self._counted_round_number = batch_round
             self._lines_this_round = 0
-            self._last_multi_kill_count = None
 
         decisions_by_id: dict[str, PolicyDecision] = {}
         decision_events = list(events)
         candidates: list[tuple[int, int, GameEvent]] = []
-
-        pending = self._pending_candidate(now=now, round_number=batch_round)
-        if pending is not None:
-            pending_priority = event_priority(pending)
-            pending_rejection = self._filter_event(
-                pending,
-                game,
-                priority=pending_priority,
-                now=now,
-                muted=muted,
-            )
-            if pending_rejection is None:
-                # Give the pending follow-up the earlier order when priorities
-                # tie: it describes the still-current escalation that was held.
-                candidates.append((pending_priority, -1, pending))
-                decision_events.append(pending)
 
         for order, event in enumerate(events):
             priority = event_priority(event)
@@ -148,13 +129,28 @@ class SpeechPolicy:
             if rejection is None:
                 candidates.append((priority, order, event))
             else:
-                if (
-                    event.type == "multi_kill"
-                    and rejection.reason_code == "minimum_gap"
-                ):
+                if event.type == "multi_kill" and rejection.reason_code == "deferred":
                     self._defer_multi_kill(event)
-                    rejection = rejection.model_copy(update={"reason_code": "deferred"})
                 decisions_by_id[event.id] = rejection
+
+        # Fold every new escalation into the pending streak before deciding
+        # whether it has settled.  A higher count in this snapshot is direct
+        # evidence that the streak is still active, even if the old pending
+        # timestamp happened to cross the settle threshold just beforehand.
+        pending = self._pending_candidate(now=now, round_number=batch_round)
+        pending_is_candidate = False
+        if pending is not None and self._pending_is_releasable(
+            pending,
+            events,
+            now=now,
+            muted=muted,
+        ):
+            # Give the pending follow-up the earlier order when priorities tie:
+            # it describes the already-settled escalation that was held.
+            candidates.append((event_priority(pending), -1, pending))
+            pending_is_candidate = True
+            if all(event.id != pending.id for event in decision_events):
+                decision_events.append(pending)
 
         selected_event: GameEvent | None = None
         if candidates:
@@ -179,13 +175,11 @@ class SpeechPolicy:
                     )
             self._last_selected_at = now
             self._lines_this_round += 1
-            if selected_event.type == "multi_kill":
-                self._last_multi_kill_count = _multi_kill_count(selected_event)
-            else:
-                self._last_multi_kill_count = None
-            # A newly selected fact supersedes every deferred follow-up; this
-            # includes the pending event itself when it is the winner.
-            self._pending_multi_kill = None
+            # A pending streak is consumed when it competes, whether it wins
+            # or loses.  A newly deferred streak that has not settled remains
+            # available across ordinary events in the same snapshot.
+            if pending_is_candidate:
+                self._pending_multi_kill = None
 
         return PolicyBatchDecision(
             selected_event=selected_event,
@@ -208,6 +202,31 @@ class SpeechPolicy:
             self._pending_multi_kill = None
             return None
         return pending
+
+    def _pending_is_releasable(
+        self,
+        pending: GameEvent,
+        events: Sequence[GameEvent],
+        *,
+        now: float,
+        muted: bool,
+    ) -> bool:
+        """Release one settled streak, or release it when the round ends."""
+        if muted:
+            return False
+        if self._last_selected_at is not None and (
+            now - self._last_selected_at < self._config.minimum_gap_seconds
+        ):
+            return False
+        has_terminal_event = any(
+            event.type
+            in {"death", "death_after_kill", "death_thrown_away", "round_win", "round_loss"}
+            for event in events
+        )
+        return (
+            now - pending.ts >= self._config.streak_settle_seconds
+            or has_terminal_event
+        )
 
     def _defer_multi_kill(self, event: GameEvent) -> None:
         """Keep only the highest observed multi-kill escalation for this round."""
@@ -252,23 +271,10 @@ class SpeechPolicy:
                 "round_limit",
                 limit=self._config.max_lines_per_round,
             )
+        if event.type == "multi_kill":
+            return _rejected(event, priority, "deferred")
         if self._last_selected_at is not None:
             elapsed = max(0.0, now - self._last_selected_at)
-            if event.type == "multi_kill":
-                if (
-                    self._last_multi_kill_count is not None
-                    and _multi_kill_count(event) > self._last_multi_kill_count
-                ):
-                    return None
-                if elapsed < self._config.minimum_gap_seconds:
-                    return _rejected(
-                        event,
-                        priority,
-                        "minimum_gap",
-                        elapsed_seconds=elapsed,
-                        limit=self._config.minimum_gap_seconds,
-                    )
-                return None
             if elapsed < self._config.cooldown_seconds:
                 if priority >= self._config.cooldown_override_priority:
                     if elapsed < self._config.minimum_gap_seconds:
