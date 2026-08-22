@@ -11,3 +11,5 @@ AUDIT.md
 **/config.local.toml
 **/secrets*
 backend/recordings/
+backend/eval-reports/*
+!backend/eval-reports/.gitkeep

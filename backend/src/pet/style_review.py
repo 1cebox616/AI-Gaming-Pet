@@ -21,7 +21,7 @@ from pet.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
 from pet.prompt import load_system_prompt
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_REPORT_PATH = BACKEND_ROOT / "bench-reports" / "m3-t9.7-style-review.md"
+DEFAULT_REPORT_PATH = BACKEND_ROOT / "eval-reports" / "m3-t9.7-style-review.md"
 MODEL = "qwen/qwen3.5-122b-a10b"
 PROVIDER = "Alibaba"
 TEMPERATURES = (0.9, 0.0)

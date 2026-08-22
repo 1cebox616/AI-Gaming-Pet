@@ -19,19 +19,19 @@
 ```text
 git pull --ff-only origin main
 .venv\Scripts\python.exe -X utf8 <仓库外临时脚本 inventory_analyze.py>
-rg -n --hidden --glob '!backend/bench-reports/**' --glob '!.git/**' "bench-reports" .
+rg -n --hidden --glob '!.git/**' "<已删除的旧评测目录名>" .
 find backend/src/pet -name "*.py" | sort | xargs wc -l
 .venv\Scripts\python.exe -m pytest tests/ -q --basetemp <仓库外临时目录> -p no:cacheprovider
 ```
 
 ## 一、删除结果与残留引用
 
-- 已删除：`backend/bench-reports/`。
+- 已删除：旧评测报告目录。
 - 实际删除文件数：230。
 - 实际删除总体积：8,141,722 字节。
 - 除该目录外，本任务没有删除文件。
 
-删除后全仓库仍有以下 10 处 `bench-reports` 引用。依任务要求，未修改任何引用方：
+删除后全仓库仍有以下 10 处旧评测目录引用。依任务要求，当时未修改任何引用方：
 
 | 文件 | 行号 | 引用内容或用途 |
 |---|---:|---|
@@ -59,7 +59,7 @@ find backend/src/pet -name "*.py" | sort | xargs wc -l
 | `config.py` | 299 | — | `bench`、`bridge`、`commentary`、`commentary_templates`、`events`、`fact_sentence_audit`、`gsi`、`lines`、`main`、`online_commentary`、`policy`、`replay`、`speech` | 生产可达 |
 | `event_card.py` | 1,844 | `commentary_rules`、`events`、`gsi`、`session`、`situation` | `bench`、`fact_sentence_audit`、`hard_gate`、`online_commentary` | 生产可达 |
 | `events.py` | 435 | `config`、`gsi`、`session` | `bench`、`commentary`、`event_card`、`fact_sentence_audit`、`main`、`online_commentary`、`policy`、`replay`、`scenario_synth` | 生产可达 |
-| `fact_sentence_audit.py` | 424 | `bench`、`config`、`event_card`、`events`、`prompt`、`replay`、`scenario_synth` | `style_diversity`、`style_experiment`、`style_review` | 仅离线/命令行可达 |
+| `fact_sentence_audit.py` | 275 | `bench`、`config`、`event_card`、`events`、`prompt`、`replay`、`scenario_synth` | `style_diversity`、`style_experiment`、`style_review` | 仅离线/命令行可达 |
 | `gsi.py` | 707 | `config`、`network` | `event_card`、`events`、`main`、`online_commentary`、`policy`、`replay`、`scenario_synth`、`session`、`situation` | 生产可达 |
 | `hard_gate.py` | 403 | `event_card`、`situation` | `online_commentary`、`style_experiment`、`style_review` | 生产可达 |
 | `lines.py` | 121 | `config` | `bridge`、`commentary`、`commentary_templates`、`online_commentary`、`replay` | 生产可达 |
@@ -77,7 +77,7 @@ find backend/src/pet -name "*.py" | sort | xargs wc -l
 | `style_diversity.py` | 116 | `fact_sentence_audit`、`llm`、`prompt`、`style_review` | `style_experiment` | 仅离线/命令行可达 |
 | `style_experiment.py` | 258 | `bench`、`fact_sentence_audit`、`hard_gate`、`llm`、`prompt`、`style_diversity`、`style_review` | — | 仅离线/命令行可达 |
 | `style_review.py` | 290 | `bench`、`fact_sentence_audit`、`hard_gate`、`llm`、`prompt` | `style_diversity`、`style_experiment` | 仅离线/命令行可达 |
-| **合计** | **13,976** |  |  |  |
+| **合计** | **13,828** |  |  |  |
 
 ### 生产可达性汇总
 
@@ -135,7 +135,7 @@ $ find backend/src/pet -name "*.py" | sort | xargs wc -l
    299 backend/src/pet/config.py
   1844 backend/src/pet/event_card.py
    435 backend/src/pet/events.py
-   424 backend/src/pet/fact_sentence_audit.py
+   275 backend/src/pet/fact_sentence_audit.py
    707 backend/src/pet/gsi.py
    403 backend/src/pet/hard_gate.py
    121 backend/src/pet/lines.py
@@ -153,10 +153,10 @@ $ find backend/src/pet -name "*.py" | sort | xargs wc -l
    116 backend/src/pet/style_diversity.py
    258 backend/src/pet/style_experiment.py
    290 backend/src/pet/style_review.py
- 13976 total
+ 13828 total
 ```
 
-表格合计与 `wc -l` 的 `13976 total` 一致。
+表格合计与 `wc -l` 的 `13828 total` 一致。
 
 ## 七、测试对照与未完成项
 
@@ -172,11 +172,17 @@ $ find backend/src/pet -name "*.py" | sort | xargs wc -l
 13 failed, 400 passed, 1 warning in 12.86s
 ```
 
-除相同的 4 项语音失败外，新增 9 项失败均为已删除目录的残留引用读取以下 4 个文件时触发 `FileNotFoundError`：
+除相同的 4 项语音失败外，M4-a 当时新增的 9 项失败均为已删除目录的残留引用读取以下 4 个文件时触发 `FileNotFoundError`：
 
-- `backend/bench-reports/m3-t5.6-event-answer-keys.json`
-- `backend/bench-reports/m3-t5.9-universal-forbidden.json`
-- `backend/bench-reports/m3-t2-data-inventory.md`
-- `backend/bench-reports/m3-t6-observed-constraints.json`
+- `backend/eval-assets/m3-t5.6-event-answer-keys.json`
+- `backend/eval-assets/m3-t5.9-universal-forbidden.json`
+- `backend/eval-assets/m3-t2-data-inventory.md`
+- `backend/eval-assets/m3-t6-observed-constraints.json`
 
-受影响测试为 `backend/tests/test_bench.py` 4 项、`backend/tests/test_scenario_synth.py` 5 项。任务要求一方面删除整个目录，另一方面明确要求发现引用后不得修改引用方，因此当前仓库无法同时满足「目录完全删除」与「测试结果和删除前完全一致」。本任务严格保留测试与引用方不变，将这 9 项新增失败列为未完成项，等待后续任务决定这些回归资产的新位置及引用迁移方案。
+受影响测试为 `backend/tests/test_bench.py` 4 项、`backend/tests/test_scenario_synth.py` 5 项。M4-a2 已将冻结输入恢复到 `backend/eval-assets/`，并把评测输出迁到忽略提交的 `backend/eval-reports/`。修复后的同命令结果：
+
+```text
+4 failed, 409 passed, 1 warning in 17.21s
+```
+
+9 项资产路径失败已全部恢复通过；剩余 4 项仍是本机缺少 OneCore 中文语音。

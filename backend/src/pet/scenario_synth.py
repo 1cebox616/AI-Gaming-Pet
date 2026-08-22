@@ -26,11 +26,12 @@ MutationOperation = Literal["set", "delete"]
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 RECORDINGS_DIRECTORY = BACKEND_ROOT / "recordings"
 SCENARIOS_DIRECTORY = BACKEND_ROOT / "scenarios"
-REPORTS_DIRECTORY = BACKEND_ROOT / "bench-reports"
-OBSERVED_CONSTRAINTS_PATH = REPORTS_DIRECTORY / "m3-t6-observed-constraints.json"
+EVAL_ASSETS_DIRECTORY = BACKEND_ROOT / "eval-assets"
+EVAL_REPORTS_DIRECTORY = BACKEND_ROOT / "eval-reports"
+OBSERVED_CONSTRAINTS_PATH = EVAL_ASSETS_DIRECTORY / "m3-t6-observed-constraints.json"
 INVENTORY_PATHS = (
-    REPORTS_DIRECTORY / "m3-t2-data-inventory.md",
-    REPORTS_DIRECTORY / "m3-t2-inventory2.md",
+    EVAL_ASSETS_DIRECTORY / "m3-t2-data-inventory.md",
+    EVAL_ASSETS_DIRECTORY / "m3-t2-inventory2.md",
 )
 SYNTHETIC_SELF_STEAMID = "SYNTHETIC_SELF_STEAMID"
 SYNTHETIC_OTHER_STEAMID = "SYNTHETIC_OTHER_STEAMID"
@@ -1079,7 +1080,7 @@ def generate_all(
     *,
     specs: Sequence[ScenarioSpec] = SCENARIO_SPECS,
     scenarios_directory: Path = SCENARIOS_DIRECTORY,
-    reports_directory: Path = REPORTS_DIRECTORY,
+    reports_directory: Path = EVAL_REPORTS_DIRECTORY,
 ) -> tuple[Path, ...]:
     """Generate all scenarios and zero-call review artifacts."""
     constraints = load_inventory_constraints()

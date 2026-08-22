@@ -12,7 +12,7 @@ from pet.prompt import load_system_prompt
 from pet.style_review import MAX_TOKENS, MODEL, PROVIDER, REASONING_EFFORT
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-REPORT_PATH = BACKEND_ROOT / "bench-reports" / "m3-t9.7-diversity.md"
+REPORT_PATH = BACKEND_ROOT / "eval-reports" / "m3-t9.7-diversity.md"
 VOCABULARY_PATH = BACKEND_ROOT / "prompts" / "vocabulary.md"
 _CASE_IDS = (
     "gsi-20260811-223119-169538:002:kill:r5",

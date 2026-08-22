@@ -44,12 +44,12 @@ from pet.llm import LlmAnalysisResult, LlmError, LlmResult, LlmUsage
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "gsi_event_samples.json"
 ANSWER_KEY_PATH = (
     Path(__file__).parents[1]
-    / "bench-reports"
+    / "eval-assets"
     / "m3-t5.6-event-answer-keys.json"
 )
 UNIVERSAL_FORBIDDEN_PATH = (
     Path(__file__).parents[1]
-    / "bench-reports"
+    / "eval-assets"
     / "m3-t5.9-universal-forbidden.json"
 )
 

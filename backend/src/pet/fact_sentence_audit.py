@@ -5,13 +5,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from collections.abc import Sequence
-import random
 import re
 import subprocess
 
 from pet.bench import (
     FactSentenceAuditCase,
-    _fact_has_sentence_evidence,
     load_event_answer_keys,
     render_fact_sentence_audit_report,
 )
@@ -27,7 +25,7 @@ from pet.replay import CommentaryDisposition, load_recording, replay_commentary
 from pet.scenario_synth import SCENARIO_SPECS, SCENARIOS_DIRECTORY
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-REPORTS_DIRECTORY = BACKEND_ROOT / "bench-reports"
+REPORTS_DIRECTORY = BACKEND_ROOT / "eval-reports"
 OLD_RECORDING = BACKEND_ROOT / "recordings" / "gsi-20260811-223119-169538.jsonl"
 OLD_ANSWER_KEY = REPORTS_DIRECTORY / "m3-t8.10-aligned-old23-answer-keys.json"
 NEW_ANSWER_KEY = REPORTS_DIRECTORY / "m3-t8.10-aligned-new32-answer-keys.json"
@@ -164,157 +162,10 @@ def write_fact_sentence_audit_report(path: Path) -> None:
     """Write the report through the deterministic, zero-LLM replay path."""
     cases = collect_fact_sentence_audit_cases()
     report = render_fact_sentence_audit_report(cases)
-    report = _t815_report_preamble(cases) + "\n" + report
     path.write_text(
         report,
         encoding="utf-8",
     )
-
-
-def _t815_report_preamble(cases: Sequence[FactSentenceAuditCase]) -> str:
-    """Compare the current prose against the committed pre-change report."""
-    previous = _previous_processes()
-    current = {
-        case.case_id: _process_from_sentence(case.fact_sentence)
-        for case in cases
-    }
-    previous_lengths = sorted(_han_count(value) for value in previous.values())
-    current_lengths = sorted(_han_count(value) for value in current.values())
-    multikill_ids = [
-        case.case_id
-        for case in cases
-        if "【事件】多杀" in case.fact_sentence
-    ]
-    sample_ids = random.Random(815).sample(sorted(current), k=10)
-    lines = [
-        "# M3-T8.16 多杀概括与可读性复核",
-        "",
-        "- 模式：仅离线重放与字符串渲染；未调用模型、未读取密钥。",
-        "- M3-T8.15 旧【过程】长度（最短 / 中位 / 最长）："
-        + _length_summary(previous_lengths),
-        "- 改写后【过程】长度（最短 / 中位 / 最长）："
-        + _length_summary(current_lengths),
-        "- 不设字数上限；长度仅供观察。",
-        "- 掉血只在相邻且中间没有其他时间线条目时合并；"
-        "多杀的“期间掉血”则明确是整段累计。",
-        "",
-        "## 5 条多杀前后对照",
-        "",
-    ]
-    for case_id in multikill_ids[:5]:
-        lines.extend(
-            (
-                f"### `{case_id}`",
-                "压缩前：" + previous[case_id],
-                "压缩后：" + current.get(case_id, "该题不在当前核验集"),
-                "",
-            )
-        )
-    lines.extend(("## M3-T8.15 的 19 个未覆盖案例", ""))
-    prior_missing = _previous_missing_case_ids()
-    cases_by_id = {case.case_id: case for case in cases}
-    superseded_multikill_atoms = frozenset(
-        {"本回合第1杀", "本回合第2杀", "该阶段双杀", "该阶段三杀"}
-    )
-    for case_id in prior_missing:
-        case = cases_by_id[case_id]
-        missing = tuple(
-            fact
-            for fact in case.required_facts
-            if not _fact_has_sentence_evidence(fact, case.fact_sentence)
-        )
-        if not missing:
-            status = "已覆盖"
-        elif set(missing).issubset(superseded_multikill_atoms):
-            status = (
-                "答案本身有问题：新规则概括总杀数与跨阶段关系，"
-                "不再逐次写每一杀的编号或阶段计数"
-            )
-        else:
-            status = "仍未覆盖：" + "、".join(missing)
-        lines.append(f"- `{case_id}`：{status}")
-    lines.extend(("", "## 随机 10 条可读性抽查", ""))
-    internal_terms = ("未观测", "可观测", "同一时刻", "连续过程", "阶段不可判断")
-    for case_id in sample_ids:
-        process = current[case_id]
-        found = tuple(term for term in internal_terms if term in process)
-        assessment = (
-            "发现内部措辞：" + "、".join(found)
-            if found
-            else "可直接理解这一波经过；未发现内部措辞。"
-        )
-        lines.extend((f"- `{case_id}`：{process} —— {assessment}",))
-    lines.extend(("", "---", ""))
-    return "\n".join(lines)
-
-
-def _previous_processes() -> dict[str, str]:
-    """Extract the pre-compression process lines from the committed T8.14 report."""
-    result = subprocess.run(
-        ["git", "show", "HEAD:backend/bench-reports/m3-t8.14-fact-sentences.md"],
-        cwd=BACKEND_ROOT.parent,
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    pattern = re.compile(
-        r"### \d+\. `(?P<case_id>[^`]+)`\n新格式：\n```text\n.*?\n"
-        r"【过程】(?P<process>[^\n]+)",
-        re.DOTALL,
-    )
-    processes = {
-        match.group("case_id"): match.group("process")
-        for match in pattern.finditer(result.stdout)
-    }
-    if len(processes) != 55:
-        raise ValueError(f"T8.14 报告中应有55条过程，实际为 {len(processes)}")
-    return processes
-
-
-def _previous_missing_case_ids() -> tuple[str, ...]:
-    """Read the frozen historical failure set without editing answer keys."""
-    result = subprocess.run(
-        ["git", "show", "HEAD:backend/bench-reports/m3-t8.15-fact-sentences.md"],
-        cwd=BACKEND_ROOT.parent,
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    matched = re.search(r"- 有必答项未覆盖的题目：(.*)", result.stdout)
-    if matched is None:
-        raise ValueError("T8.15 报告缺少未覆盖题目清单")
-    case_ids = tuple(re.findall(r"`([^`]+)`", matched.group(1)))
-    if len(case_ids) != 19:
-        raise ValueError(f"T8.15 未覆盖题应为19条，实际为 {len(case_ids)}")
-    return case_ids
-
-
-def _process_from_sentence(sentence: str) -> str:
-    """Return the prose payload after the structured process heading."""
-    return next(
-        (line.removeprefix("【过程】") for line in sentence.splitlines() if line.startswith("【过程】")),
-        "",
-    )
-
-
-def _han_count(text: str) -> int:
-    """Count Chinese characters for the product's process-length budget."""
-    return len(re.findall(r"[\u4e00-\u9fff]", text))
-
-
-def _length_summary(lengths: Sequence[int]) -> str:
-    """Format a non-empty min/median/max length distribution."""
-    if not lengths:
-        return "0 / 0 / 0"
-    middle = len(lengths) // 2
-    median = (
-        lengths[middle]
-        if len(lengths) % 2
-        else (lengths[middle - 1] + lengths[middle]) / 2
-    )
-    return f"{lengths[0]} / {median:g} / {lengths[-1]}"
 
 
 def write_assembled_prompt_report(path: Path) -> None:

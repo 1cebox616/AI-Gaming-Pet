@@ -25,7 +25,7 @@ from pet.style_review import (
 )
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-REPORT_PATH = BACKEND_ROOT / "bench-reports" / "m3-t9.8-diversity-experiment.md"
+REPORT_PATH = BACKEND_ROOT / "eval-reports" / "m3-t9.8-diversity-experiment.md"
 VOCABULARY_PATH = BACKEND_ROOT / "prompts" / "vocabulary.md"
 DIVERSITY_SUFFIX = "同一种场合有很多种说法，词库里给了不止一个选择。\n不要每次都用最顺手的那句，换着说。"
 
