@@ -34,7 +34,7 @@ npm.cmd install
 后端启动时会自动查找 CS2 并安装 GSI 配置。也可以在 `backend` 目录单独执行一次：
 
 ```powershell
-.venv\Scripts\python -m pet.gsi --install
+.venv\Scripts\python -m pet.games.cs2.gsi --install
 ```
 
 语音直接使用 Windows 已安装的 OneCore 中文语音，不下载额外模型。若日志提示没有中文语音，请打开“设置 > 时间和语言 > 语言和区域”，选择“中文（简体，中国）”右侧的“…” > “语言选项”，在“语言功能”中下载“文本到语音转换”。
@@ -69,7 +69,7 @@ npm.cmd run tauri dev
 
 ```powershell
 cd backend
-.venv\Scripts\python -m pet.gsi --install
+.venv\Scripts\python -m pet.games.cs2.gsi --install
 ```
 
 默认不保存原始游戏数据。需要为开发测试录制时，在被 Git 忽略的 `backend/config.local.toml` 中写入：
@@ -87,13 +87,13 @@ record = true
 
 ```powershell
 cd backend
-.venv\Scripts\python -m pet.replay --replay recordings\gsi-YYYYMMDD-HHMMSS.jsonl
+.venv\Scripts\python -m pet.games.cs2.eval.replay --replay recordings\gsi-YYYYMMDD-HHMMSS.jsonl
 ```
 
 同时预览每个策略决定、丢弃原因以及最终话术与表情：
 
 ```powershell
-.venv\Scripts\python -m pet.replay --replay recordings\gsi-YYYYMMDD-HHMMSS.jsonl --with-policy
+.venv\Scripts\python -m pet.games.cs2.eval.replay --replay recordings\gsi-YYYYMMDD-HHMMSS.jsonl --with-policy
 ```
 
 回放使用固定随机种子，因此同一份录制与配置的输出可重复。正常运行时话术选择仍使用非固定随机源。

@@ -1,3 +1,6 @@
+[active]
+game = "cs2"
+
 # 本地语音设置。enabled 为 false 时仅显示气泡和表情，不播放声音。
 [speech]
 # 是否播放本机语音。
@@ -15,11 +18,11 @@ min_interval_seconds = 180
 max_interval_seconds = 300
 
 # CS2 Game State Integration 原始数据录制。默认关闭，避免日常运行持续写盘。
-[gsi]
+[games.cs2.gsi]
 # 为 true 时，每次启动新建一个 JSONL 文件并异步追加收到的原始 payload。
 record = false
 
-[events]
+[games.cs2.events]
 # 死亡时若本回合零击杀、存活不足这个秒数、且装备价值不低于下面的门槛，
 # 判定为「白给」。数值越小越严格。
 thrown_away_max_survival_seconds = 15
@@ -27,7 +30,7 @@ thrown_away_min_equip_value = 3000
 # 击杀后多少秒内死亡，算作「暴露位置被补枪」，给正反馈而不是负反馈。
 death_after_kill_max_seconds = 8
 
-[policy]
+[games.cs2.policy]
 # 两次发言之间的最短间隔秒数。数值越大，宠物越安静。
 cooldown_seconds = 6
 # 每个回合最多发言几次。
@@ -45,7 +48,7 @@ follow_up_max_age_seconds = 5
 # 连杀最后一次升级后等待多久再播报，避免逐级播报互相打断。
 streak_settle_seconds = 2.5
 
-[personality]
+[games.cs2.personality]
 # 宠物的说话风格。brother = 损友兄弟，caster = 比赛解说。
 style = "brother"
 
