@@ -63,6 +63,9 @@ class PolicyConfig(BaseModel):
     alive_priority_threshold: int = Field(default=0, ge=0, le=100)
     cooldown_override_priority: int = Field(default=70, ge=0, le=101)
     minimum_gap_seconds: float = Field(default=2.0, ge=0, le=10)
+    # Five seconds matches the player-approved multi-kill streak window: a
+    # delayed follow-up beyond that point is no longer timely commentary.
+    follow_up_max_age_seconds: float = Field(default=5.0, ge=0, le=30)
 
 
 PersonalityStyle = Literal["brother", "caster"]
@@ -226,6 +229,7 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
             "alive_priority_threshold",
             "cooldown_override_priority",
             "minimum_gap_seconds",
+            "follow_up_max_age_seconds",
         ),
         "personality": ("style",),
         "llm": (

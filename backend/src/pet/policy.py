@@ -21,6 +21,7 @@ DecisionReason = Literal[
     "round_limit",
     "cooldown",
     "minimum_gap",
+    "deferred",
     "higher_priority",
     "round_event",
 ]
@@ -73,6 +74,7 @@ class SpeechPolicy:
         self._last_selected_at: float | None = None
         self._counted_round_number: int | None = None
         self._lines_this_round = 0
+        self._pending_multi_kill: GameEvent | None = None
 
     def observe_snapshot(self, snapshot: GameSnapshot) -> None:
         """Remember health only when the snapshot describes the local player."""
@@ -92,6 +94,7 @@ class SpeechPolicy:
         self._last_selected_at = None
         self._counted_round_number = None
         self._lines_this_round = 0
+        self._pending_multi_kill = None
 
     def decide(
         self,
@@ -102,9 +105,6 @@ class SpeechPolicy:
         muted: bool,
     ) -> PolicyBatchDecision:
         """Select no more than one event and explain every disposition."""
-        if not events:
-            return PolicyBatchDecision(selected_event=None, decisions=())
-
         batch_round = next(
             (event.round_number for event in events if event.round_number is not None),
             game.round,
@@ -114,7 +114,16 @@ class SpeechPolicy:
             self._lines_this_round = 0
 
         decisions_by_id: dict[str, PolicyDecision] = {}
+        decision_events = list(events)
         candidates: list[tuple[int, int, GameEvent]] = []
+
+        pending = self._pending_candidate(now=now, round_number=batch_round)
+        if pending is not None:
+            # Give the pending follow-up the earlier order when priorities tie:
+            # it describes the still-current escalation that was already held.
+            candidates.append((event_priority(pending), -1, pending))
+            decision_events.append(pending)
+
         for order, event in enumerate(events):
             priority = event_priority(event)
             rejection = self._filter_event(
@@ -127,6 +136,12 @@ class SpeechPolicy:
             if rejection is None:
                 candidates.append((priority, order, event))
             else:
+                if (
+                    event.type == "multi_kill"
+                    and rejection.reason_code == "minimum_gap"
+                ):
+                    self._defer_multi_kill(event)
+                    rejection = rejection.model_copy(update={"reason_code": "deferred"})
                 decisions_by_id[event.id] = rejection
 
         selected_event: GameEvent | None = None
@@ -152,11 +167,42 @@ class SpeechPolicy:
                     )
             self._last_selected_at = now
             self._lines_this_round += 1
+            # A newly selected fact supersedes every deferred follow-up; this
+            # includes the pending event itself when it is the winner.
+            self._pending_multi_kill = None
 
         return PolicyBatchDecision(
             selected_event=selected_event,
-            decisions=tuple(decisions_by_id[event.id] for event in events),
+            decisions=tuple(decisions_by_id[event.id] for event in decision_events),
         )
+
+    def _pending_candidate(
+        self, *, now: float, round_number: int | None
+    ) -> GameEvent | None:
+        """Return a still-timely deferred multi-kill once its gap has elapsed."""
+        pending = self._pending_multi_kill
+        if pending is None:
+            return None
+        if (
+            pending.round_number is None
+            or round_number is None
+            or pending.round_number != round_number
+            or now - pending.ts > self._config.follow_up_max_age_seconds
+        ):
+            self._pending_multi_kill = None
+            return None
+        if self._last_selected_at is None:
+            self._pending_multi_kill = None
+            return None
+        if now - self._last_selected_at < self._config.minimum_gap_seconds:
+            return None
+        return pending
+
+    def _defer_multi_kill(self, event: GameEvent) -> None:
+        """Keep only the highest observed multi-kill escalation for this round."""
+        pending = self._pending_multi_kill
+        if pending is None or _multi_kill_count(event) > _multi_kill_count(pending):
+            self._pending_multi_kill = event
 
     def _filter_event(
         self,
@@ -185,7 +231,10 @@ class SpeechPolicy:
                 "alive_threshold",
                 limit=self._config.alive_priority_threshold,
             )
-        if self._lines_this_round >= self._config.max_lines_per_round:
+        if (
+            event.type != "multi_kill"
+            and self._lines_this_round >= self._config.max_lines_per_round
+        ):
             return _rejected(
                 event,
                 priority,
@@ -194,6 +243,16 @@ class SpeechPolicy:
             )
         if self._last_selected_at is not None:
             elapsed = max(0.0, now - self._last_selected_at)
+            if event.type == "multi_kill":
+                if elapsed < self._config.minimum_gap_seconds:
+                    return _rejected(
+                        event,
+                        priority,
+                        "minimum_gap",
+                        elapsed_seconds=elapsed,
+                        limit=self._config.minimum_gap_seconds,
+                    )
+                return None
             if elapsed < self._config.cooldown_seconds:
                 if priority >= self._config.cooldown_override_priority:
                     if elapsed < self._config.minimum_gap_seconds:
@@ -223,6 +282,14 @@ def event_priority(event: GameEvent) -> int:
             return _MULTI_KILL_PRIORITIES.get(count, 0)
         return 0
     return _STATIC_PRIORITIES[event.type]
+
+
+def _multi_kill_count(event: GameEvent) -> int:
+    """Read a valid multi-kill count without treating booleans as integers."""
+    count = event.facts.get("count")
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    return 0
 
 
 def _rejected(

@@ -40,6 +40,8 @@ alive_priority_threshold = 0
 cooldown_override_priority = 70
 # 即使打断冷却，两句话之间也至少间隔这么多秒，避免叠音。
 minimum_gap_seconds = 2
+# 连杀升级被最小间隔暂存后，最多等待多久才作废。与 5 秒连杀窗口一致。
+follow_up_max_age_seconds = 5
 
 [personality]
 # 宠物的说话风格。brother = 损友兄弟，caster = 比赛解说。

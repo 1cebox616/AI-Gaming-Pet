@@ -125,6 +125,7 @@ _REASON_LABELS: dict[DecisionReason, str] = {
     "round_limit": "每回合上限",
     "cooldown": "冷却未过",
     "minimum_gap": "最小间隔未过",
+    "deferred": "暂存追补",
     "higher_priority": "已有更高优先级事件",
     "round_event": "回合结算留给长记忆",
 }
@@ -857,6 +858,11 @@ def format_decision_reason(decision: PolicyDecision) -> str:
         return (
             f"距上次发言 {_format_elapsed(decision)} 秒，最小间隔 "
             f"{_format_limit(decision)} 秒未过"
+        )
+    if decision.reason_code == "deferred":
+        return (
+            f"距上次发言 {_format_elapsed(decision)} 秒，最小间隔 "
+            f"{_format_limit(decision)} 秒未过，暂存追补"
         )
     if decision.reason_code == "round_event":
         return "回合结算事件，留给后续长记忆"
