@@ -394,32 +394,19 @@ def test_high_priority_event_overrides_regular_cooldown(
     assert three_kill.reason_code == "selected"
 
 
-def test_multi_kill_is_deferred_inside_minimum_gap(
-    recorded_fixtures: tuple[dict[str, Any], dict[str, Any]],
-) -> None:
-    snapshots = _same_round_timeline(recorded_fixtures)
-    decisions = _cooldown_override_decisions(
-        recorded_fixtures,
-        PolicyConfig(
-            cooldown_seconds=20,
-            max_lines_per_round=20,
-            cooldown_override_priority=70,
-            minimum_gap_seconds=2,
-        ),
-        last_now=snapshots[1].ts + 1,
-    )
-    three_kill = next(
-        decision
-        for decision in decisions
-        if decision.event.type == "multi_kill" and decision.event.facts["count"] == 3
-    )
+def test_multi_kill_upgrade_bypasses_minimum_gap() -> None:
+    """An escalation follows the previous multi-kill immediately, not via pending."""
+    policy = SpeechPolicy(PolicyConfig(minimum_gap_seconds=2))
+    game = _playing_game()
+    double_kill = _policy_event("double", "multi_kill", ts=10, count=2)
+    triple_kill = _policy_event("triple", "multi_kill", ts=11, count=3)
 
-    assert three_kill.selected is False
-    assert three_kill.reason_code == "deferred"
-    assert (
-        format_decision_reason(three_kill)
-        == "距上次发言 1.000 秒，最小间隔 2 秒未过，暂存追补"
-    )
+    first = policy.decide((double_kill,), game, now=10, muted=False)
+    upgrade = policy.decide((triple_kill,), game, now=11, muted=False)
+
+    assert first.selected_event == double_kill
+    assert upgrade.selected_event == triple_kill
+    assert upgrade.decisions[0].reason_code == "selected"
 
 
 def test_multi_kill_ignores_round_limit(
@@ -500,6 +487,83 @@ def test_multi_kill_deferred_for_minimum_gap_is_selected_on_empty_batch() -> Non
     assert deferred.decisions[0].reason_code == "deferred"
     assert followed_up.selected_event == triple_kill
     assert followed_up.decisions[0].selected is True
+
+
+def test_four_kill_upgrade_bypasses_gap_after_selected_triple() -> None:
+    policy = SpeechPolicy(PolicyConfig(minimum_gap_seconds=2))
+    game = _playing_game()
+    double_kill = _policy_event("double", "multi_kill", ts=10, count=2)
+    triple_kill = _policy_event("triple", "multi_kill", ts=11, count=3)
+    four_kill = _policy_event("four", "multi_kill", ts=11.7, count=4)
+
+    policy.decide((double_kill,), game, now=10, muted=False)
+    triple = policy.decide((triple_kill,), game, now=11, muted=False)
+    upgrade = policy.decide((four_kill,), game, now=11.7, muted=False)
+
+    assert triple.selected_event == triple_kill
+    assert upgrade.selected_event == four_kill
+    assert upgrade.decisions[0].reason_code == "selected"
+
+
+def test_equal_or_lower_multi_kill_does_not_bypass_minimum_gap() -> None:
+    policy = SpeechPolicy(PolicyConfig(minimum_gap_seconds=2))
+    game = _playing_game()
+    double_kill = _policy_event("double", "multi_kill", ts=10, count=2)
+    repeated_double = _policy_event("double-again", "multi_kill", ts=11, count=2)
+
+    policy.decide((double_kill,), game, now=10, muted=False)
+    deferred = policy.decide((repeated_double,), game, now=11, muted=False)
+
+    assert deferred.selected_event is None
+    assert deferred.decisions[0].reason_code == "deferred"
+
+
+def test_muted_pending_follow_up_waits_without_being_discarded() -> None:
+    policy = SpeechPolicy(PolicyConfig(minimum_gap_seconds=2))
+    game = _playing_game()
+    first = _policy_event("kill", "kill", ts=10)
+    double_kill = _policy_event("double", "multi_kill", ts=11, count=2)
+
+    policy.decide((first,), game, now=10, muted=False)
+    policy.decide((double_kill,), game, now=11, muted=False)
+    muted = policy.decide((), game, now=12, muted=True)
+    followed_up = policy.decide((), game, now=12.1, muted=False)
+
+    assert muted.selected_event is None
+    assert muted.decisions == ()
+    assert followed_up.selected_event == double_kill
+
+
+def test_non_multi_kill_selection_resets_upgrade_exemption() -> None:
+    policy = SpeechPolicy(PolicyConfig(cooldown_seconds=0, minimum_gap_seconds=2))
+    game = _playing_game()
+    double_kill = _policy_event("double", "multi_kill", ts=10, count=2)
+    death = _policy_event("death", "death_thrown_away", ts=12)
+    triple_kill = _policy_event("triple", "multi_kill", ts=12.7, count=3)
+
+    policy.decide((double_kill,), game, now=10, muted=False)
+    assert policy.decide((death,), game, now=12, muted=False).selected_event == death
+    deferred = policy.decide((triple_kill,), game, now=12.7, muted=False)
+
+    assert deferred.selected_event is None
+    assert deferred.decisions[0].reason_code == "deferred"
+
+
+def test_round_change_resets_multi_kill_upgrade_exemption() -> None:
+    policy = SpeechPolicy(PolicyConfig(minimum_gap_seconds=2))
+    first_round = _playing_game(1)
+    double_kill = _policy_event(
+        "double", "multi_kill", ts=10, round_number=1, count=2
+    )
+    triple_kill = _policy_event(
+        "triple", "multi_kill", ts=10.7, round_number=2, count=3
+    )
+
+    policy.decide((double_kill,), first_round, now=10, muted=False)
+    deferred = policy.decide((triple_kill,), _playing_game(2), now=10.7, muted=False)
+
+    assert deferred.selected_event is None
+    assert deferred.decisions[0].reason_code == "deferred"
 
 
 def test_higher_multi_kill_replaces_pending_follow_up() -> None:
