@@ -17,12 +17,12 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from pet.commentary import commentary_category
-from pet.commentary_rules import CALLOUT_TERMS, find_forbidden_raw_curses
-from pet.commentary_templates import COMMENTARY_TEMPLATES, CommentaryCategory
-from pet.config import PersonalityStyle, load_config
-from pet.events import EventType, GameEvent
-from pet.llm import (
+from pet.games.cs2.template_speech import commentary_category
+from pet.games.cs2.template_rules import CALLOUT_TERMS, find_forbidden_raw_curses
+from pet.games.cs2.template_lines import COMMENTARY_TEMPLATES, CommentaryCategory
+from pet.core.config import PersonalityStyle, load_config
+from pet.games.cs2.events import EventType, GameEvent
+from pet.core.llm import (
     LlmAnalysisClientProtocol,
     LlmAnalysisResult,
     LlmClientProtocol,
@@ -30,9 +30,9 @@ from pet.llm import (
     LlmResult,
     OpenRouterClient,
 )
-from pet.prompt import PROMPTS_DIRECTORY, PromptPersonality, load_system_prompt
-from pet.replay import load_recording, replay_commentary
-from pet.event_card import (
+from pet.core.prompt import PROMPTS_DIRECTORY, PromptPersonality, load_system_prompt
+from pet.games.cs2.eval.replay import load_recording, replay_commentary
+from pet.games.cs2.fact_sentences import (
     render_event_card,
     render_fact_sentence,
     render_model_event_card,

@@ -8,10 +8,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from pet.config import PolicyConfig
-from pet.events import EventType, GameEvent
-from pet.gsi import GameSnapshot
-from pet.session import GameState
+from pet.core.config import PolicyConfig
+from pet.games.cs2.events import EventType, GameEvent
+from pet.games.cs2.gsi import GameSnapshot
+from pet.games.cs2.session import GameState
 
 DecisionReason = Literal[
     "selected",

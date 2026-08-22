@@ -12,20 +12,20 @@ from pathlib import Path
 import random
 import sys
 
-from pet.commentary import CommentaryGenerator
-from pet.config import EventsConfig, PersonalityStyle, PolicyConfig, load_config
-from pet.events import EVENT_TYPES, EventDetector, EventType, GameEvent
-from pet.gsi import (
+from pet.games.cs2.template_speech import CommentaryGenerator
+from pet.core.config import EventsConfig, PersonalityStyle, PolicyConfig, load_config
+from pet.games.cs2.events import EVENT_TYPES, EventDetector, EventType, GameEvent
+from pet.games.cs2.gsi import (
     GSI_SILENCE_SECONDS,
     GameSnapshot,
     WeaponSlot,
     human_round_number,
     parse_snapshot,
 )
-from pet.lines import Utterance
-from pet.policy import DecisionReason, PolicyDecision, SpeechPolicy
-from pet.session import GameSessionTracker, GameState, MatchLifecycleTracker
-from pet.situation import (
+from pet.games.cs2.template_speech import TemplateUtterance
+from pet.games.cs2.policy import DecisionReason, PolicyDecision, SpeechPolicy
+from pet.games.cs2.session import GameSessionTracker, GameState, MatchLifecycleTracker
+from pet.games.cs2.situation import (
     RoundSituation,
     SituationTracker,
     armor_status,
@@ -155,7 +155,7 @@ class CommentaryDisposition:
     """One policy decision and its generated utterance when selected."""
 
     decision: PolicyDecision
-    utterance: Utterance | None
+    utterance: TemplateUtterance | None
     snapshot: GameSnapshot
     game: GameState
     round_situation: RoundSituation

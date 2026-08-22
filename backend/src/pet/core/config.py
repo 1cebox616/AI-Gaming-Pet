@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.toml"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config.toml"
 LOCAL_CONFIG_PATH = DEFAULT_CONFIG_PATH.with_name("config.local.toml")
 
 
@@ -33,6 +33,14 @@ class IdleConfig(BaseModel):
     enabled: bool = True
     min_interval_seconds: int = Field(default=180, ge=10, le=3600)
     max_interval_seconds: int = Field(default=300, ge=10, le=3600)
+
+
+class ActiveConfig(BaseModel):
+    """Select the adapter loaded for this process."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    game: str = "default"
 
 
 class GsiConfig(BaseModel):
@@ -82,6 +90,19 @@ class PersonalityConfig(BaseModel):
     style: PersonalityStyle = "brother"
 
 
+class LlmProfileConfig(BaseModel):
+    """Optional overrides applied to one speech request's model profile."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    enabled: bool | None = None
+    model: str | None = None
+    provider: str | None = None
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    timeout_seconds: float | None = Field(default=None, gt=0, le=30)
+    max_tokens: int | None = Field(default=None, ge=1, le=2048)
+
+
 class LlmConfig(BaseModel):
     """Optional live-model settings; credentials never belong in this file."""
 
@@ -94,6 +115,18 @@ class LlmConfig(BaseModel):
     # M3-T10: 3 seconds is over three times the offline 0.8-second event P95.
     timeout_seconds: float = Field(default=3.0, gt=0, le=30)
     max_tokens: int = Field(default=256, ge=1, le=2048)
+    profiles: dict[str, LlmProfileConfig] = Field(default_factory=dict)
+
+
+class AdapterConfig(BaseModel):
+    """Configuration shape currently consumed by a built-in game adapter."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    gsi: GsiConfig = Field(default_factory=GsiConfig)
+    events: EventsConfig = Field(default_factory=EventsConfig)
+    policy: PolicyConfig = Field(default_factory=PolicyConfig)
+    personality: PersonalityConfig = Field(default_factory=PersonalityConfig)
 
 
 class PetConfig(BaseModel):
@@ -101,23 +134,43 @@ class PetConfig(BaseModel):
 
     model_config = ConfigDict(strict=True, extra="forbid")
 
+    active: ActiveConfig = Field(default_factory=ActiveConfig)
     speech: SpeechConfig = Field(default_factory=SpeechConfig)
     idle: IdleConfig = Field(default_factory=IdleConfig)
-    gsi: GsiConfig = Field(default_factory=GsiConfig)
-    events: EventsConfig = Field(default_factory=EventsConfig)
-    policy: PolicyConfig = Field(default_factory=PolicyConfig)
-    personality: PersonalityConfig = Field(default_factory=PersonalityConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
+    games: dict[str, AdapterConfig] = Field(default_factory=dict)
+
+    @property
+    def active_game(self) -> AdapterConfig:
+        return self.games.get(self.active.game, AdapterConfig())
+
+    @property
+    def gsi(self) -> GsiConfig:
+        return self.active_game.gsi
+
+    @property
+    def events(self) -> EventsConfig:
+        return self.active_game.events
+
+    @property
+    def policy(self) -> PolicyConfig:
+        return self.active_game.policy
+
+    @property
+    def personality(self) -> PersonalityConfig:
+        return self.active_game.personality
 
 
 ConfigSection = TypeVar(
     "ConfigSection",
+    ActiveConfig,
     SpeechConfig,
     IdleConfig,
     GsiConfig,
     EventsConfig,
     PolicyConfig,
     PersonalityConfig,
+    LlmProfileConfig,
     LlmConfig,
 )
 
@@ -133,25 +186,17 @@ def load_config(
     _warn_for_unknown_sections(merged_data)
     _warn_for_missing_fields(merged_data)
 
+    active = _validate_section("active", ActiveConfig, merged_data.get("active", {}))
     speech = _validate_section("speech", SpeechConfig, merged_data.get("speech", {}))
     idle = _validate_section("idle", IdleConfig, merged_data.get("idle", {}))
-    gsi = _validate_section("gsi", GsiConfig, merged_data.get("gsi", {}))
-    events = _validate_section("events", EventsConfig, merged_data.get("events", {}))
-    policy = _validate_section("policy", PolicyConfig, merged_data.get("policy", {}))
-    personality = _validate_section(
-        "personality",
-        PersonalityConfig,
-        merged_data.get("personality", {}),
-    )
     llm = _validate_section("llm", LlmConfig, merged_data.get("llm", {}))
+    games = _load_games(merged_data, active)
     configuration = PetConfig(
+        active=active,
         speech=speech,
         idle=idle,
-        gsi=gsi,
-        events=events,
-        policy=policy,
-        personality=personality,
         llm=llm,
+        games=games,
     )
 
     if configuration.idle.max_interval_seconds < configuration.idle.min_interval_seconds:
@@ -168,7 +213,12 @@ def load_config(
 
 def _warn_for_unknown_sections(configuration_data: Mapping[str, Any]) -> None:
     """Expose misspelled root tables without discarding valid known tables."""
-    known_sections = set(PetConfig.model_fields)
+    known_sections = set(PetConfig.model_fields) | {
+        "gsi",
+        "events",
+        "policy",
+        "personality",
+    }
     for section_name in sorted(set(configuration_data) - known_sections):
         logger.warning(
             "unknown backend configuration top-level section %s; ignoring it",
@@ -199,7 +249,53 @@ def _validate_section(
             invalid_fields,
             defaults.model_dump(),
         )
-        return defaults
+    return defaults
+
+
+def _load_games(
+    configuration_data: Mapping[str, Any], active: ActiveConfig
+) -> dict[str, AdapterConfig]:
+    games_data = configuration_data.get("games")
+    if isinstance(games_data, Mapping) and games_data:
+        games: dict[str, AdapterConfig] = {}
+        for game_id, game_data in games_data.items():
+            if not isinstance(game_id, str) or not isinstance(game_data, Mapping):
+                logger.warning("invalid backend game configuration %r; ignoring it", game_id)
+                continue
+            games[game_id] = AdapterConfig(
+                gsi=_validate_section(
+                    f"games.{game_id}.gsi", GsiConfig, game_data.get("gsi", {})
+                ),
+                events=_validate_section(
+                    f"games.{game_id}.events", EventsConfig, game_data.get("events", {})
+                ),
+                policy=_validate_section(
+                    f"games.{game_id}.policy", PolicyConfig, game_data.get("policy", {})
+                ),
+                personality=_validate_section(
+                    f"games.{game_id}.personality",
+                    PersonalityConfig,
+                    game_data.get("personality", {}),
+                ),
+            )
+        return games
+
+    return {
+        active.game: AdapterConfig(
+            gsi=_validate_section("gsi", GsiConfig, configuration_data.get("gsi", {})),
+            events=_validate_section(
+                "events", EventsConfig, configuration_data.get("events", {})
+            ),
+            policy=_validate_section(
+                "policy", PolicyConfig, configuration_data.get("policy", {})
+            ),
+            personality=_validate_section(
+                "personality",
+                PersonalityConfig,
+                configuration_data.get("personality", {}),
+            ),
+        )
+    }
 
 
 def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
@@ -245,6 +341,9 @@ def _warn_for_missing_fields(configuration_data: Mapping[str, Any]) -> None:
             "max_tokens",
         ),
     }
+    if isinstance(configuration_data.get("games"), Mapping):
+        for game_section in ("gsi", "events", "policy", "personality"):
+            expected_fields.pop(game_section)
     for section_name, field_names in expected_fields.items():
         section = configuration_data.get(section_name)
         if not isinstance(section, Mapping):
@@ -288,12 +387,12 @@ def _merge_sections(
     default_data: Mapping[str, Any],
     local_data: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Overlay top-level configuration sections without introducing a config framework."""
+    """Recursively overlay local values while retaining unspecified defaults."""
     merged: dict[str, Any] = dict(default_data)
     for section_name, local_value in local_data.items():
         default_value = merged.get(section_name)
         if isinstance(default_value, Mapping) and isinstance(local_value, Mapping):
-            merged[section_name] = {**default_value, **local_value}
+            merged[section_name] = _merge_sections(default_value, local_value)
         else:
             merged[section_name] = local_value
     return merged

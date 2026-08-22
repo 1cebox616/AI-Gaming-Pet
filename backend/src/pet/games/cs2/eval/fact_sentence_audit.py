@@ -8,27 +8,27 @@ from collections.abc import Sequence
 import re
 import subprocess
 
-from pet.bench import (
+from pet.games.cs2.eval.bench import (
     FactSentenceAuditCase,
     load_event_answer_keys,
     render_fact_sentence_audit_report,
 )
-from pet.config import load_config
-from pet.event_card import (
+from pet.core.config import load_config
+from pet.games.cs2.fact_sentences import (
     fact_sentence_scene_tag_selection,
     render_fact_sentence,
     render_model_event_card,
 )
-from pet.events import EventType
-from pet.prompt import load_system_prompt
-from pet.replay import CommentaryDisposition, load_recording, replay_commentary
-from pet.scenario_synth import SCENARIO_SPECS, SCENARIOS_DIRECTORY
+from pet.games.cs2.events import EventType
+from pet.core.prompt import load_system_prompt
+from pet.games.cs2.eval.replay import CommentaryDisposition, load_recording, replay_commentary
+from pet.games.cs2.eval.scenario_synth import SCENARIO_SPECS, SCENARIOS_DIRECTORY
 
-BACKEND_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_ROOT = Path(__file__).resolve().parents[5]
 REPORTS_DIRECTORY = BACKEND_ROOT / "eval-reports"
 OLD_RECORDING = BACKEND_ROOT / "recordings" / "gsi-20260811-223119-169538.jsonl"
-OLD_ANSWER_KEY = REPORTS_DIRECTORY / "m3-t8.10-aligned-old23-answer-keys.json"
-NEW_ANSWER_KEY = REPORTS_DIRECTORY / "m3-t8.10-aligned-new32-answer-keys.json"
+OLD_ANSWER_KEY = BACKEND_ROOT / "data" / "cs2" / "eval-assets" / "m3-t8.10-aligned-old23-answer-keys.json"
+NEW_ANSWER_KEY = BACKEND_ROOT / "data" / "cs2" / "eval-assets" / "m3-t8.10-aligned-new32-answer-keys.json"
 _MULTI_KILL_CASE_IDS = frozenset(
     {
         "triple_kill_same_stage",
@@ -176,7 +176,7 @@ def write_assembled_prompt_report(path: Path) -> None:
     below; the report deliberately does not present them as provider usage.
     """
     cases = collect_fact_sentence_audit_cases()
-    current_prompt = load_system_prompt("inference", max_chars=20)
+    current_prompt = load_system_prompt("cs2", max_chars=20)
     old_prompt = _prompt_before_t814()
     representative_sentence = cases[0].fact_sentence
     current_tokens = _estimated_token_count(current_prompt)

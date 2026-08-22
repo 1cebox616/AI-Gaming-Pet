@@ -4,15 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+import json
 import logging
 from pathlib import Path
 import re
 
-from pet.event_card import FACT_EVENT_NAMES
-from pet.situation import SCENE_TAGS
+from pet.core.prompt import PROMPTS_DIRECTORY, vocabulary_path
 
-BACKEND_ROOT = Path(__file__).resolve().parents[2]
-VOCABULARY_PATH = BACKEND_ROOT / "prompts" / "vocabulary.md"
 MAX_CHINESE_CHARS = 30
 
 _HAN_PATTERN = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
@@ -103,14 +101,24 @@ def scene_tags(fact_sentence: str) -> str:
     return "无"
 
 
-def check_hard_violations(text: str, *, fact_sentence: str) -> HardChecks:
+def check_hard_violations(
+    text: str, *, fact_sentence: str, vocabulary_id: str | None = None
+) -> HardChecks:
     """Mark only explicit policy violations; do not grade prose quality."""
     chinese_char_count = chinese_character_count(text)
     return HardChecks(
         chinese_char_count=chinese_char_count,
         exceeds_30_chars=chinese_char_count > MAX_CHINESE_CHARS,
         unsupported_terms=tuple(term for term in UNSUPPORTED_TERMS if term in text),
-        binding_violations=_binding_violations(text, fact_sentence=fact_sentence),
+        binding_violations=_binding_violations(
+            text,
+            fact_sentence=fact_sentence,
+            bindings=(
+                VOCABULARY_BINDINGS
+                if vocabulary_id is None
+                else _bindings_for_vocabulary(vocabulary_id)
+            ),
+        ),
         economy_tier_rewrite=_economy_tier_rewrite(text, fact_sentence),
         eco_called_pistol_round="eco局" in fact_sentence and "手枪局" in text,
     )
@@ -132,14 +140,19 @@ def _economy_tier_rewrite(text: str, fact_sentence: str) -> bool:
     )
 
 
-def _binding_violations(text: str, *, fact_sentence: str) -> tuple[str, ...]:
+def _binding_violations(
+    text: str,
+    *,
+    fact_sentence: str,
+    bindings: tuple[VocabularyBinding, ...] | None,
+) -> tuple[str, ...]:
     """Apply the cached vocabulary table, with legacy checks only as fallback."""
-    if VOCABULARY_BINDINGS is None:
+    if bindings is None:
         return _fallback_binding_violations(text, fact_sentence=fact_sentence)
     return _table_binding_violations(
         text,
         fact_sentence=fact_sentence,
-        bindings=VOCABULARY_BINDINGS,
+        bindings=bindings,
     )
 
 
@@ -317,12 +330,12 @@ def _parse_binding_requirement(
         if value.startswith("事件:")
     )
     unknown_events = tuple(
-        value for value in event_conditions if value not in FACT_EVENT_NAMES
+        value for value in event_conditions if value not in _KNOWN_EVENT_NAMES
     )
     unknown_labels = tuple(
         value
         for value in conditions
-        if not value.startswith("事件:") and value not in SCENE_TAGS
+        if not value.startswith("事件:") and value not in _KNOWN_SCENE_TAGS
     )
     if not conditions or unknown_events or unknown_labels:
         raise ValueError(
@@ -343,6 +356,30 @@ def _load_vocabulary_bindings(path: Path) -> tuple[VocabularyBinding, ...] | Non
             error,
         )
         return None
+
+
+def _load_gate_requirements() -> tuple[frozenset[str], frozenset[str]]:
+    event_names: set[str] = set()
+    scene_tags: set[str] = set()
+    for path in PROMPTS_DIRECTORY.glob("*/gate-requirements.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            event_names.update(str(item) for item in data["event_names"])
+            scene_tags.update(str(item) for item in data["scene_tags"])
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
+            logger.error("Failed to parse gate requirements from %s: %s", path, error)
+    return frozenset(event_names), frozenset(scene_tags)
+
+
+def _bindings_for_vocabulary(
+    vocabulary_id: str,
+) -> tuple[VocabularyBinding, ...] | None:
+    if vocabulary_id not in _VOCABULARY_BINDINGS_BY_ID:
+        path = vocabulary_path(vocabulary_id)
+        _VOCABULARY_BINDINGS_BY_ID[vocabulary_id] = (
+            _load_vocabulary_bindings(path) if path is not None else None
+        )
+    return _VOCABULARY_BINDINGS_BY_ID[vocabulary_id]
 
 
 def _fallback_binding_violations(text: str, *, fact_sentence: str) -> tuple[str, ...]:
@@ -400,4 +437,13 @@ def _contains_any(text: str, terms: Iterable[str]) -> bool:
     return any(term.lower() in text.lower() for term in terms)
 
 
-VOCABULARY_BINDINGS = _load_vocabulary_bindings(VOCABULARY_PATH)
+_KNOWN_EVENT_NAMES, _KNOWN_SCENE_TAGS = _load_gate_requirements()
+_VOCABULARY_BINDINGS_BY_ID: dict[
+    str, tuple[VocabularyBinding, ...] | None
+] = {}
+_DEFAULT_VOCABULARIES = tuple(PROMPTS_DIRECTORY.glob("*/vocabulary.md"))
+VOCABULARY_BINDINGS = (
+    _load_vocabulary_bindings(_DEFAULT_VOCABULARIES[0])
+    if len(_DEFAULT_VOCABULARIES) == 1
+    else None
+)

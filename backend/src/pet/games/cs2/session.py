@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from pet.gsi import GameSnapshot, human_round_number
+from pet.games.cs2.gsi import GameSnapshot, human_round_number
 
 GameSessionState = Literal[
     "offline",

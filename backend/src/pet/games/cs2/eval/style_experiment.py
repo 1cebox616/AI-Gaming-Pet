@@ -8,13 +8,13 @@ from hashlib import sha256
 from pathlib import Path
 import statistics
 
-from pet.bench import FactSentenceAuditCase
-from pet.fact_sentence_audit import collect_fact_sentence_audit_cases
-from pet.hard_gate import check_hard_violations
-from pet.llm import LlmError, LlmResult, OpenRouterClient
-from pet.prompt import load_system_prompt
-from pet.style_diversity import _CASE_IDS, _percentile, _vocabulary_entries
-from pet.style_review import (
+from pet.games.cs2.eval.bench import FactSentenceAuditCase
+from pet.games.cs2.eval.fact_sentence_audit import collect_fact_sentence_audit_cases
+from pet.core.gate import check_hard_violations
+from pet.core.llm import LlmError, LlmResult, OpenRouterClient
+from pet.core.prompt import load_system_prompt
+from pet.games.cs2.eval.style_diversity import _CASE_IDS, _percentile, _vocabulary_entries
+from pet.games.cs2.eval.style_review import (
     MAX_TOKENS,
     MODEL,
     PROVIDER,
@@ -24,9 +24,9 @@ from pet.style_review import (
     _ROUND_RESULT_STYLE_EXCLUSIONS,
 )
 
-BACKEND_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_ROOT = Path(__file__).resolve().parents[5]
 REPORT_PATH = BACKEND_ROOT / "eval-reports" / "m3-t9.8-diversity-experiment.md"
-VOCABULARY_PATH = BACKEND_ROOT / "prompts" / "vocabulary.md"
+VOCABULARY_PATH = BACKEND_ROOT / "prompts" / "cs2" / "vocabulary.md"
 DIVERSITY_SUFFIX = "同一种场合有很多种说法，词库里给了不止一个选择。\n不要每次都用最顺手的那句，换着说。"
 
 
@@ -83,7 +83,7 @@ class GroupResult:
 
 def _runtime_prompt(group: ExperimentGroup) -> str:
     """Append only the specified experiment instruction, without editing prompt files."""
-    prompt = load_system_prompt("inference", max_chars=30)
+    prompt = load_system_prompt("cs2", max_chars=30)
     return f"{prompt}\n{DIVERSITY_SUFFIX}" if group.append_diversity_instruction else prompt
 
 

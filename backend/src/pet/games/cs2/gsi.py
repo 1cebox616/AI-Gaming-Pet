@@ -18,8 +18,8 @@ from typing import Any, Literal
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
-from pet.config import GsiConfig
-from pet.network import HOST, PORT
+from pet.core.adapter_api import BACKEND_HTTP_ORIGIN
+from pet.core.config import GsiConfig
 
 if sys.platform == "win32":
     import winreg
@@ -29,10 +29,10 @@ _WARNED_TYPE_PATHS: set[tuple[str, str]] = set()
 
 GSI_CONFIG_FILENAME = "gamestate_integration_ai_gaming_pet.cfg"
 GSI_APP_ID = "730"
-GSI_ENDPOINT = f"http://{HOST}:{PORT}/gsi"
+GSI_ENDPOINT = f"{BACKEND_HTTP_ORIGIN}/gsi"
 GSI_SILENCE_SECONDS = 60.0
 GSI_SUMMARY_INTERVAL_SECONDS = 1.0
-RECORDINGS_DIRECTORY = Path(__file__).resolve().parents[2] / "recordings"
+RECORDINGS_DIRECTORY = Path(__file__).resolve().parents[4] / "recordings"
 GSI_CONFIG_CONTENT = f'''"AI Gaming Pet"
 {{
     "uri" "{GSI_ENDPOINT}"

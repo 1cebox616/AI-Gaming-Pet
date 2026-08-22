@@ -8,8 +8,8 @@ import logging
 import re
 from typing import Literal
 
-from pet.gsi import GameSnapshot, WeaponSlot, human_round_number
-from pet.session import GameState
+from pet.games.cs2.gsi import GameSnapshot, WeaponSlot, human_round_number
+from pet.games.cs2.session import GameState
 
 # Thirty health is the common CS threshold where one more solid hit is lethal.
 LOW_HEALTH_THRESHOLD = 30

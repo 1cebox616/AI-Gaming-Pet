@@ -1,35 +1,23 @@
-"""Local HTTP entry point for the AI Gaming Pet backend."""
+"""Local HTTP entry point and game-independent application assembly."""
 
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-import logging
-import time
-
 from importlib.metadata import version
+import logging
 
-from fastapi import FastAPI, Request, WebSocket, status
+from fastapi import FastAPI, WebSocket, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
-from pet.bridge import PetBridge
-from pet.commentary import CommentaryGenerator
-from pet.config import load_config
-from pet.events import EventDetector
-from pet.gsi import (
-    GSI_SILENCE_SECONDS,
-    GameSnapshot,
-    GsiAck,
-    GsiService,
-    ensure_gsi_config,
-)
-from pet.network import HOST, PORT
-from pet.online_commentary import OnlineCommentaryRuntime
-from pet.policy import SpeechPolicy
-from pet.session import GameSessionTracker, MatchLifecycleTracker
-from pet.situation import SituationTracker
-from pet.speech import SpeechService
+from pet.core.adapter_api import CoreServices, GameAdapter, GameStatus, PORT_VERSION
+from pet.core.bridge import PetBridge
+from pet.core.config import load_config
+from pet.core.network import HOST, PORT
+from pet.core.speaker import OnlineCommentaryRuntime
+from pet.core.speech import SpeechService
+from pet.games import built_in_adapters
 
 PACKAGE_NAME = "pet"
 PET_LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
@@ -47,10 +35,8 @@ def configure_pet_logging() -> None:
     pet_logger = logging.getLogger("pet")
     pet_logger.setLevel(logging.INFO)
     pet_logger.propagate = False
-
     if any(handler.name == "pet-console" for handler in pet_logger.handlers):
         return
-
     handler = logging.StreamHandler()
     handler.name = "pet-console"
     handler.setFormatter(logging.Formatter(PET_LOG_FORMAT))
@@ -64,136 +50,62 @@ class HealthResponse(BaseModel):
     version: str
 
 
+def _load_adapter() -> GameAdapter:
+    game_id = configuration.active.game
+    factory = built_in_adapters().get(game_id)
+    game_configuration = configuration.games.get(game_id)
+    if factory is None or game_configuration is None:
+        logger.error("active game adapter %r is not installed", game_id)
+        raise RuntimeError(f"active game adapter is not installed: {game_id}")
+    loaded = factory(game_configuration)
+    if loaded.port_version != PORT_VERSION:
+        logger.error(
+            "adapter %s uses port v%s; core requires port v%s",
+            loaded.adapter_id,
+            loaded.port_version,
+            PORT_VERSION,
+        )
+        raise RuntimeError(f"adapter port version mismatch: {loaded.adapter_id}")
+    return loaded
+
+
 configure_pet_logging()
 configuration = load_config()
+adapter = _load_adapter()
 speech_service = SpeechService(configuration.speech)
 pet_bridge = PetBridge(
     speech_service,
     configuration.idle,
+    initial_game=GameStatus(
+        game_id=adapter.adapter_id,
+        state="offline",
+        summary={},
+    ),
     personality_style=configuration.personality.style,
 )
-game_session_tracker = GameSessionTracker(offline_timeout_seconds=GSI_SILENCE_SECONDS)
-
-
-class GameSnapshotProcessor:
-    """Orchestrate the production fact-to-delivery chain for live snapshots."""
-
-    def __init__(
-        self,
-        bridge: PetBridge,
-        session: GameSessionTracker,
-        detector: EventDetector,
-        situation: SituationTracker,
-        policy: SpeechPolicy,
-        generator: CommentaryGenerator,
-        online_runtime: OnlineCommentaryRuntime | None = None,
-    ) -> None:
-        self._bridge = bridge
-        self._session = session
-        self._lifecycle = MatchLifecycleTracker()
-        self._detector = detector
-        self._situation = situation
-        self._policy = policy
-        self._generator = generator
-        self._online_runtime = online_runtime
-
-    async def observe(self, snapshot: GameSnapshot) -> None:
-        """Advance facts always, then spend policy quota only for live consumers."""
-        game = self._session.observe(snapshot)
-        if self._lifecycle.observe(game):
-            self._detector.reset()
-            self._situation.reset()
-            self._policy.reset()
-            if self._online_runtime is not None:
-                await self._online_runtime.reset_match()
-
-        round_situation = self._situation.observe(snapshot, game)
-        self._policy.observe_snapshot(snapshot)
-        events = self._detector.observe(snapshot, game)
-        await self._bridge.update_game(game)
-        if not self._bridge.has_consumers():
-            return
-
-        policy_batch = self._policy.decide(
-            events,
-            game,
-            now=snapshot.ts,
-            muted=self._bridge.is_muted(),
-        )
-        if policy_batch.selected_event is None:
-            return
-        if self._online_runtime is not None:
-            await self._online_runtime.submit(
-                snapshot,
-                game,
-                round_situation,
-                policy_batch.selected_event,
-            )
-            return
-        utterance = self._generator.generate(policy_batch.selected_event, map_name=snapshot.map_name)
-        await self._bridge.broadcast_commentary(utterance)
-
-    async def mark_offline(self, *, now: float) -> None:
-        """Reset per-match state when GSI silence transitions the session offline."""
-        game = self._session.current(now=now)
-        if self._lifecycle.observe(game):
-            self._detector.reset()
-            self._situation.reset()
-            self._policy.reset()
-            if self._online_runtime is not None:
-                await self._online_runtime.reset_match()
-        await self._bridge.update_game(game)
-
-
-commentary_generator = CommentaryGenerator(personality_style=configuration.personality.style)
-online_commentary_runtime = OnlineCommentaryRuntime(
-    configuration.llm,
-    pet_bridge,
-    commentary_generator,
-)
-pet_bridge.set_llm_state_provider(online_commentary_runtime.state)
-
-game_snapshot_processor = GameSnapshotProcessor(
-    pet_bridge,
-    game_session_tracker,
-    EventDetector(configuration.events),
-    SituationTracker(),
-    SpeechPolicy(configuration.policy),
-    commentary_generator,
-    online_commentary_runtime,
-)
-
-
-async def observe_gsi_snapshot(snapshot: GameSnapshot) -> None:
-    """Interpret one GSI snapshot and synchronize connected desktop clients."""
-    await game_snapshot_processor.observe(snapshot)
-
-
-async def mark_gsi_offline() -> None:
-    """Publish offline after the GSI heartbeat silence window expires."""
-    await game_snapshot_processor.mark_offline(now=time.time())
-
-
-gsi_service = GsiService(
-    configuration.gsi,
-    snapshot_listener=observe_gsi_snapshot,
-    offline_listener=mark_gsi_offline,
+speaker = OnlineCommentaryRuntime(configuration.llm, pet_bridge)
+pet_bridge.set_llm_state_provider(speaker.state)
+core_services = CoreServices(
+    submit_speech=speaker.submit,
+    publish_status=pet_bridge.update_game,
+    can_submit_speech=pet_bridge.has_consumers,
+    speech_is_muted=pet_bridge.is_muted,
+    reset_speech_session=speaker.reset_match,
 )
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Load the local voice before accepting desktop-pet connections."""
-    await asyncio.to_thread(ensure_gsi_config)
+    """Start core services and the configured adapter in dependency order."""
     await asyncio.to_thread(speech_service.load)
     await pet_bridge.start_idle_broadcasts()
-    await online_commentary_runtime.start()
-    await gsi_service.start()
+    await speaker.start()
+    await adapter.start(core_services)
     try:
         yield
     finally:
-        await gsi_service.shutdown()
-        await online_commentary_runtime.shutdown()
+        await adapter.stop()
+        await speaker.shutdown()
         await pet_bridge.shutdown()
         speech_service.shutdown()
 
@@ -205,18 +117,14 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=[],
 )
+if adapter.http_router is not None:
+    app.include_router(adapter.http_router)
 
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     """Return the installed project's health and metadata version."""
     return HealthResponse(status="ok", version=version(PACKAGE_NAME))
-
-
-@app.post("/gsi", response_model=GsiAck)
-async def receive_gsi(request: Request) -> GsiAck:
-    """Accept one CS2 Game State Integration update."""
-    return await gsi_service.receive(request)
 
 
 @app.websocket("/ws")
@@ -227,7 +135,6 @@ async def pet_websocket(websocket: WebSocket) -> None:
         logger.warning("rejecting pet WebSocket connection from origin %r", origin)
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
-
     await pet_bridge.serve(websocket)
 
 

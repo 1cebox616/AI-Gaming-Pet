@@ -6,7 +6,9 @@ from collections.abc import Mapping
 import random
 from typing import Any
 
-from pet.commentary_templates import (
+from pydantic import BaseModel, Field
+
+from pet.games.cs2.template_lines import (
     COMMENTARY_TEMPLATES,
     EQUIP_DETAIL_FORMAT,
     KILL_DETAIL_FORMAT,
@@ -15,11 +17,19 @@ from pet.commentary_templates import (
     SURVIVAL_DETAIL_FORMAT,
     CommentaryCategory,
     CommentaryTemplate,
+    Emotion,
 )
-from pet.commentary_rules import WIN_METHOD_LABELS
-from pet.config import PersonalityStyle
-from pet.events import EventType, GameEvent
-from pet.lines import Utterance
+from pet.games.cs2.template_rules import WIN_METHOD_LABELS
+from pet.core.config import PersonalityStyle
+from pet.games.cs2.events import EventType, GameEvent
+
+
+class TemplateUtterance(BaseModel):
+    """Adapter-local template output used to build a core SpeechRequest."""
+
+    id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    emotion: Emotion
 
 _MULTI_CATEGORIES: dict[int | None, CommentaryCategory] = {
     2: "multi_2",
@@ -90,7 +100,9 @@ class CommentaryGenerator:
         self._templates = COMMENTARY_TEMPLATES[personality_style]
         self._last_templates: dict[CommentaryCategory, CommentaryTemplate] = {}
 
-    def generate(self, event: GameEvent, *, map_name: str | None = None) -> Utterance:
+    def generate(
+        self, event: GameEvent, *, map_name: str | None = None
+    ) -> TemplateUtterance:
         """Generate one valid utterance without exposing missing or raw method values."""
         category = commentary_category(event)
         templates = templates_for_map(self._templates[category], map_name)
@@ -101,7 +113,7 @@ class CommentaryGenerator:
         template_index = self._choose_template_index(category, templates)
         template = templates[template_index]
         text = template.text.format_map(_template_context(event))
-        return Utterance(
+        return TemplateUtterance(
             id=f"game-{event.id}",
             text=text,
             emotion=template.emotion,

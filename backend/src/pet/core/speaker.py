@@ -7,18 +7,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import logging
 
-from pet.bridge import LlmRuntimeStateMessage, PetBridge
-from pet.commentary import CommentaryGenerator
-from pet.config import LlmConfig
-from pet.event_card import render_fact_sentence
-from pet.events import GameEvent
-from pet.gsi import GameSnapshot
-from pet.hard_gate import check_hard_violations
-from pet.lines import Utterance
-from pet.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
-from pet.prompt import load_system_prompt
-from pet.session import GameState
-from pet.situation import RoundSituation
+from pet.core.adapter_api import SpeechRequest
+from pet.core.bridge import LlmRuntimeStateMessage, PetBridge
+from pet.core.config import LlmConfig
+from pet.core.gate import check_hard_violations
+from pet.core.lines import Utterance
+from pet.core.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
+from pet.core.prompt import load_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +25,7 @@ MAX_CONSECUTIVE_LLM_FAILURES = 3
 @dataclass(frozen=True, slots=True)
 class _Request:
     generation: int
-    event: GameEvent
-    map_name: str | None
-    fact_sentence: str
+    speech: SpeechRequest
 
 
 class OnlineCommentaryRuntime:
@@ -42,19 +35,18 @@ class OnlineCommentaryRuntime:
         self,
         configuration: LlmConfig,
         bridge: PetBridge,
-        generator: CommentaryGenerator,
         *,
         client_factory: Callable[[float], LlmClientProtocol] | None = None,
     ) -> None:
         self._configuration = configuration
         self._bridge = bridge
-        self._generator = generator
         self._client_factory = client_factory or (
             lambda timeout_seconds: OpenRouterClient.from_env(
                 timeout_seconds=timeout_seconds
             )
         )
         self._client: LlmClientProtocol | None = None
+        self._profile_clients: dict[str, LlmClientProtocol] = {}
         self._queue: asyncio.Queue[_Request | None] | None = None
         self._worker: asyncio.Task[None] | None = None
         self._generation = 0
@@ -103,6 +95,11 @@ class OnlineCommentaryRuntime:
         if callable(close):
             await asyncio.to_thread(close)
         self._client = None
+        for profile_client in self._profile_clients.values():
+            profile_close = getattr(profile_client, "close", None)
+            if callable(profile_close):
+                await asyncio.to_thread(profile_close)
+        self._profile_clients.clear()
 
     async def reset_match(self) -> None:
         """Permit another attempt next match and prevent old work from speaking late."""
@@ -113,25 +110,12 @@ class OnlineCommentaryRuntime:
             self._reason = ""
         await self._bridge.publish_runtime_state()
 
-    async def submit(
-        self,
-        snapshot: GameSnapshot,
-        game: GameState,
-        round_situation: RoundSituation,
-        event: GameEvent,
-    ) -> None:
-        """Render immutable facts now, then enqueue model work or use the template."""
+    async def submit(self, request: SpeechRequest) -> None:
+        """Enqueue one immutable adapter request or speak its template fallback."""
         if self._mode != "ai" or self._queue is None:
-            await self._fallback(event, snapshot.map_name)
+            await self._fallback(request)
             return
-        self._queue.put_nowait(
-            _Request(
-                generation=self._generation,
-                event=event,
-                map_name=snapshot.map_name,
-                fact_sentence=render_fact_sentence(snapshot, game, round_situation, event),
-            )
-        )
+        self._queue.put_nowait(_Request(generation=self._generation, speech=request))
 
     async def _run(self) -> None:
         assert self._queue is not None
@@ -142,22 +126,34 @@ class OnlineCommentaryRuntime:
             await self._complete(request)
 
     async def _complete(self, request: _Request) -> None:
-        client = self._client
-        if client is None or request.generation != self._generation:
+        if request.generation != self._generation:
+            return
+        configuration = _request_configuration(
+            self._configuration, request.speech.llm_profile
+        )
+        if not configuration.enabled or not configuration.model.strip():
+            await self._fallback(request.speech)
+            return
+        try:
+            client = self._client_for(request.speech.llm_profile, configuration)
+        except LlmError as error:
+            await self._failed(request, str(error))
             return
         self._call_count += 1
         try:
             result = await asyncio.to_thread(
                 client.complete,
-                model=self._configuration.model,
-                provider=self._configuration.provider or None,
-                system_prompt=load_system_prompt("inference", max_chars=30),
-                user_prompt=request.fact_sentence,
-                max_tokens=self._configuration.max_tokens,
-                temperature=self._configuration.temperature,
+                model=configuration.model,
+                provider=configuration.provider or None,
+                system_prompt=load_system_prompt(
+                    request.speech.vocabulary_id, max_chars=30
+                ),
+                user_prompt=request.speech.fact_text,
+                max_tokens=configuration.max_tokens,
+                temperature=configuration.temperature,
                 reasoning_effort="none",
             )
-            text = _validated_text(result, request.fact_sentence)
+            text = _validated_text(result, request.speech)
         except (LlmError, ValueError) as error:
             if request.generation == self._generation:
                 await self._failed(request, str(error))
@@ -175,9 +171,24 @@ class OnlineCommentaryRuntime:
             self._cost_usd += result.usage.cost_usd
         self._consecutive_failures = 0
         await self._bridge.broadcast_commentary(
-            Utterance(id=f"llm-{request.event.id}", text=text, emotion="neutral")
+            Utterance(
+                id=f"llm-{request.speech.request_id}", text=text, emotion="neutral"
+            )
         )
         await self._bridge.publish_runtime_state()
+
+    def _client_for(
+        self, profile_id: str | None, configuration: LlmConfig
+    ) -> LlmClientProtocol:
+        if profile_id is None or profile_id not in self._configuration.profiles:
+            if self._client is None:
+                raise LlmError("模型客户端不可用")
+            return self._client
+        client = self._profile_clients.get(profile_id)
+        if client is None:
+            client = self._client_factory(configuration.timeout_seconds)
+            self._profile_clients[profile_id] = client
+        return client
 
     async def _failed(self, request: _Request, reason: str) -> None:
         self._consecutive_failures += 1
@@ -185,12 +196,18 @@ class OnlineCommentaryRuntime:
             self._mode = "template"
             self._reason = "连续失败"
         logger.warning("live LLM output discarded; using template: %s", reason)
-        await self._fallback(request.event, request.map_name)
+        await self._fallback(request.speech)
         await self._bridge.publish_runtime_state()
 
-    async def _fallback(self, event: GameEvent, map_name: str | None) -> None:
+    async def _fallback(self, request: SpeechRequest) -> None:
+        if request.fallback_text is None:
+            return
         await self._bridge.broadcast_commentary(
-            self._generator.generate(event, map_name=map_name)
+            Utterance(
+                id=f"template-{request.request_id}",
+                text=request.fallback_text,
+                emotion=request.fallback_emotion or "neutral",
+            )
         )
 
 
@@ -202,11 +219,27 @@ def _configuration_reason(configuration: LlmConfig) -> str:
     return ""
 
 
-def _validated_text(result: LlmResult, fact_sentence: str) -> str:
+def _request_configuration(
+    configuration: LlmConfig, profile_id: str | None
+) -> LlmConfig:
+    if profile_id is None:
+        return configuration
+    profile = configuration.profiles.get(profile_id)
+    if profile is None:
+        logger.warning("unknown LLM profile %r; using the default profile", profile_id)
+        return configuration
+    return configuration.model_copy(update=profile.model_dump(exclude_none=True))
+
+
+def _validated_text(result: LlmResult, request: SpeechRequest) -> str:
     text = result.text.strip()
     if not text:
         raise ValueError("模型返回为空")
-    checks = check_hard_violations(text, fact_sentence=fact_sentence)
+    checks = check_hard_violations(
+        text,
+        fact_sentence=request.fact_text,
+        vocabulary_id=request.vocabulary_id,
+    )
     if checks.exceeds_30_chars:
         raise ValueError(f"模型输出超过 30 个汉字；原文={text}")
     if checks.unsupported_terms:

@@ -3,8 +3,9 @@
 from dataclasses import dataclass
 from typing import Literal
 
-from pet.config import PersonalityStyle
-from pet.lines import Emotion
+from pet.core.config import PersonalityStyle
+
+Emotion = Literal["neutral", "happy", "angry", "surprised", "speechless"]
 
 CommentaryCategory = Literal[
     "kill",

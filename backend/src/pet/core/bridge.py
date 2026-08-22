@@ -12,10 +12,10 @@ from typing import Any, Literal
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from pet.config import IdleConfig, PersonalityStyle
-from pet.lines import Utterance, next_idle_utterance
-from pet.session import GameState
-from pet.speech import SpeechService
+from pet.core.adapter_api import GameStatus
+from pet.core.config import IdleConfig, PersonalityStyle
+from pet.core.lines import Utterance, next_idle_utterance
+from pet.core.speech import SpeechService
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class BridgeStateMessage(BaseModel):
     type: Literal["state"] = STATE_MESSAGE_TYPE
     speech_enabled: bool
     muted: bool
-    game: GameState
+    game: GameStatus
     llm: "LlmRuntimeStateMessage | None" = None
 
 
@@ -55,7 +55,7 @@ class PetBridge:
         self,
         speech_service: SpeechService,
         idle_configuration: IdleConfig | None = None,
-        initial_game: GameState | None = None,
+        initial_game: GameStatus | None = None,
         personality_style: PersonalityStyle = "brother",
         llm_state_provider: Callable[[], LlmRuntimeStateMessage] | None = None,
     ) -> None:
@@ -67,7 +67,9 @@ class PetBridge:
         self._idle_reset_event: asyncio.Event | None = None
         self._speech_enabled = speech_service.is_enabled()
         self._muted = not self._idle_configuration.enabled
-        self._game = initial_game or GameState.offline()
+        self._game = initial_game or GameStatus(
+            game_id="", state="offline", summary={}
+        )
         self._last_game_broadcast_at = float("-inf")
         self._pending_game_broadcast: asyncio.Task[None] | None = None
         self._utterance_broadcast_lock = asyncio.Lock()
@@ -186,7 +188,7 @@ class PetBridge:
                 reason = (
                     "the runtime switch"
                     if self._muted
-                    else f"CS2 state {self._game.state}"
+                    else f"game state {self._game.state}"
                 )
                 logger.info("automatic idle speech is paused by %s", reason)
                 await reset_event.wait()
@@ -232,8 +234,9 @@ class PetBridge:
         self._last_game_broadcast_at = asyncio.get_running_loop().time()
         await self._broadcast_state()
 
-    async def update_game(self, game: GameState) -> None:
+    async def update_game(self, game: GameStatus | BaseModel) -> None:
         """Publish meaningful game changes and coalesce round/score progress."""
+        game = _normalize_game_status(game, fallback_game_id=self._game.game_id)
         previous = self._game
         if game == previous:
             return
@@ -244,7 +247,7 @@ class PetBridge:
         if not self._connections:
             return
 
-        if _only_round_or_score_changed(previous, game):
+        if _only_summary_changed(previous, game):
             now = asyncio.get_running_loop().time()
             remaining = GAME_PROGRESS_BROADCAST_INTERVAL_SECONDS - (
                 now - self._last_game_broadcast_at
@@ -382,8 +385,26 @@ class PetBridge:
         await websocket.send_json(payload)
 
 
-def _only_round_or_score_changed(previous: GameState, current: GameState) -> bool:
-    progress_fields = {"round", "score_ct", "score_t"}
-    previous_without_progress = previous.model_dump(exclude=progress_fields)
-    current_without_progress = current.model_dump(exclude=progress_fields)
-    return previous_without_progress == current_without_progress
+def _only_summary_changed(previous: GameStatus, current: GameStatus) -> bool:
+    """Coalesce adapter-owned display progress without interpreting its keys."""
+    return (
+        previous.game_id == current.game_id
+        and previous.state == current.state
+        and previous.summary != current.summary
+    )
+
+
+def _normalize_game_status(
+    game: GameStatus | BaseModel, *, fallback_game_id: str
+) -> GameStatus:
+    """Normalize legacy in-process status models at the bridge boundary."""
+    if isinstance(game, GameStatus):
+        return game
+    payload = game.model_dump()
+    state = str(payload.pop("state", "offline"))
+    summary = {
+        key: value
+        for key, value in payload.items()
+        if value is None or isinstance(value, (str, int)) and not isinstance(value, bool)
+    }
+    return GameStatus(game_id=fallback_game_id, state=state, summary=summary)

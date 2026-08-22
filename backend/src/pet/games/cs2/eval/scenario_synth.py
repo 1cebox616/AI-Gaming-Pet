@@ -12,21 +12,21 @@ from pathlib import Path
 import re
 from typing import Any, Literal, TypeAlias, cast
 
-from pet.bench import BenchEvent, run_bench
-from pet.events import EventType
-from pet.gsi import GSI_SILENCE_SECONDS
-from pet.replay import load_recording
-from pet.session import GameSessionTracker, MatchLifecycleTracker
-from pet.situation import SituationTracker, TimelineKind
+from pet.games.cs2.eval.bench import BenchEvent, run_bench
+from pet.games.cs2.events import EventType
+from pet.games.cs2.gsi import GSI_SILENCE_SECONDS
+from pet.games.cs2.eval.replay import load_recording
+from pet.games.cs2.session import GameSessionTracker, MatchLifecycleTracker
+from pet.games.cs2.situation import SituationTracker, TimelineKind
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 ScenarioCategory = Literal["甲", "乙", "丙", "丁"]
 MutationOperation = Literal["set", "delete"]
 
-BACKEND_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_ROOT = Path(__file__).resolve().parents[5]
 RECORDINGS_DIRECTORY = BACKEND_ROOT / "recordings"
-SCENARIOS_DIRECTORY = BACKEND_ROOT / "scenarios"
-EVAL_ASSETS_DIRECTORY = BACKEND_ROOT / "eval-assets"
+SCENARIOS_DIRECTORY = BACKEND_ROOT / "data" / "cs2" / "scenarios"
+EVAL_ASSETS_DIRECTORY = BACKEND_ROOT / "data" / "cs2" / "eval-assets"
 EVAL_REPORTS_DIRECTORY = BACKEND_ROOT / "eval-reports"
 OBSERVED_CONSTRAINTS_PATH = EVAL_ASSETS_DIRECTORY / "m3-t6-observed-constraints.json"
 INVENTORY_PATHS = (

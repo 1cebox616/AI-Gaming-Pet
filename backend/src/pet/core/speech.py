@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Callable
 
-from pet.config import SpeechConfig
+from pet.core.config import SpeechConfig
 
 POWERSHELL_EXECUTABLE = "powershell.exe"
 POWERSHELL_TIMEOUT_SECONDS = 15

@@ -6,14 +6,14 @@ from pathlib import Path
 import re
 import statistics
 
-from pet.fact_sentence_audit import collect_fact_sentence_audit_cases
-from pet.llm import OpenRouterClient
-from pet.prompt import load_system_prompt
-from pet.style_review import MAX_TOKENS, MODEL, PROVIDER, REASONING_EFFORT
+from pet.games.cs2.eval.fact_sentence_audit import collect_fact_sentence_audit_cases
+from pet.core.llm import OpenRouterClient
+from pet.core.prompt import load_system_prompt
+from pet.games.cs2.eval.style_review import MAX_TOKENS, MODEL, PROVIDER, REASONING_EFFORT
 
-BACKEND_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_ROOT = Path(__file__).resolve().parents[5]
 REPORT_PATH = BACKEND_ROOT / "eval-reports" / "m3-t9.7-diversity.md"
-VOCABULARY_PATH = BACKEND_ROOT / "prompts" / "vocabulary.md"
+VOCABULARY_PATH = BACKEND_ROOT / "prompts" / "cs2" / "vocabulary.md"
 _CASE_IDS = (
     "gsi-20260811-223119-169538:002:kill:r5",
     "gsi-20260811-223119-169538:014:kill_headshot:r3",
@@ -31,7 +31,7 @@ _CASE_IDS = (
 def main() -> None:
     """Call the authorized model fifty times without a seed and write raw outputs."""
     cases = {case.case_id: case for case in collect_fact_sentence_audit_cases()}
-    prompt = load_system_prompt("inference", max_chars=30)
+    prompt = load_system_prompt("cs2", max_chars=30)
     client = OpenRouterClient.from_env(timeout_seconds=10.0)
     outputs: list[str] = []
     prompt_tokens: list[int] = []

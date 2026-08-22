@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from pet.config import PersonalityStyle
+from pet.core.config import PersonalityStyle
 
 Emotion = Literal["neutral", "happy", "angry", "surprised", "speechless"]
 

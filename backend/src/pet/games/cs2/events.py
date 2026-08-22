@@ -7,9 +7,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from pet.config import EventsConfig
-from pet.gsi import GameSnapshot, RoundWin, human_round_number
-from pet.session import GameState
+from pet.core.config import EventsConfig
+from pet.games.cs2.gsi import GameSnapshot, RoundWin, human_round_number
+from pet.games.cs2.session import GameState
 
 EventType = Literal[
     "kill",

@@ -9,18 +9,18 @@ from hashlib import sha256
 from pathlib import Path
 import statistics
 
-from pet.bench import FactSentenceAuditCase
-from pet.fact_sentence_audit import collect_fact_sentence_audit_cases
-from pet.hard_gate import (
+from pet.games.cs2.eval.bench import FactSentenceAuditCase
+from pet.games.cs2.eval.fact_sentence_audit import collect_fact_sentence_audit_cases
+from pet.core.gate import (
     HardChecks,
     VOCABULARY_BINDINGS,
     check_hard_violations,
     scene_tags,
 )
-from pet.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
-from pet.prompt import load_system_prompt
+from pet.core.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
+from pet.core.prompt import load_system_prompt
 
-BACKEND_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_ROOT = Path(__file__).resolve().parents[5]
 DEFAULT_REPORT_PATH = BACKEND_ROOT / "eval-reports" / "m3-t9.7-style-review.md"
 MODEL = "qwen/qwen3.5-122b-a10b"
 PROVIDER = "Alibaba"
@@ -99,7 +99,7 @@ class StyleReview:
 
 def run_style_review(client: LlmClientProtocol) -> StyleReview:
     """Call each frozen fact sentence once at each requested temperature."""
-    prompt = load_system_prompt("inference", max_chars=30)
+    prompt = load_system_prompt("cs2", max_chars=30)
     cases = tuple(
         case
         for case in collect_fact_sentence_audit_cases()

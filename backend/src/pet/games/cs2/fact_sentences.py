@@ -9,11 +9,11 @@ import logging
 import re
 from typing import Any
 
-from pet.commentary_rules import WIN_METHOD_LABELS
-from pet.events import EventType, GameEvent
-from pet.gsi import GameSnapshot, WeaponSlot, human_round_number
-from pet.session import GameState
-from pet.situation import (
+from pet.games.cs2.template_rules import WIN_METHOD_LABELS
+from pet.games.cs2.events import EventType, GameEvent
+from pet.games.cs2.gsi import GameSnapshot, WeaponSlot, human_round_number
+from pet.games.cs2.session import GameState
+from pet.games.cs2.situation import (
     RoundSituation,
     BURN_BAD_LUCK_DAMAGE,
     DEATH_COMBAT_WINDOW_SECONDS,
