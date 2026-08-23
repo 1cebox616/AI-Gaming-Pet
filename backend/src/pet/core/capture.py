@@ -42,6 +42,10 @@ DEFAULT_MAX_FILES = 500
 DEFAULT_MAX_BYTES = 200 * 1024 * 1024
 FOREGROUND_SELECTION_DELAY_SECONDS = 3
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+# zbl 0.7.1 buffers 32 source frames and drops newly arrived frames when that
+# queue is full. Draining at most twice that bound handles one concurrent
+# refill without allowing a hot producer to keep a poll inside this loop.
+MAX_DRAINED_SOURCE_FRAMES_PER_POLL = 64
 
 
 class CaptureError(RuntimeError):
@@ -66,6 +70,7 @@ class FrameMetadata:
     captured_at: datetime
     width: int
     height: int
+    source_frames_drained: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +91,7 @@ class _CaptureSession(Protocol):
 
     def __exit__(self, *args: object) -> None: ...
 
-    def grab(self) -> npt.NDArray[np.uint8]: ...
+    def try_grab(self) -> npt.NDArray[np.uint8] | None: ...
 
 
 def _is_windows() -> bool:
@@ -263,16 +268,35 @@ class WindowsGraphicsCaptureBackend:
     def target(self) -> WindowTarget:
         return self._target
 
-    def capture_frame(self) -> CapturedFrame:
-        """Copy the next WGC frame so its bitmap outlives the native buffer."""
+    def capture_frame(self) -> CapturedFrame | None:
+        """Return the newest queued WGC frame without ever waiting for one.
+
+        zbl's blocking ``grab`` busy-waits while its queue is empty. Its
+        bounded FIFO also drops newly arriving frames when full, so reading one
+        item per slow probe poll can return stale history. Drain the bounded
+        queue non-blockingly and retain only its newest available frame.
+        """
         if self._session is None:
             raise CaptureError("截屏会话已经关闭；请重新启动探针")
         try:
-            raw = np.asarray(self._session.grab(), dtype=np.uint8).copy()
+            latest: npt.NDArray[np.uint8] | None = None
+            source_frames_drained = 0
+            while source_frames_drained < MAX_DRAINED_SOURCE_FRAMES_PER_POLL:
+                candidate = self._session.try_grab()
+                if candidate is None:
+                    break
+                latest = candidate
+                source_frames_drained += 1
         except StopIteration as error:
             raise CaptureError("目标窗口已关闭，截屏会话随之结束") from error
         except Exception as error:
             raise CaptureError(f"抓取目标窗口失败：{error}") from error
+        if latest is None:
+            return None
+
+        # The array points at zbl's reusable native staging texture. Own the
+        # newest contents before another source frame can overwrite it.
+        raw = np.asarray(latest, dtype=np.uint8).copy()
         if raw.ndim != 3 or raw.shape[2] != 4 or raw.size == 0:
             raise CaptureError(
                 f"WGC 返回了无法识别的位图形状 {raw.shape}；请记录游戏和显示模式"
@@ -292,6 +316,7 @@ class WindowsGraphicsCaptureBackend:
                 captured_at=datetime.now(timezone.utc),
                 width=bitmap.width,
                 height=bitmap.height,
+                source_frames_drained=source_frames_drained,
             ),
         )
 
@@ -584,7 +609,11 @@ class CaptureArchive:
 class ProbeStatistics:
     """In-memory counters printed when the foreground probe exits."""
 
+    poll_count: int = 0
     captured_count: int = 0
+    unavailable_count: int = 0
+    source_frames_drained: int = 0
+    max_source_frames_drained: int = 0
     saved_count: int = 0
     forced_saved_count: int = 0
     capture_durations: list[float] = field(default_factory=list)
@@ -706,6 +735,10 @@ CSV_HEADER = (
     "是否强制落盘",
     "本次落盘文件名",
     "本次指标计算耗时毫秒",
+    "是否取得画面",
+    "本次取出源帧数",
+    "本次抓帧耗时毫秒",
+    "截屏状态",
 )
 
 
@@ -730,6 +763,9 @@ class MetricsCsvWriter:
         forced: bool,
         saved_filename: str,
         duration_ms: float,
+        *,
+        source_frames_drained: int = 1,
+        capture_duration_ms: float = 0.0,
     ) -> None:
         previous = comparisons.vs_previous
         baseline = comparisons.vs_baseline
@@ -748,6 +784,41 @@ class MetricsCsvWriter:
                 "是" if forced else "否",
                 saved_filename,
                 f"{duration_ms:.3f}",
+                "是",
+                source_frames_drained,
+                f"{capture_duration_ms:.3f}",
+                "正常",
+            )
+        )
+        self._file.flush()
+
+    def write_unavailable(
+        self,
+        sequence: int,
+        attempted_at: datetime,
+        window_title: str,
+        capture_duration_ms: float,
+    ) -> None:
+        """Record and flush a poll where WGC had no frame ready."""
+        self._writer.writerow(
+            (
+                sequence,
+                attempted_at.isoformat(),
+                window_title,
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "否",
+                "否",
+                "",
+                "",
+                "否",
+                0,
+                f"{capture_duration_ms:.3f}",
+                "WGC 暂无新帧",
             )
         )
         self._file.flush()
@@ -887,7 +958,11 @@ def _build_summary(
     }
     metric_timing = _distribution(statistics_.metric_durations_ms)
     return {
-        "总轮询数": statistics_.captured_count,
+        "总轮询数": statistics_.poll_count,
+        "成功抓帧数": statistics_.captured_count,
+        "无新帧轮询数": statistics_.unavailable_count,
+        "累计取出源帧数": statistics_.source_frames_drained,
+        "单次最多取出源帧数": statistics_.max_source_frames_drained,
         "落盘次数": statistics_.saved_count,
         "强制落盘次数": statistics_.forced_saved_count,
         "当前保留张数": archive.retained_count,
@@ -910,7 +985,14 @@ def _build_summary(
 
 def _print_summary(summary: dict[str, object]) -> None:
     print("\n截屏探针汇总")
-    print(f"抓帧数：{summary['总轮询数']}")
+    print(
+        f"轮询数：{summary['总轮询数']}（成功抓帧 {summary['成功抓帧数']}；"
+        f"无新帧 {summary['无新帧轮询数']}）"
+    )
+    print(
+        f"WGC 源帧：累计取出 {summary['累计取出源帧数']}；"
+        f"单次最多 {summary['单次最多取出源帧数']}"
+    )
     print(
         f"落盘数：{summary['落盘次数']}（强制 {summary['强制落盘次数']}；"
         f"当前保留 {summary['当前保留张数']} 张，"
@@ -1012,12 +1094,39 @@ def run_probe(options: ProbeOptions) -> int:
             f"目标：{backend.target.title} | {backend.target.process_name} | "
             f"阈值 {options.threshold:.5f} | 间隔 {options.interval:.2f}s"
         )
+        consecutive_unavailable = 0
         while True:
             iteration_started = time.perf_counter()
             capture_started = time.perf_counter()
             frame = backend.capture_frame()
-            probe_statistics.capture_durations.append(time.perf_counter() - capture_started)
+            capture_duration = time.perf_counter() - capture_started
+            probe_statistics.capture_durations.append(capture_duration)
+            probe_statistics.poll_count += 1
+            if frame is None:
+                probe_statistics.unavailable_count += 1
+                consecutive_unavailable += 1
+                csv_writer.write_unavailable(
+                    probe_statistics.poll_count,
+                    datetime.now(timezone.utc),
+                    backend.target.title,
+                    capture_duration * 1000,
+                )
+                if consecutive_unavailable == 1:
+                    print("WGC 暂无新帧；本次已记录并继续轮询，不会阻塞等待")
+                elapsed = time.perf_counter() - iteration_started
+                time.sleep(max(0.0, options.interval - elapsed))
+                continue
+            if consecutive_unavailable:
+                print(f"WGC 已恢复交帧；此前连续 {consecutive_unavailable} 次无新帧")
+                consecutive_unavailable = 0
             probe_statistics.captured_count += 1
+            probe_statistics.source_frames_drained += (
+                frame.metadata.source_frames_drained
+            )
+            probe_statistics.max_source_frames_drained = max(
+                probe_statistics.max_source_frames_drained,
+                frame.metadata.source_frames_drained,
+            )
 
             metrics_started = time.perf_counter()
             observation = tracker.observe(frame.bitmap)
@@ -1031,7 +1140,7 @@ def run_probe(options: ProbeOptions) -> int:
             )
             saved_filename = ""
             if decision.should_save:
-                saved_path = archive.save(frame, probe_statistics.captured_count)
+                saved_path = archive.save(frame, probe_statistics.poll_count)
                 probe_statistics.saved_count += 1
                 probe_statistics.forced_saved_count += int(decision.forced)
                 policy.mark_saved(decision_time)
@@ -1049,7 +1158,7 @@ def run_probe(options: ProbeOptions) -> int:
                     f"{'true' if decision.forced else 'false'} | {retained}"
                 )
             csv_writer.write(
-                probe_statistics.captured_count,
+                probe_statistics.poll_count,
                 frame.metadata.captured_at,
                 frame.metadata.window_title,
                 observation.comparisons,
@@ -1057,6 +1166,8 @@ def run_probe(options: ProbeOptions) -> int:
                 decision.forced,
                 saved_filename,
                 metrics_duration_ms,
+                source_frames_drained=frame.metadata.source_frames_drained,
+                capture_duration_ms=capture_duration * 1000,
             )
             elapsed = time.perf_counter() - iteration_started
             time.sleep(max(0.0, options.interval - elapsed))
@@ -1075,7 +1186,7 @@ def run_probe(options: ProbeOptions) -> int:
             options,
             started_at,
             datetime.now(timezone.utc),
-            probe_statistics.captured_count,
+            probe_statistics.poll_count,
             summary,
         )
     return exit_code

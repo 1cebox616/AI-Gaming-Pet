@@ -23,9 +23,11 @@ from pet.core.capture import (
     FrameMetrics,
     FrameMetadata,
     MetricsCsvWriter,
+    MAX_DRAINED_SOURCE_FRAMES_PER_POLL,
     ProbeOptions,
     SavePolicy,
     WindowsGraphicsCaptureBackend,
+    WindowTarget,
 )
 
 
@@ -212,6 +214,25 @@ def test_metrics_csv_header_rows_and_immediate_flush(tmp_path: Path) -> None:
     assert len(rows) == 2
     assert rows[1][0] == "1"
     assert rows[1][9:12] == ["是", "否", "frame.png"]
+    assert rows[1][13:] == ["是", "1", "0.000", "正常"]
+
+
+def test_metrics_csv_records_unavailable_poll_and_flushes(tmp_path: Path) -> None:
+    writer = MetricsCsvWriter(tmp_path)
+    attempted_at = datetime(2026, 8, 23, tzinfo=timezone.utc)
+
+    writer.write_unavailable(2, attempted_at, "Synthetic Game", 0.25)
+
+    # Keep the writer open to prove the unavailable row is immediately durable.
+    with (tmp_path / "metrics.csv").open(encoding="utf-8-sig", newline="") as file:
+        rows = list(csv.reader(file))
+    writer.close()
+
+    assert len(rows) == 2
+    assert rows[1][0:3] == ["2", attempted_at.isoformat(), "Synthetic Game"]
+    assert rows[1][3:9] == [""] * 6
+    assert rows[1][9:13] == ["否", "否", "", ""]
+    assert rows[1][13:] == ["否", "0", "0.250", "WGC 暂无新帧"]
 
 
 def test_session_json_records_label_arguments_times_and_poll_count(
@@ -316,3 +337,78 @@ def test_non_windows_backend_initialization_has_human_error(
 
     with pytest.raises(CaptureError, match="只支持 Windows 10/11"):
         WindowsGraphicsCaptureBackend()
+
+
+class _SyntheticCaptureSession:
+    def __init__(self, frames: list[np.ndarray | None]) -> None:
+        self.frames = frames
+        self.try_grab_calls = 0
+
+    def try_grab(self) -> np.ndarray | None:
+        self.try_grab_calls += 1
+        if not self.frames:
+            return None
+        return self.frames.pop(0)
+
+
+def _backend_with_session(session: _SyntheticCaptureSession) -> WindowsGraphicsCaptureBackend:
+    backend = object.__new__(WindowsGraphicsCaptureBackend)
+    backend._target = WindowTarget(123, "Synthetic Game", "synthetic.exe")
+    backend._session = session
+    return backend
+
+
+def test_backend_drains_fifo_and_returns_only_newest_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = np.full((2, 3, 4), (10, 20, 30, 255), dtype=np.uint8)
+    newest = np.full((2, 3, 4), (40, 50, 60, 255), dtype=np.uint8)
+    session = _SyntheticCaptureSession([first, newest, None])
+    backend = _backend_with_session(session)
+    monkeypatch.setattr(capture, "_configured_user32", object)
+    monkeypatch.setattr(
+        capture,
+        "_target_from_hwnd",
+        lambda _hwnd, _user32: backend.target,
+    )
+
+    frame = backend.capture_frame()
+
+    assert frame is not None
+    assert frame.metadata.source_frames_drained == 2
+    assert frame.bitmap.getpixel((0, 0)) == (60, 50, 40, 255)
+    assert session.try_grab_calls == 3
+
+
+def test_backend_returns_none_immediately_when_no_frame_is_ready() -> None:
+    session = _SyntheticCaptureSession([None])
+    backend = _backend_with_session(session)
+
+    assert backend.capture_frame() is None
+    assert session.try_grab_calls == 1
+
+
+def test_backend_drain_has_a_hard_bound_for_hot_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame_array = np.zeros((1, 1, 4), dtype=np.uint8)
+
+    class _HotSession(_SyntheticCaptureSession):
+        def try_grab(self) -> np.ndarray:
+            self.try_grab_calls += 1
+            return frame_array
+
+    session = _HotSession([])
+    backend = _backend_with_session(session)
+    monkeypatch.setattr(capture, "_configured_user32", object)
+    monkeypatch.setattr(
+        capture,
+        "_target_from_hwnd",
+        lambda _hwnd, _user32: backend.target,
+    )
+
+    frame = backend.capture_frame()
+
+    assert frame is not None
+    assert frame.metadata.source_frames_drained == MAX_DRAINED_SOURCE_FRAMES_PER_POLL
+    assert session.try_grab_calls == MAX_DRAINED_SOURCE_FRAMES_PER_POLL
