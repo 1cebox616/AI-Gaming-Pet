@@ -247,6 +247,7 @@ def test_session_json_records_label_arguments_times_and_poll_count(
     payload = json.loads((tmp_path / "session.json").read_text(encoding="utf-8"))
     assert payload["标签"] == "3A-fullscreen"
     assert payload["启动参数"]["strategy"] == "mean_amplitude_vs_previous"
+    assert payload["启动参数"]["capture_cursor"] is False
     assert payload["开始时间"] == started_at.isoformat()
     assert payload["结束时间"] == ended_at.isoformat()
     assert payload["总轮询数"] == 150
@@ -337,6 +338,16 @@ def test_non_windows_backend_initialization_has_human_error(
 
     with pytest.raises(CaptureError, match="只支持 Windows 10/11"):
         WindowsGraphicsCaptureBackend()
+
+
+def test_capture_cursor_flag_is_parsed_without_changing_default() -> None:
+    parser = capture._build_parser()
+
+    default = parser.parse_args(["--watch"])
+    enabled = parser.parse_args(["--watch", "--capture-cursor"])
+
+    assert default.capture_cursor is False
+    assert enabled.capture_cursor is True
 
 
 class _SyntheticCaptureSession:

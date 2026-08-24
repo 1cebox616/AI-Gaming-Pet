@@ -238,7 +238,12 @@ def _load_zbl() -> ModuleType:
 class WindowsGraphicsCaptureBackend:
     """Own one persistent WGC session for one exact target window."""
 
-    def __init__(self, title_filter: str | None = None) -> None:
+    def __init__(
+        self,
+        title_filter: str | None = None,
+        *,
+        capture_cursor: bool = False,
+    ) -> None:
         if not _is_windows():
             raise CaptureError(
                 "窗口截屏只支持 Windows 10/11；当前系统不能初始化 Windows Graphics Capture"
@@ -252,7 +257,7 @@ class WindowsGraphicsCaptureBackend:
         try:
             session = capture_type(
                 window_handle=self._target.hwnd,
-                is_cursor_capture_enabled=False,
+                is_cursor_capture_enabled=capture_cursor,
                 is_border_required=True,
                 use_staging_texture=True,
             )
@@ -845,6 +850,7 @@ class ProbeOptions:
     min_save_interval: float = DEFAULT_MIN_SAVE_INTERVAL_SECONDS
     max_silence: float = DEFAULT_MAX_SILENCE_SECONDS
     label: str | None = None
+    capture_cursor: bool = False
 
 
 def _positive_float(value: str) -> float:
@@ -910,6 +916,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--label", help="本次采集会话的可选标签")
     parser.add_argument("--title", help="目标窗口标题中的一段文字")
     parser.add_argument(
+        "--capture-cursor",
+        action="store_true",
+        help="把鼠标光标合成进 WGC 画面（默认关闭；用于光标兼容性 A/B）",
+    )
+    parser.add_argument(
         "--save-dir",
         type=Path,
         help="PNG 保存目录（默认 backend/recordings/capture/<启动时间>/）",
@@ -933,6 +944,7 @@ def _print_banner(options: ProbeOptions) -> None:
         f"最短落盘间隔：{options.min_save_interval:.1f}s；"
         f"最长静默：{options.max_silence:.1f}s"
     )
+    print(f"WGC 光标合成：{'开启' if options.capture_cursor else '关闭'}")
     print("首帧、策略判定变化帧及最长静默强制帧落盘；Ctrl+C 停止")
     print("=" * 72)
 
@@ -1041,6 +1053,7 @@ def _write_session(
             "strategy": options.strategy,
             "min_save_interval": options.min_save_interval,
             "max_silence": options.max_silence,
+            "capture_cursor": options.capture_cursor,
         },
         "开始时间": started_at.isoformat(),
         "结束时间": None if ended_at is None else ended_at.isoformat(),
@@ -1089,7 +1102,10 @@ def run_probe(options: ProbeOptions) -> int:
                 "请现在切回游戏。"
             )
             time.sleep(FOREGROUND_SELECTION_DELAY_SECONDS)
-        backend = WindowsGraphicsCaptureBackend(options.title)
+        backend = WindowsGraphicsCaptureBackend(
+            options.title,
+            capture_cursor=options.capture_cursor,
+        )
         print(
             f"目标：{backend.target.title} | {backend.target.process_name} | "
             f"阈值 {options.threshold:.5f} | 间隔 {options.interval:.2f}s"
@@ -1207,6 +1223,7 @@ def main() -> None:
         min_save_interval=arguments.min_save_interval,
         max_silence=arguments.max_silence,
         label=arguments.label,
+        capture_cursor=arguments.capture_cursor,
     )
     raise SystemExit(run_probe(options))
 
