@@ -42,6 +42,7 @@ class ExamQuestion:
 
     question_id: str
     question_type: Literal["single", "sequence"]
+    game_context: str | None
     frames: tuple[Path, ...]
     relative_seconds: tuple[float, ...]
     region_hint: str | None
@@ -186,9 +187,15 @@ def _parse_question(
         "prompt_override",
         question_id,
     )
+    game_context = _optional_text(
+        raw.get("game_context"),
+        "game_context",
+        question_id,
+    )
     return ExamQuestion(
         question_id=question_id,
         question_type=question_type,
+        game_context=game_context,
         frames=frames,
         relative_seconds=seconds,
         region_hint=region_hint,
@@ -269,6 +276,11 @@ def build_user_prompt(question: ExamQuestion, variant: ExamVariant) -> str:
     """Build the text portion associated with one question variant."""
     prompt = question.prompt_override or "请观察所附游戏画面并按系统要求回答。"
     parts = [f"题号：{question.question_id}", prompt]
+    if question.game_context is not None:
+        parts.append(
+            "游戏上下文（由窗口标题与进程名确定）："
+            f"{question.game_context}。请在 game_guess 中填写这个名称，不要另行猜测。"
+        )
     timeline = build_timeline(question)
     if timeline:
         parts.append(timeline)

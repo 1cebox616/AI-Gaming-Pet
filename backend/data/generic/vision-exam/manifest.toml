@@ -1,0 +1,114 @@
+version = 1
+
+[[questions]]
+id = "gzw-helicopter-landing"
+type = "single"
+game_context = "Grey Zone Warfare"
+frames = ["../../../recordings/capture/20260823-135812/frame-000092-20260823T180114.960830Z.png"]
+seconds = [0.0]
+region_hint = "注意画面左侧停机坪附近。"
+prompt_override = "这是单帧感知题。只描述这张截图中直接可见的场景、对象和显著状态，不推断截图前后发生的过程。"
+
+[[questions]]
+id = "disco-dialogue-panel"
+type = "single"
+game_context = "Disco Elysium"
+frames = ["../../../recordings/capture/20260823-150920/frame-000035-20260823T191028.340744Z.png"]
+seconds = [0.0]
+region_hint = "注意画面右侧的大块对话界面。"
+prompt_override = "这是单帧感知题。描述可见场景和大块文字界面的布局与状态；不要补写截图之外的剧情。"
+
+[[questions]]
+id = "gzw-near-black"
+type = "single"
+game_context = "Grey Zone Warfare"
+frames = ["../../../recordings/capture/20260823-182300/frame-000001-20260823T222301.121235Z.png"]
+seconds = [0.0]
+prompt_override = "这是单帧暗场感知题。只报告画面中仍能辨认的对象、光源和界面；看不清的区域必须说不确定。"
+
+[[questions]]
+id = "spire-combat-ui"
+type = "single"
+game_context = "Slay the Spire 2"
+frames = ["../../../recordings/capture/20260823-201700/frame-000058-20260824T001854.718295Z.png"]
+seconds = [0.0]
+prompt_override = "这是单帧高信息密度 UI 感知题。描述明确可见的战斗界面、数值、卡牌与单位状态，不推断未显示的战斗结果。"
+
+[[questions]]
+id = "subnautica-night-underwater"
+type = "single"
+game_context = "Subnautica 2"
+frames = ["../../../recordings/capture/20260823-183828/frame-000013-20260823T223852.427674Z.png"]
+seconds = [0.0]
+prompt_override = "这是单帧陌生视觉风格感知题。只描述水下画面中直接可见的环境、发光对象、生物轮廓与 HUD。"
+
+[[questions]]
+id = "gzw-static-control-a"
+type = "single"
+game_context = "Grey Zone Warfare"
+frames = ["../../../recordings/capture/20260823-135202/frame-000001-20260823T175206.287712Z.png"]
+seconds = [0.0]
+prompt_override = "这是抗幻觉静止对照题。描述当前单帧；如果画面没有显示正在发生的显著事件，notable_events 必须为空数组。"
+
+[[questions]]
+id = "gzw-static-control-b"
+type = "single"
+game_context = "Grey Zone Warfare"
+frames = ["../../../recordings/capture/20260823-135202/frame-000031-20260823T175306.283718Z.png"]
+seconds = [0.0]
+prompt_override = "这是抗幻觉静止对照题。描述当前单帧；如果画面没有显示正在发生的显著事件，notable_events 必须为空数组。"
+
+[[questions]]
+id = "gzw-rain-small-helicopter"
+type = "single"
+game_context = "Grey Zone Warfare"
+frames = ["../../../recordings/capture/20260823-143808/frame-000092-20260823T184110.593912Z.png"]
+seconds = [0.0]
+region_hint = "注意画面中央远处、停机坪近地面区域的小目标。"
+crops = ["../../../recordings/capture/20260823-143808/vision-exam-crops/frame-000092-helicopter-native.png"]
+prompt_override = "这是单帧小目标题。全图与裁剪图来自同一时刻；只描述两者直接显示的对象、天气和可见状态。"
+
+[[questions]]
+id = "subnautica-wave-surface"
+type = "single"
+game_context = "Subnautica 2"
+frames = ["../../../recordings/capture/20260823-183136/frame-000046-20260823T223306.813409Z.png"]
+seconds = [0.0]
+prompt_override = "这是单帧感知题。描述水线、浪峰、可见结构和 HUD，不把单张截图解释成完整动作过程。"
+
+[[questions]]
+id = "disco-task-switch-sequence"
+type = "sequence"
+game_context = "Disco Elysium"
+frames = [
+  "../../../recordings/capture/20260823-161013/frame-000044-20260823T201139.413813Z.png",
+  "../../../recordings/capture/20260823-161013/frame-000045-20260823T201141.415143Z.png",
+]
+seconds = [0.0, 2.001330]
+region_hint = "比较左侧选中项与中央任务标题、正文区域。"
+prompt_override = "这是稀疏双帧边界题。逐帧描述直接可见的任务日志 UI 差异，不推断点击动作或未采样间隔内的过程。"
+
+[[questions]]
+id = "subnautica-wave-sequence"
+type = "sequence"
+game_context = "Subnautica 2"
+frames = [
+  "../../../recordings/capture/20260823-183136/frame-000007-20260823T223148.805555Z.png",
+  "../../../recordings/capture/20260823-183136/frame-000008-20260823T223150.809244Z.png",
+]
+seconds = [0.0, 2.003689]
+prompt_override = "这是稀疏双帧边界题。比较两张截图中直接可见的水线、浪形和远景差异，不描述未采样间隔中的连续运动。"
+
+[[questions]]
+id = "spire-combat-ui-nocontext"
+type = "single"
+frames = ["../../../recordings/capture/20260823-201700/frame-000058-20260824T001854.718295Z.png"]
+seconds = [0.0]
+prompt_override = "这是单帧高信息密度 UI 感知题。描述明确可见的战斗界面、数值、卡牌与单位状态，不推断未显示的战斗结果。"
+
+[[questions]]
+id = "subnautica-night-underwater-nocontext"
+type = "single"
+frames = ["../../../recordings/capture/20260823-183828/frame-000013-20260823T223852.427674Z.png"]
+seconds = [0.0]
+prompt_override = "这是单帧陌生视觉风格感知题。只描述水下画面中直接可见的环境、发光对象、生物轮廓与 HUD。"

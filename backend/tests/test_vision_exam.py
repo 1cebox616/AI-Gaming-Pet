@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+import re
+import tomllib
 
 import pytest
 
@@ -31,6 +33,9 @@ from pet.games.generic.eval.vision_exam import (
 
 FIXTURES = Path(__file__).parent / "fixtures"
 EXAMPLE_MANIFEST = FIXTURES / "vision-exam-example.toml"
+ANSWER_KEY = Path(__file__).parents[1] / "data" / "generic" / "vision-exam" / "answer-key.md"
+FIELD_RESULTS = Path(__file__).parents[1] / "audit" / "m5-t1-field-test-results.md"
+REAL_MANIFEST = ANSWER_KEY.with_name("manifest.toml")
 VALID_RESPONSE = json.dumps(
     {
         "scene": "合成测试画面",
@@ -90,6 +95,8 @@ def test_manifest_parses_single_sequence_and_resolves_synthetic_files() -> None:
         "synthetic-sequence",
     ]
     assert manifest.questions[0].question_type == "single"
+    assert manifest.questions[0].game_context == "Synthetic Test Game"
+    assert manifest.questions[1].game_context is None
     assert manifest.questions[1].relative_seconds == (0.0, 3.0)
     assert all(path.is_file() for path in manifest.questions[1].frames)
 
@@ -156,6 +163,31 @@ def test_without_axes_omits_hint_and_crops() -> None:
 
     assert question.region_hint not in build_user_prompt(question, variant)
     assert len(build_images(question, variant)) == 2
+
+
+def test_game_context_is_injected_and_absence_keeps_prompt_context_free() -> None:
+    manifest = load_manifest(EXAMPLE_MANIFEST)
+    variant = ExamVariant(False, False, 1280)
+
+    with_context = build_user_prompt(manifest.questions[0], variant)
+    without_context = build_user_prompt(manifest.questions[1], variant)
+
+    assert "游戏上下文（由窗口标题与进程名确定）：Synthetic Test Game" in with_context
+    assert "请在 game_guess 中填写这个名称" in with_context
+    assert "游戏上下文（由窗口标题与进程名确定）" not in without_context
+
+    client = _FakeVisionClient()
+    run_exam(
+        manifest=manifest,
+        variants=(variant,),
+        targets=(_target(),),
+        system_prompt="system",
+        client_factory=lambda _: client,
+    )
+    assert "Synthetic Test Game" in str(client.calls[0]["user_prompt"])
+    assert "游戏上下文（由窗口标题与进程名确定）" not in str(
+        client.calls[1]["user_prompt"]
+    )
 
 
 def test_switches_can_request_full_cartesian_product() -> None:
@@ -305,3 +337,75 @@ def test_confirmation_requires_exact_yes_or_explicit_override() -> None:
     assert confirm_upload(assume_yes=True, input_function=lambda _: "")
     assert confirm_upload(assume_yes=False, input_function=lambda _: "YES")
     assert not confirm_upload(assume_yes=False, input_function=lambda _: "yes")
+
+
+def test_real_exam_answer_key_has_every_required_section_and_sourced_point() -> None:
+    text = ANSWER_KEY.read_text(encoding="utf-8")
+    question_sections = re.split(r"(?=^## \d+\. `)", text, flags=re.MULTILINE)[1:]
+    required_headings = (
+        "### 现场记录",
+        "### 离线复核",
+        "### 参考答案要点",
+        "### 不得出现的内容",
+        "### 不确定项",
+    )
+
+    assert len(question_sections) == 13
+    for section in question_sections:
+        question_id = section.split("`", 2)[1]
+        assert all(heading in section for heading in required_headings), question_id
+        sourced_content = section.split("### 现场记录", 1)[1]
+        assert "> 【现场记录】" in sourced_content, question_id
+        for line in sourced_content.splitlines():
+            if line.startswith("- "):
+                assert line.startswith(("- 【现场记录】", "- 【离线复核】")), (
+                    question_id,
+                    line,
+                )
+
+
+def test_real_exam_field_notes_are_verbatim_after_markdown_reflow() -> None:
+    answer_text = ANSWER_KEY.read_text(encoding="utf-8")
+    field_text = FIELD_RESULTS.read_text(encoding="utf-8")
+
+    normalized_field_text = re.sub(r"\s+", "", field_text)
+    quoted_notes = re.findall(r"^> 【现场记录】(.+)$", answer_text, flags=re.MULTILINE)
+
+    assert len(quoted_notes) == 13
+    for note in quoted_notes:
+        assert re.sub(r"\s+", "", note) in normalized_field_text, note
+
+
+def test_real_exam_nocontext_pairs_duplicate_frames_without_context() -> None:
+    with REAL_MANIFEST.open("rb") as handle:
+        questions = {item["id"]: item for item in tomllib.load(handle)["questions"]}
+
+    pairs = (
+        ("spire-combat-ui", "spire-combat-ui-nocontext"),
+        ("subnautica-night-underwater", "subnautica-night-underwater-nocontext"),
+    )
+    for contextual_id, no_context_id in pairs:
+        contextual = questions[contextual_id]
+        no_context = questions[no_context_id]
+        assert contextual["frames"] == no_context["frames"]
+        assert "game_context" in contextual
+        assert "game_context" not in no_context
+
+
+def test_real_exam_text_artifacts_contain_no_player_identity_markers() -> None:
+    text = "\n".join(
+        (
+            REAL_MANIFEST.read_text(encoding="utf-8"),
+            ANSWER_KEY.read_text(encoding="utf-8"),
+        )
+    )
+    identity_patterns = (
+        r"765611\d{10}",
+        r"STEAM_\d",
+        r"steamid",
+        r"好友列表",
+        r"昵称[:：]",
+    )
+
+    for pattern in identity_patterns:
+        assert re.search(pattern, text, flags=re.IGNORECASE) is None, pattern

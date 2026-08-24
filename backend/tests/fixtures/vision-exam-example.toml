@@ -3,6 +3,7 @@ version = 1
 [[questions]]
 id = "synthetic-single"
 type = "single"
+game_context = "Synthetic Test Game"
 frames = ["vision-exam-frame-a.ppm"]
 seconds = [0.0]
 region_hint = "画面中央的黄色矩形可能值得关注。"
