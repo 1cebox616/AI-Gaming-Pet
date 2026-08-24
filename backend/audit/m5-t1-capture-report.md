@@ -59,7 +59,8 @@ Grey Zone Warfare、Disco Elysium、Subnautica 2 与 Slay the Spire 2 共 12 次
 人工复核记录在
 `audit/m5-t1-field-test-results.md`，诊断记录单独存放。另补测了 2.0 / 1.0 秒轮询的
 CPU 与内存。仍不能由代码检查代替的项目包括独占全屏覆盖、黄色捕获边框、各游戏
-开启探针前后帧率，以及光标问题是否会在另一款鼠标驱动游戏中复现。
+开启探针前后帧率，以及 Project Zomboid 光标问题的具体组件责任边界。Slay the
+Spire 2 已作为第一组跨游戏负对照：相同 `capture_cursor=false` 下光标正常可见。
 
 自动验收的实际记录：
 
@@ -74,14 +75,14 @@ CPU 与内存。仍不能由代码检查代替的项目包括独占全屏覆盖�
 全量测试的 4 项失败均在 `tests/test_speech.py`，原因是受限执行环境无法枚举已安装的
 OneCore 中文语音，与本任务前的环境项一致。新增测试、分层测试和其他回归全部通过。
 
-本次非阻塞取帧修正后的实际记录：
+当前实现（含非阻塞取帧与光标 A/B 参数）的实际记录：
 
 ```text
-.venv\Scripts\python -m pytest tests/test_capture.py tests/test_layering.py -q
-24 passed
+.venv\Scripts\python -m pytest tests/test_capture.py tests/test_layering.py -q --basetemp .pytest-m5-t1-architect-summary
+25 passed
 
-.venv\Scripts\python -m pytest tests/ -q
-435 passed, 4 failed
+.venv\Scripts\python -m pytest tests/ -q --basetemp .pytest-m5-t1-pz-debt
+436 passed, 4 failed
 ```
 
 4 项失败仍全部为上述 OneCore 中文语音环境项。`compileall`、`git diff --check` 和
@@ -156,7 +157,8 @@ cd backend
 
 `--capture-cursor` 是定位 WGC 光标兼容性的 A/B 开关，只决定是否请求 WGC 把光标
 合成进捕获画面；默认关闭，普通采样无需使用。Project Zomboid 中开关两种状态都
-复现了游戏内光标消失，因此该参数不是修复，只用于后续跨游戏复现和归因。
+复现了游戏内光标消失，而 Slay the Spire 2 在默认关闭状态下光标正常可见。因此
+该参数不是修复，只用于后续兼容性复现和归因。
 
 截图默认保存在 `backend/recordings/capture/<启动时间>/`，已被 Git 忽略。单次目录
 最多保留 500 张或 200MB，先触及哪个上限就从最旧 PNG 开始删除。截图可能含私人
