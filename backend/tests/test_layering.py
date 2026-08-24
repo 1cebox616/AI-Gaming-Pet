@@ -78,6 +78,8 @@ def test_game_packages_do_not_cross_import_or_reach_eval_from_production() -> No
                 allowed = set(ALLOWED_CORE_MODULES)
                 if in_eval:
                     allowed.add("gate")
+                if relative.as_posix() == "generic/eval/region_assets.py":
+                    allowed.add("capture")
                 if imported_core not in allowed:
                     failures.append(
                         _failure(

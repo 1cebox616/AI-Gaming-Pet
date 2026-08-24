@@ -10,6 +10,7 @@ from datetime import datetime
 import json
 import math
 from pathlib import Path
+import re
 import statistics
 import sys
 import tomllib
@@ -30,6 +31,18 @@ DEFAULT_OUTPUT_ROOT = BACKEND_DIRECTORY / "eval-reports"
 DEFAULT_CONFIG_PATH = BACKEND_DIRECTORY / "config.toml"
 DEFAULT_LOCAL_CONFIG_PATH = BACKEND_DIRECTORY / "config.local.toml"
 QUESTION_TYPES = {"single", "sequence"}
+QUESTION_FIELDS = {
+    "id",
+    "type",
+    "game_context",
+    "frames",
+    "seconds",
+    "region_grid",
+    "crops",
+}
+REGION_CELL_PATTERN = re.compile(r"r(?:[1-9]|1[0-6])c[1-9]")
+REGION_ROWS = 16
+REGION_COLUMNS = 9
 
 
 class VisionExamError(Exception):
@@ -45,9 +58,8 @@ class ExamQuestion:
     game_context: str | None
     frames: tuple[Path, ...]
     relative_seconds: tuple[float, ...]
-    region_hint: str | None
+    region_grid: tuple[str, ...]
     crops: tuple[Path, ...]
-    prompt_override: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,13 +74,13 @@ class ExamManifest:
 class ExamVariant:
     """One Cartesian-product choice on the two optional context axes."""
 
-    with_region_hint: bool
+    with_region_grid: bool
     with_crops: bool
     send_width: int
 
     @property
     def name(self) -> str:
-        region = "region-on" if self.with_region_hint else "region-off"
+        region = "region-grid-on" if self.with_region_grid else "region-grid-off"
         crops = "crops-on" if self.with_crops else "crops-off"
         return f"{region}__{crops}__width-{self.send_width}"
 
@@ -134,6 +146,10 @@ def load_manifest(path: Path) -> ExamManifest:
     version = payload.get("version")
     if version != 1:
         raise VisionExamError("考卷清单 version 必须为 1")
+    unexpected_top_level = set(payload) - {"version", "questions"}
+    if unexpected_top_level:
+        joined = "、".join(sorted(unexpected_top_level))
+        raise VisionExamError(f"考卷清单含不允许的顶层字段：{joined}")
     raw_questions = payload.get("questions")
     if not isinstance(raw_questions, list) or not raw_questions:
         raise VisionExamError("考卷清单至少需要一道 [[questions]]")
@@ -159,6 +175,10 @@ def _parse_question(
     base_directory: Path,
 ) -> ExamQuestion:
     question_id = _required_text(raw, "id", index=index)
+    unexpected_fields = set(raw) - QUESTION_FIELDS
+    if unexpected_fields:
+        joined = "、".join(sorted(unexpected_fields))
+        raise VisionExamError(f"题 {question_id} 含不允许字段：{joined}")
     raw_type = _required_text(raw, "type", index=index)
     if raw_type not in QUESTION_TYPES:
         raise VisionExamError(f"题 {question_id} 的 type 必须为 single 或 sequence")
@@ -181,12 +201,7 @@ def _parse_question(
 
     crops_value = raw.get("crops", [])
     crops = _path_list(crops_value, "crops", question_id, base_directory, allow_empty=True)
-    region_hint = _optional_text(raw.get("region_hint"), "region_hint", question_id)
-    prompt_override = _optional_text(
-        raw.get("prompt_override"),
-        "prompt_override",
-        question_id,
-    )
+    region_grid = _region_grid(raw.get("region_grid", []), question_id)
     game_context = _optional_text(
         raw.get("game_context"),
         "game_context",
@@ -198,9 +213,8 @@ def _parse_question(
         game_context=game_context,
         frames=frames,
         relative_seconds=seconds,
-        region_hint=region_hint,
+        region_grid=region_grid,
         crops=crops,
-        prompt_override=prompt_override,
     )
 
 
@@ -217,6 +231,21 @@ def _optional_text(value: object, key: str, question_id: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         raise VisionExamError(f"题 {question_id} 的 {key} 必须是非空字符串")
     return value.strip()
+
+
+def _region_grid(value: object, question_id: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise VisionExamError(f"题 {question_id} 的 region_grid 必须是格子坐标列表")
+    cells: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or REGION_CELL_PATTERN.fullmatch(item) is None:
+            raise VisionExamError(
+                f"题 {question_id} 的 region_grid 含无效格子坐标：{item!r}"
+            )
+        if item in cells:
+            raise VisionExamError(f"题 {question_id} 的 region_grid 含重复坐标：{item}")
+        cells.append(item)
+    return tuple(cells)
 
 
 def _path_list(
@@ -274,8 +303,7 @@ def build_timeline(question: ExamQuestion) -> str:
 
 def build_user_prompt(question: ExamQuestion, variant: ExamVariant) -> str:
     """Build the text portion associated with one question variant."""
-    prompt = question.prompt_override or "请观察所附游戏画面并按系统要求回答。"
-    parts = [f"题号：{question.question_id}", prompt]
+    parts: list[str] = []
     if question.game_context is not None:
         parts.append(
             "游戏上下文（由窗口标题与进程名确定）："
@@ -284,21 +312,15 @@ def build_user_prompt(question: ExamQuestion, variant: ExamVariant) -> str:
     timeline = build_timeline(question)
     if timeline:
         parts.append(timeline)
-    if variant.with_region_hint:
+    if variant.with_region_grid and question.region_grid:
         parts.append(
-            "变化区域提示："
-            + (question.region_hint or "本题没有提供变化区域提示。")
+            f"画面被划分为 {REGION_ROWS} 行 {REGION_COLUMNS} 列的网格。"
+            "与上一采样帧相比，以下格子发生了变化："
+            + "、".join(question.region_grid)
+            + "。"
         )
-    else:
-        parts.append("本变体未提供变化区域提示。")
-    if variant.with_crops:
-        parts.append(
-            f"另附 {len(question.crops)} 张原生裁剪图。"
-            if question.crops
-            else "本题没有提供原生裁剪图。"
-        )
-    else:
-        parts.append("本变体不附原生裁剪图。")
+    if variant.with_crops and question.crops:
+        parts.append(f"另附 {len(question.crops)} 张机器裁剪图。")
     return "\n".join(parts)
 
 
@@ -317,7 +339,7 @@ def build_images(question: ExamQuestion, variant: ExamVariant) -> tuple[LlmImage
     ]
     if variant.with_crops:
         images.extend(
-            LlmImage(path=path, label=f"原生裁剪图{index}")
+            LlmImage(path=path, label=f"机器裁剪图{index}")
             for index, path in enumerate(question.crops, start=1)
         )
     return tuple(images)
@@ -377,10 +399,10 @@ def run_exam(
     manifest: ExamManifest,
     variants: Sequence[ExamVariant],
     targets: Sequence[ModelTarget],
-    system_prompt: str,
     client_factory: ClientFactory,
 ) -> tuple[ExamRecord, ...]:
     """Run all targets and keep going after every individual failure."""
+    system_prompt = _read_prompt(DEFAULT_PROMPT_PATH)
     records: list[ExamRecord] = []
     for target in targets:
         client: LlmVisionClientProtocol | None = None
@@ -885,10 +907,10 @@ def confirm_upload(
 
 def _read_prompt(path: Path) -> str:
     try:
-        prompt = path.read_text(encoding="utf-8").strip()
+        prompt = path.read_text(encoding="utf-8")
     except OSError as error:
         raise VisionExamError(f"无法读取观察提示词 {path}：{error}") from error
-    if not prompt:
+    if not prompt.strip():
         raise VisionExamError(f"观察提示词为空：{path}")
     return prompt
 
@@ -909,14 +931,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider", help="直接模型的可选服务商锁定")
     parser.add_argument("--price", action="append", default=[], help="TARGET=输入百万token美元,输出百万token美元；可重复")
     parser.add_argument("--send-width", type=int, default=1280, help="全图发送前的宽度，默认 1280")
-    parser.add_argument("--with-region-hint", dest="region_choices", action="append_const", const=True)
-    parser.add_argument("--without-region-hint", dest="region_choices", action="append_const", const=False)
+    parser.add_argument("--with-region-grid", dest="region_choices", action="append_const", const=True)
+    parser.add_argument("--without-region-grid", dest="region_choices", action="append_const", const=False)
     parser.add_argument("--with-crops", dest="crop_choices", action="append_const", const=True)
     parser.add_argument("--without-crops", dest="crop_choices", action="append_const", const=False)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--max-tokens", type=int, default=512)
-    parser.add_argument("--prompt", type=Path, default=DEFAULT_PROMPT_PATH)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--local-config", type=Path, default=DEFAULT_LOCAL_CONFIG_PATH)
     parser.add_argument("--yes", action="store_true", help="打印清单后跳过交互输入")
@@ -959,7 +980,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_tokens=arguments.max_tokens,
             prices=prices,
         )
-        system_prompt = _read_prompt(arguments.prompt)
         files = upload_files(manifest, variants)
         print_upload_plan(files, targets, variants)
         if not confirm_upload(assume_yes=arguments.yes):
@@ -971,7 +991,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest=manifest,
             variants=variants,
             targets=targets,
-            system_prompt=system_prompt,
             client_factory=_default_client_factory,
         )
         ended_at = datetime.now().astimezone()
@@ -984,7 +1003,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "arguments": vars(arguments)
                 | {
                     "manifest": str(arguments.manifest),
-                    "prompt": str(arguments.prompt),
+                    "prompt": str(DEFAULT_PROMPT_PATH),
                     "config": str(arguments.config),
                     "local_config": str(arguments.local_config),
                 },

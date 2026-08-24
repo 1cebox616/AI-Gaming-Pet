@@ -13,6 +13,7 @@ import pytest
 from pet.core.config import LlmConfig, LlmProfileConfig
 from pet.core.llm import LlmError, LlmResult, LlmUsage
 from pet.games.generic.eval.vision_exam import (
+    DEFAULT_PROMPT_PATH,
     ExamVariant,
     ModelPrice,
     ModelTarget,
@@ -98,6 +99,7 @@ def test_manifest_parses_single_sequence_and_resolves_synthetic_files() -> None:
     assert manifest.questions[0].game_context == "Synthetic Test Game"
     assert manifest.questions[1].game_context is None
     assert manifest.questions[1].relative_seconds == (0.0, 3.0)
+    assert manifest.questions[1].region_grid == ("r12c7", "r12c8")
     assert all(path.is_file() for path in manifest.questions[1].frames)
 
 
@@ -127,20 +129,39 @@ def test_manifest_rejects_out_of_order_seconds(tmp_path: Path) -> None:
         load_manifest(manifest_path)
 
 
-def test_variant_request_includes_region_hint_crops_and_sparse_timeline() -> None:
+def test_manifest_rejects_removed_or_descriptive_fields(tmp_path: Path) -> None:
+    frame = tmp_path / "frame.ppm"
+    frame.write_text("P3\n1 1\n255\n0 0 0\n", encoding="ascii")
+    manifest_path = tmp_path / "leaky.toml"
+    removed_field = "prompt" + "_override"
+    manifest_path.write_text(
+        'version = 1\n[[questions]]\nid = "q1"\ntype = "single"\n'
+        'frames = ["frame.ppm"]\nseconds = [0.0]\n'
+        f'{removed_field} = "answer"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(VisionExamError, match="不允许字段"):
+        load_manifest(manifest_path)
+
+
+def test_variant_request_includes_neutral_region_grid_crops_and_sparse_timeline() -> None:
     manifest = load_manifest(EXAMPLE_MANIFEST)
     question = manifest.questions[1]
-    variant = ExamVariant(with_region_hint=True, with_crops=True, send_width=1280)
+    variant = ExamVariant(with_region_grid=True, with_crops=True, send_width=1280)
 
     prompt = build_user_prompt(question, variant)
     images = build_images(question, variant)
 
-    assert "第二帧右下区域出现高亮变化" in prompt
+    assert (
+        "画面被划分为 16 行 9 列的网格。与上一采样帧相比，"
+        "以下格子发生了变化：r12c7、r12c8。"
+    ) in prompt
     assert "这是稀疏采样截图，不是连续视频" in prompt
     assert "第0.0秒：帧1；第0.1至3.0秒未采样；第3.0秒：帧2" in prompt
     assert len(images) == 3
     assert images[0].target_width == 1280
-    assert images[-1].label == "原生裁剪图1"
+    assert images[-1].label == "机器裁剪图1"
     assert images[-1].max_edge is None
     assert images[-1].target_width is None
 
@@ -149,19 +170,22 @@ def test_variant_request_includes_region_hint_crops_and_sparse_timeline() -> Non
         manifest=manifest,
         variants=(variant,),
         targets=(_target(),),
-        system_prompt="system",
         client_factory=lambda _: client,
     )
     sequence_call = client.calls[1]
-    assert question.region_hint in str(sequence_call["user_prompt"])
+    assert "r12c7、r12c8" in str(sequence_call["user_prompt"])
+    assert sequence_call["system_prompt"] == DEFAULT_PROMPT_PATH.read_text(
+        encoding="utf-8"
+    )
     assert len(sequence_call["images"]) == 3
 
 
-def test_without_axes_omits_hint_and_crops() -> None:
+def test_without_axes_omits_region_grid_and_crops() -> None:
     question = load_manifest(EXAMPLE_MANIFEST).questions[1]
-    variant = ExamVariant(with_region_hint=False, with_crops=False, send_width=640)
+    variant = ExamVariant(with_region_grid=False, with_crops=False, send_width=640)
 
-    assert question.region_hint not in build_user_prompt(question, variant)
+    assert "region" not in build_user_prompt(question, variant).lower()
+    assert "r12c7" not in build_user_prompt(question, variant)
     assert len(build_images(question, variant)) == 2
 
 
@@ -181,13 +205,34 @@ def test_game_context_is_injected_and_absence_keeps_prompt_context_free() -> Non
         manifest=manifest,
         variants=(variant,),
         targets=(_target(),),
-        system_prompt="system",
         client_factory=lambda _: client,
     )
     assert "Synthetic Test Game" in str(client.calls[0]["user_prompt"])
     assert "游戏上下文（由窗口标题与进程名确定）" not in str(
         client.calls[1]["user_prompt"]
     )
+
+
+def test_model_messages_have_no_question_id_or_semantic_leakage() -> None:
+    manifest = load_manifest(EXAMPLE_MANIFEST)
+    client = _FakeVisionClient()
+    run_exam(
+        manifest=manifest,
+        variants=(ExamVariant(True, True, 1280),),
+        targets=(_target(),),
+        client_factory=lambda _: client,
+    )
+    forbidden_words = ("注意", "远处", "小目标", "对照题", "必须为空")
+    expected_system_prompt = DEFAULT_PROMPT_PATH.read_text(encoding="utf-8")
+
+    assert len(client.calls) == len(manifest.questions)
+    for question, call in zip(manifest.questions, client.calls):
+        user_prompt = str(call["user_prompt"])
+        image_labels = "\n".join(image.label for image in call["images"])
+        model_content = f"{user_prompt}\n{image_labels}"
+        assert question.question_id not in model_content
+        assert all(word not in model_content for word in forbidden_words)
+        assert call["system_prompt"] == expected_system_prompt
 
 
 def test_switches_can_request_full_cartesian_product() -> None:
@@ -214,7 +259,6 @@ def test_failure_and_invalid_json_are_recorded_while_exam_continues() -> None:
         manifest=manifest,
         variants=(ExamVariant(False, False, 1280),),
         targets=(_target(),),
-        system_prompt="system",
         client_factory=lambda _: client,
     )
 
@@ -238,7 +282,6 @@ def test_fake_client_full_flow_writes_csv_report_and_run_json(tmp_path: Path) ->
         manifest=manifest,
         variants=variants,
         targets=(_target(),),
-        system_prompt="system",
         client_factory=lambda _: client,
     )
     output = tmp_path / "vision-exam-test"
@@ -268,7 +311,6 @@ def test_summary_uses_configured_price_not_upstream_cost() -> None:
         manifest=manifest,
         variants=(ExamVariant(False, False, 1280),),
         targets=(_target(),),
-        system_prompt="system",
         client_factory=lambda _: _FakeVisionClient(),
     )
 
@@ -343,6 +385,7 @@ def test_real_exam_answer_key_has_every_required_section_and_sourced_point() -> 
     text = ANSWER_KEY.read_text(encoding="utf-8")
     question_sections = re.split(r"(?=^## \d+\. `)", text, flags=re.MULTILINE)[1:]
     required_headings = (
+        "### 机械区域与裁剪",
         "### 现场记录",
         "### 离线复核",
         "### 参考答案要点",
@@ -390,6 +433,32 @@ def test_real_exam_nocontext_pairs_duplicate_frames_without_context() -> None:
         assert contextual["frames"] == no_context["frames"]
         assert "game_context" in contextual
         assert "game_context" not in no_context
+
+
+def test_real_exam_uses_only_allowed_fields_and_plain_game_names() -> None:
+    with REAL_MANIFEST.open("rb") as handle:
+        questions = tomllib.load(handle)["questions"]
+    allowed_fields = {
+        "id",
+        "type",
+        "game_context",
+        "frames",
+        "seconds",
+        "region_grid",
+        "crops",
+    }
+    allowed_contexts = {
+        "Grey Zone Warfare",
+        "Disco Elysium",
+        "Slay the Spire 2",
+        "Subnautica 2",
+    }
+
+    assert len(questions) == 13
+    for question in questions:
+        assert set(question) <= allowed_fields
+        if "game_context" in question:
+            assert question["game_context"] in allowed_contexts
 
 
 def test_real_exam_text_artifacts_contain_no_player_identity_markers() -> None:

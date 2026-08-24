@@ -6,13 +6,12 @@ type = "single"
 game_context = "Synthetic Test Game"
 frames = ["vision-exam-frame-a.ppm"]
 seconds = [0.0]
-region_hint = "画面中央的黄色矩形可能值得关注。"
+region_grid = ["r3c5", "r3c6", "r4c5"]
 
 [[questions]]
 id = "synthetic-sequence"
 type = "sequence"
 frames = ["vision-exam-frame-a.ppm", "vision-exam-frame-b.ppm"]
 seconds = [0.0, 3.0]
-region_hint = "第二帧右下区域出现高亮变化。"
+region_grid = ["r12c7", "r12c8"]
 crops = ["vision-exam-crop.ppm"]
-prompt_override = "比较所附离散帧，只报告能够直接确认的画面变化。"

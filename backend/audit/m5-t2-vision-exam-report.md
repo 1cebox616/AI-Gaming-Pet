@@ -34,7 +34,7 @@
 2. 图片在本机用 Pillow 读取、缩放并重新编码为无元数据 PNG，再组成 OpenAI 兼容的
    `image_url` data URL 内容块。每次调用可设全局最大边长；考卷还对全图单独应用
    `--send-width`，原生裁剪图不缩放，除非调用方另设全局上限。
-3. 默认只跑“不带区域提示、不带裁剪”一个变体。把 with/without 两种开关同时写上，
+3. 默认只跑“不带区域格子、不带裁剪”一个变体。把 with/without 两种开关同时写上，
    工具会对所选状态作笛卡尔积，一次跑完最多四种变体；不需要拆成四份结果目录。
 4. 模型 ID 不写死。`--model` 可重复，也可写 `profile:<档位名>` 读取现有
    `[llm.profiles.*]`。每个目标必须用 `--price` 明确给出输入/输出百万 token 美元
@@ -47,9 +47,9 @@
 
 ## 给产品负责人的出卷指引
 
-建议把真实考卷 TOML 放在 `backend/eval-reports/` 下，或另一个不会入库的位置；不要
-把 `recordings/` 的真实截图路径写进仓库文件。路径相对 TOML 所在目录解析，也可以
-写绝对路径。
+正式、经审计的考卷 manifest 放在 `backend/data/generic/vision-exam/`；其中可记录指向
+本机 `recordings/` 的相对路径，但截图和机械裁剪本身继续由 Git 忽略。临时试卷仍可放
+在 `backend/eval-reports/`。路径相对 TOML 所在目录解析，也可以写绝对路径。
 
 最小 single 题：
 
@@ -61,9 +61,8 @@ id = "game-a-001"
 type = "single"
 frames = ["C:/本地路径/frame.png"]
 seconds = [0.0]
-region_hint = "可选：右下角 UI 区域发生变化。"
-crops = ["C:/本地路径/native-crop.png"]
-prompt_override = "可选：只分析这道题需要特别观察的内容。"
+region_grid = ["r3c5", "r3c6", "r4c5"]
+crops = ["C:/本地路径/machine-crop.png"]
 ```
 
 sequence 题把多帧和相对秒数一一对应；秒数必须严格递增：
@@ -100,14 +99,14 @@ seconds = [0.0, 2.0, 5.0]
   --price "profile:<档位名>=<输入单价>,<输出单价>"
 ```
 
-一次对比区域提示和原生裁剪的四种组合：
+一次对比机械区域格子和机械裁剪的四种组合：
 
 ```powershell
 .venv\Scripts\python -m pet.games.generic.eval.vision_exam `
   eval-reports\my-exam.toml `
   --model "<候选模型ID>" `
   --price "<候选模型ID>=<输入单价>,<输出单价>" `
-  --with-region-hint --without-region-hint `
+  --with-region-grid --without-region-grid `
   --with-crops --without-crops `
   --send-width 1280
 ```
@@ -327,18 +326,17 @@ gzw-rain-small-helicopter crop frame-000092-helicopter-native.png exists=true by
 
 建议每个档位这样跑：
 
-1. 全部 13 题先跑 `without-region-hint + without-crops` 基线：13 次调用。
-2. 只把有真实提示文本的 4 题（直升机、对话面板、小直升机、任务日志）复制到
-   Git 忽略的临时子卷，追加跑 `with-region-hint + without-crops`：4 次调用。
-3. 小直升机题再跑 `without-region-hint + with-crops` 与
-   `with-region-hint + with-crops`：2 次调用。
+1. 全部 13 题先跑 `without-region-grid + without-crops` 基线：13 次调用。
+2. 对有机械 `region_grid` 的 7 题跑 `with-region-grid + without-crops`：7 次调用。
+3. 同 7 题再跑 `without-region-grid + with-crops` 和
+   `with-region-grid + with-crops`：14 次调用。
 
-合计每个档位 19 次，3 个档位共 57 次调用、72 张图像附件。以 1280 宽图像和短 JSON
-回答估算，整轮大约是 5 万至 16 万输入 token 等价值、6 千至 1.5 万输出 token；视觉
+合计每个档位 34 次，3 个档位共 102 次调用、168 张图像附件。以 1280 宽图像和短 JSON
+回答估算，整轮大约是 9 万至 28 万输入 token 等价值、1 万至 3 万输出 token；视觉
 token 计算随候选模型而异，这只是预算量级，不作为最终账单。单价暂留空，跑卷当天
 按货架用 `--price` 填入；实际 token、延迟和花费以 `run.json` 为准。
 
-如果首轮预算较紧，可先跑 1 个均衡档位的 19 次调用完成卷面校准，确认 manifest、
+如果首轮预算较紧，可先跑 1 个均衡档位的 34 次调用完成卷面校准，确认 manifest、
 提示和答案草稿没有明显问题后，再扩到另外两个档位。
 
 ### M5-T2.5 验收记录
@@ -379,3 +377,111 @@ rg -n "765611[0-9]{10}|STEAM_[0-9]|steamid|好友列表|昵称[:：]" data/gener
   恰好两道且逐像素复用带上下文题。
 - 本任务没有调用模型、没有联网、没有评分，也没有填写判卷表人工列。
 - 参考答案仍是 coding agent 草稿；产品负责人尚未修订，正式跑卷尚未开始。
+
+## M5-T2.6：消除考卷泄题
+
+### 清除证明
+
+1. 题目专属提示机制已从数据类、解析器、manifest 和请求构造中删除；解析器现在只
+   接受 `id`、`type`、`game_context`、`frames`、`seconds`、`region_grid`、`crops`。
+   CLI 也不再接受自定义系统提示文件，运行时固定逐字读取
+   `prompts/generic/observation.md`。
+2. `build_user_prompt()` 不再拼入题号。题号只进入 `ExamRecord`、CSV、Markdown 判卷表
+   与汇总索引。假客户端测试逐题断言 user message 不含 `question_id`。
+3. 人工语义区域文字已经移除。区域变体只会使用固定模板：
+   `画面被划分为 16 行 9 列的网格。与上一采样帧相比，以下格子发生了变化：<坐标>。`
+   测试同时拒绝「注意」「远处」「小目标」「对照题」「必须为空」进入 user message。
+4. M5-T2.5 的人工直升机裁剪
+   `frame-000092-helicopter-native.png` 已删除；`Test-Path` 实际返回 `False`。
+5. 13 道题的 `game_context` 只出现四个纯游戏名：`Grey Zone Warfare`、
+   `Disco Elysium`、`Slay the Spire 2`、`Subnautica 2`；两道无上下文题仍不含该字段。
+
+静态检索：
+
+```text
+rg -n "prompt_override|region_hint|题号：|注意|远处|小目标|对照题|必须为空" data/generic/vision-exam/manifest.toml src/pet/games/generic/eval/vision_exam.py src/pet/games/generic/eval/region_assets.py
+（无输出）
+
+rg -n -- "--prompt|with-region-hint|without-region-hint" src/pet/games/generic/eval
+（无输出）
+```
+
+### 机械生成口径与实际运行
+
+复现脚本为 `src/pet/games/generic/eval/region_assets.py`。它实例化现有
+`FrameChangeDetector(block_grid=(9, 16))`；参数顺序是“列、行”，因此实际网格为规格
+要求的 16 行 × 9 列。缩放宽度、灰度算法与块阈值均沿用检测器，其中块平均差阈值为
+12。脚本逐块计算坐标后，还断言坐标数量占比与检测器返回的 `block_change` 完全一致。
+
+裁剪是变化格子的原生分辨率外接矩形，在四边增加整帧对应方向 2% 的固定边距后夹紧
+到图像边界。`CROP_MARGIN_RATIO = 0.02` 写在脚本中。没有格子或没有严格相邻前帧时，
+脚本不生成裁剪。运行命令：
+
+```text
+.venv\Scripts\python.exe -m pet.games.generic.eval.region_assets data/generic/vision-exam/manifest.toml --write-crops
+```
+
+实际输出整理如下；坐标列表没有人工增删：
+
+| 题号 | 所用前一帧 | 实际变化格子 | 裁剪像素范围 `(左,上,右,下)` |
+|---|---|---|---|
+| `gzw-helicopter-landing` | 无：未落盘 `frame-000091` | 无 | 无 |
+| `disco-dialogue-panel` | `frame-000034-20260823T191026.342745Z.png` | `r1c6、r1c7、r1c8、r1c9、r2c2、r2c3、r2c4、r2c6、r2c9、r3c1、r3c2、r3c3、r3c4、r3c5、r3c6、r3c9、r4c1、r4c2、r4c3、r4c4、r4c5、r4c6、r4c9、r5c1、r5c2、r5c3、r5c4、r5c5、r5c6、r5c9、r6c1、r6c2、r6c3、r6c4、r6c5、r6c6、r6c7、r6c9、r7c1、r7c2、r7c3、r7c4、r7c5、r7c6、r7c7、r7c9、r8c1、r8c2、r8c3、r8c4、r8c5、r8c6、r8c7、r8c8、r8c9、r9c1、r9c2、r9c3、r9c4、r9c5、r9c6、r9c7、r9c8、r9c9、r10c1、r10c2、r10c3、r10c4、r10c5、r10c6、r10c7、r10c9、r11c1、r11c2、r11c3、r11c4、r11c5、r11c6、r11c7、r11c8、r11c9、r12c1、r12c2、r12c3、r12c4、r12c5、r12c6、r12c8、r12c9、r13c2、r13c3、r13c4、r13c5、r13c6、r13c8、r13c9、r14c2、r14c3、r14c4、r14c5、r14c6、r14c7、r14c9、r15c2、r15c3、r15c4、r15c5、r15c7、r15c8、r16c2、r16c3、r16c4、r16c5` | `(0, 0, 2560, 1440)` |
+| `gzw-near-black` | 无：当前是首帧 | 无 | 无 |
+| `spire-combat-ui` | `frame-000057-20260824T001852.718566Z.png` | `r4c5、r5c4、r5c5、r6c4、r6c5、r7c2、r7c4、r7c5、r7c6、r8c2、r8c4、r8c5、r8c6、r8c7、r9c2、r9c3、r9c4、r9c5、r9c7、r10c2、r10c5、r11c5、r12c4、r12c5、r13c5、r14c4、r14c5、r15c4、r15c5、r15c6、r16c4、r16c5` | `(233, 241, 2044, 1440)` |
+| `subnautica-night-underwater` | `frame-000012-20260823T223850.437531Z.png` | `r1c4、r1c5、r1c6、r2c5、r2c6、r3c5、r3c6、r3c7、r3c9、r4c4、r4c5、r4c6、r4c7、r5c5、r5c6、r5c7、r6c5、r6c6、r6c7、r6c8、r7c5、r7c6、r7c7、r7c8、r8c5、r8c6、r8c7、r8c8、r9c5、r9c6、r9c7、r9c8、r10c6、r10c7、r10c8、r11c7、r11c8、r12c6、r12c7、r13c4、r13c5、r13c6、r13c7、r14c4、r14c5、r14c6、r14c7、r15c3、r15c4、r15c7、r15c9、r16c3、r16c4、r16c7` | `(517, 0, 2560, 1440)` |
+| `gzw-static-control-a` | 无：当前是首帧 | 无 | 无 |
+| `gzw-static-control-b` | 无：未落盘 `frame-000030` | 无 | 无 |
+| `gzw-rain-small-helicopter` | 无：未落盘 `frame-000091` | 无 | 无 |
+| `subnautica-wave-surface` | 无：未落盘 `frame-000045` | 无 | 无 |
+| `disco-task-switch-sequence` | `frame-000044-20260823T201139.413813Z.png` | `r5c1、r5c2、r5c3、r5c5、r5c6、r8c1、r8c2、r8c3、r9c1、r9c2、r9c3、r10c1、r10c2、r10c3` | `(0, 331, 1758, 929)` |
+| `subnautica-wave-sequence` | `frame-000007-20260823T223148.805555Z.png` | `r6c1、r7c1、r7c2、r7c3、r7c4、r8c1、r8c2、r8c3、r8c4、r8c6、r9c1、r9c2、r9c3、r9c4、r9c5、r9c6、r9c7、r9c8、r9c9、r10c1、r10c2、r10c3、r10c4、r10c5、r10c6、r10c7、r10c8、r10c9、r11c1、r11c2、r11c3、r11c4、r11c5、r11c6、r11c7、r11c8、r11c9、r12c1、r12c2、r12c3、r12c4、r12c5、r12c6、r12c7、r12c8、r12c9、r13c1、r13c2、r13c3、r13c4、r13c5、r13c8、r13c9、r14c1、r14c2、r14c3、r14c4、r14c5、r14c6、r14c7、r14c8、r14c9、r15c1、r15c2、r15c3、r15c4、r15c5、r15c6、r15c8、r15c9、r16c1、r16c2、r16c3、r16c4、r16c5、r16c6、r16c7、r16c9` | `(0, 421, 2560, 1440)` |
+| `spire-combat-ui-nocontext` | `frame-000057-20260824T001852.718566Z.png` | 同 `spire-combat-ui`；机械复算结果逐项一致 | `(233, 241, 2044, 1440)` |
+| `subnautica-night-underwater-nocontext` | `frame-000012-20260823T223850.437531Z.png` | 同 `subnautica-night-underwater`；机械复算结果逐项一致 | `(517, 0, 2560, 1440)` |
+
+脚本写出 7 个题目裁剪引用，对应 5 张唯一 PNG；尺寸与字节数实测：
+
+```text
+frame-000035-20260823T191028.340744Z-grid-crop.png size=(2560, 1440) bytes=3765536
+frame-000045-20260823T201141.415143Z-grid-crop.png size=(1758, 598) bytes=517719
+frame-000008-20260823T223150.809244Z-grid-crop.png size=(2560, 1019) bytes=1960868
+frame-000013-20260823T223852.427674Z-grid-crop.png size=(2043, 1440) bytes=2031989
+frame-000058-20260824T001854.718295Z-grid-crop.png size=(1811, 1199) bytes=1688995
+```
+
+这些文件均由 `.gitignore` 的 `backend/recordings/` 规则命中，不进入仓库。对话题的
+机械外接范围覆盖整帧，水面题也保留大块无关背景；两者均未人工收窄。
+
+### Manifest 解析
+
+```text
+.venv\Scripts\python.exe -c "... load_manifest(Path('data/generic/vision-exam/manifest.toml')) ..."
+manifest_ok questions=13 region_grid=7 crops=7
+fields=id,type,game_context,frames,seconds,region_grid,crops
+mechanical_match questions=13 with_grid=7 unique_crops=5
+```
+
+### M5-T2.6 测试
+
+```text
+.venv\Scripts\python.exe -m pytest tests/test_vision_exam.py tests/test_vision_exam_region_assets.py tests/test_llm.py tests/test_layering.py -q --basetemp .pytest-m5-t2-6-final
+47 passed, 1 warning in 0.56s
+
+.venv\Scripts\python.exe -m pytest tests/ -q --basetemp .pytest-m5-t2-6-full
+463 passed, 4 failed, 3 warnings in 16.49s
+```
+
+4 项失败仍全部是 `tests/test_speech.py` 的既有真实 OneCore 中文语音环境项；当前执行
+环境无法枚举已安装中文语音。其余测试（含 `test_layering.py`）全部通过。
+
+### 分层说明
+
+生成器必须调用主干现有 `FrameChangeDetector`，因此分层警报器增加了一个精确到文件的
+只读例外：仅 `games/generic/eval/region_assets.py` 可 import `pet.core.capture`。其他
+游戏生产代码、其他评测工具和其他 core 模块许可均未放宽。
+
+### M5-T2.6 偏差与未完成项
+
+- 无规格偏差。6 道无 `region_grid` 的题均因不存在严格相邻的落盘前帧，不是检测器
+  计算失败，也没有用较早的兜底帧冒充前一采样帧。
+- 本任务未调用模型、未联网、未评分；产品负责人修订答案草稿与正式跑卷仍属后续流程。
