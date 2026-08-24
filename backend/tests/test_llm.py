@@ -160,6 +160,71 @@ def test_complete_forwards_explicit_reasoning_effort() -> None:
     assert request_body["reasoning"] == {"effort": "none"}
 
 
+def test_complete_can_explicitly_disable_reasoning() -> None:
+    request_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_body.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "vendor/model-actual",
+                "choices": [{"message": {"content": "好"}}],
+            },
+        )
+
+    client = OpenRouterClient("test-api-key", transport=httpx.MockTransport(handler))
+    try:
+        client.complete(
+            model="vendor/model-under-test",
+            system_prompt="system",
+            user_prompt="user",
+            max_tokens=32,
+            temperature=0.0,
+            reasoning_enabled=False,
+        )
+    finally:
+        client.close()
+
+    assert request_body["reasoning"] == {"enabled": False}
+
+
+def test_empty_visible_output_preserves_reasoning_usage_and_finish_reason() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "vendor/model-actual",
+                "choices": [
+                    {"message": {"content": None}, "finish_reason": "length"}
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 60,
+                    "completion_tokens_details": {"reasoning_tokens": 60},
+                    "cost": 0.001,
+                },
+            },
+        )
+
+    client = OpenRouterClient("test-api-key", transport=httpx.MockTransport(handler))
+    try:
+        result = client.complete(
+            model="vendor/model-under-test",
+            system_prompt="system",
+            user_prompt="user",
+            max_tokens=60,
+            temperature=0.0,
+        )
+    finally:
+        client.close()
+
+    assert result.text == ""
+    assert result.usage.completion_tokens == 60
+    assert result.usage.reasoning_tokens == 60
+    assert result.finish_reason == "length"
+
+
 def test_unavailable_locked_provider_fails_once_without_fallback() -> None:
     request_count = 0
 

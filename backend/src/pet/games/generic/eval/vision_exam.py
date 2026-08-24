@@ -7,8 +7,10 @@ from collections.abc import Callable, Mapping, Sequence
 import csv
 from dataclasses import asdict, dataclass
 from datetime import datetime
+import difflib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import statistics
@@ -16,12 +18,16 @@ import sys
 import tomllib
 from typing import Literal, cast
 
+import httpx
+
 from pet.core.config import LlmConfig, load_config
 from pet.core.llm import (
     LlmError,
     LlmImage,
     LlmResult,
     LlmVisionClientProtocol,
+    OPENROUTER_API_KEY_ENV,
+    OPENROUTER_BASE_URL,
     OpenRouterClient,
     image_upload_metadata,
 )
@@ -32,6 +38,10 @@ DEEP_PROMPT_PATH = BACKEND_DIRECTORY / "prompts" / "generic" / "observation-deep
 DEFAULT_OUTPUT_ROOT = BACKEND_DIRECTORY / "eval-reports"
 DEFAULT_CONFIG_PATH = BACKEND_DIRECTORY / "config.toml"
 DEFAULT_LOCAL_CONFIG_PATH = BACKEND_DIRECTORY / "config.local.toml"
+DEFAULT_ANSWER_KEY_PATH = (
+    BACKEND_DIRECTORY / "data" / "generic" / "vision-exam" / "answer-key.md"
+)
+OPENROUTER_MODELS_URL = f"{OPENROUTER_BASE_URL}/models"
 QUESTION_TYPES = {"single", "sequence"}
 QUESTION_FIELDS = {
     "id",
@@ -47,19 +57,25 @@ REGION_COLUMNS = 9
 REGION_CELL_COUNT = REGION_ROWS * REGION_COLUMNS
 RegionMode = Literal["off", "sparse", "always"]
 REGION_MODES: tuple[RegionMode, ...] = ("off", "sparse", "always")
-OutputMode = Literal["fast", "deep"]
-OUTPUT_MODES: tuple[OutputMode, ...] = ("fast", "deep")
+OutputMode = Literal["fast", "deep", "fast-relaxed"]
+CLI_OUTPUT_MODES = ("fast", "deep")
 FAST_MAX_TOKENS = 60  # 初始值，待考卷实测修订。
 DEEP_MAX_TOKENS = 1600  # 初始值，待考卷实测修订。
+FAST_RELAXED_MAX_TOKENS = 200  # 仅供 60-token 截断率超过 30% 的规定重跑。
 OUTPUT_PROMPT_PATHS: Mapping[OutputMode, Path] = {
     "fast": FAST_PROMPT_PATH,
     "deep": DEEP_PROMPT_PATH,
+    "fast-relaxed": FAST_PROMPT_PATH,
 }
 OUTPUT_MAX_TOKENS: Mapping[OutputMode, int] = {
     "fast": FAST_MAX_TOKENS,
     "deep": DEEP_MAX_TOKENS,
+    "fast-relaxed": FAST_RELAXED_MAX_TOKENS,
 }
 DEFAULT_REGION_SPARSITY_MAX = 0.25  # 此数待实测确定。
+DEFAULT_COST_CAP_USD = 5.0
+DEFAULT_ESTIMATED_INPUT_TOKENS = 4_000
+FAST_RELAXED_TRIGGER_FRACTION = 0.30
 
 
 class VisionExamError(Exception):
@@ -118,6 +134,30 @@ class ModelPrice:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedModel:
+    """One exact live OpenRouter catalog match used by a formal run."""
+
+    requested_name: str
+    name: str
+    slug: str
+    canonical_slug: str | None
+    input_modalities: tuple[str, ...]
+    price: ModelPrice
+    supported_parameters: tuple[str, ...]
+    reasoning_mandatory: bool
+    reasoning_disabled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ModelResolution:
+    """Timestamped results from one live fetch of the official model catalog."""
+
+    endpoint: str
+    fetched_at: str
+    models: tuple[ResolvedModel, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ModelTarget:
     """One requested model or resolved config profile."""
 
@@ -127,6 +167,7 @@ class ModelTarget:
     temperature: float
     timeout_seconds: float
     price: ModelPrice
+    reasoning_disabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +196,12 @@ class ExamRecord:
     output_tokens: int | None
     configured_cost_usd: float | None
     upstream_cost_usd: float | None
+    reasoning_tokens: int | None
+    visible_output_tokens: int | None
+    visible_output_empty: bool
+    truncated: bool
+    fast_relaxed: bool
+    finish_reason: str | None
 
     @property
     def succeeded(self) -> bool:
@@ -162,6 +209,27 @@ class ExamRecord:
 
 
 ClientFactory = Callable[[ModelTarget], LlmVisionClientProtocol]
+
+
+@dataclass(frozen=True, slots=True)
+class ExamRunOutcome:
+    """Records plus objective guard and automatic-rerun state."""
+
+    records: tuple[ExamRecord, ...]
+    actual_cost_usd: float
+    cost_guard_stopped: bool
+    relaxed_models: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CostEstimate:
+    """Transparent token-volume estimate used only by the preflight guard."""
+
+    base_calls: int
+    maximum_calls_with_relaxed: int
+    estimated_input_tokens: int
+    maximum_output_tokens: int
+    estimated_cost_usd: float
 
 
 def load_manifest(path: Path) -> ExamManifest:
@@ -405,7 +473,7 @@ def build_variants(
         raise VisionExamError("--region-mode 必须是 off、sparse 或 always")
     modes = tuple(cast(RegionMode, mode) for mode in raw_modes)
     raw_output_modes = tuple(dict.fromkeys(output_modes or ("fast",)))
-    if any(mode not in OUTPUT_MODES for mode in raw_output_modes):
+    if any(mode not in CLI_OUTPUT_MODES for mode in raw_output_modes):
         raise VisionExamError("--output-mode 必须是 fast 或 deep")
     selected_output_modes = tuple(
         cast(OutputMode, mode) for mode in raw_output_modes
@@ -418,6 +486,59 @@ def build_variants(
     )
 
 
+def build_formal_variants() -> tuple[ExamVariant, ...]:
+    """Return the four deliberately pruned M5-T2.9 production-shape variants."""
+    return (
+        ExamVariant(1280, "off", DEFAULT_REGION_SPARSITY_MAX, "fast"),
+        ExamVariant(1280, "sparse", DEFAULT_REGION_SPARSITY_MAX, "fast"),
+        ExamVariant(1280, "off", DEFAULT_REGION_SPARSITY_MAX, "deep"),
+        ExamVariant(0, "off", DEFAULT_REGION_SPARSITY_MAX, "deep"),
+    )
+
+
+def estimate_formal_cost(
+    *,
+    question_count: int,
+    variants: Sequence[ExamVariant],
+    targets: Sequence[ModelTarget],
+    estimated_input_tokens_per_attempt: int,
+) -> CostEstimate:
+    """Estimate worst-case cost, including every model's possible relaxed rerun."""
+    if question_count <= 0:
+        raise VisionExamError("预计花费需要至少一道题")
+    if estimated_input_tokens_per_attempt <= 0:
+        raise VisionExamError("--estimated-input-tokens 必须大于 0")
+    base_calls_per_model = question_count * len(variants)
+    fast_variants = [variant for variant in variants if variant.output_mode == "fast"]
+    relaxed_calls_per_model = question_count * len(fast_variants)
+    estimated_input_tokens = 0
+    maximum_output_tokens = 0
+    estimated_cost_usd = 0.0
+    for target in targets:
+        target_input_tokens = estimated_input_tokens_per_attempt * (
+            base_calls_per_model + relaxed_calls_per_model
+        )
+        target_output_tokens = question_count * sum(
+            variant.max_tokens for variant in variants
+        ) + relaxed_calls_per_model * FAST_RELAXED_MAX_TOKENS
+        estimated_input_tokens += target_input_tokens
+        maximum_output_tokens += target_output_tokens
+        estimated_cost_usd += (
+            target_input_tokens * target.price.input_per_million_usd
+            + target_output_tokens * target.price.output_per_million_usd
+        ) / 1_000_000
+    return CostEstimate(
+        base_calls=base_calls_per_model * len(targets),
+        maximum_calls_with_relaxed=(
+            base_calls_per_model + relaxed_calls_per_model
+        )
+        * len(targets),
+        estimated_input_tokens=estimated_input_tokens,
+        maximum_output_tokens=maximum_output_tokens,
+        estimated_cost_usd=estimated_cost_usd,
+    )
+
+
 def run_exam(
     *,
     manifest: ExamManifest,
@@ -425,13 +546,48 @@ def run_exam(
     targets: Sequence[ModelTarget],
     client_factory: ClientFactory,
 ) -> tuple[ExamRecord, ...]:
-    """Run all targets and keep going after every individual failure."""
+    """Run ordinary variants without the formal-run cost guard or relaxed reruns."""
+    return run_formal_exam(
+        manifest=manifest,
+        variants=variants,
+        targets=targets,
+        client_factory=client_factory,
+        cost_cap_usd=None,
+        enable_relaxed=False,
+    ).records
+
+
+def run_formal_exam(
+    *,
+    manifest: ExamManifest,
+    variants: Sequence[ExamVariant],
+    targets: Sequence[ModelTarget],
+    client_factory: ClientFactory,
+    cost_cap_usd: float | None,
+    enable_relaxed: bool = True,
+) -> ExamRunOutcome:
+    """Run all targets, preserve failures, guard cost, and rerun truncated fast groups."""
     system_prompts = {
         output_mode: _read_prompt(prompt_path)
         for output_mode, prompt_path in OUTPUT_PROMPT_PATHS.items()
     }
     records: list[ExamRecord] = []
+    actual_cost_usd = 0.0
+    stopped = False
+    relaxed_models: list[str] = []
+
+    def append_record(record: ExamRecord) -> None:
+        nonlocal actual_cost_usd, stopped
+        records.append(record)
+        actual_cost_usd += _record_actual_cost(record)
+        if (
+            cost_cap_usd is not None
+            and actual_cost_usd > cost_cap_usd * 1.5
+        ):
+            stopped = True
+
     for target in targets:
+        target_start = len(records)
         client: LlmVisionClientProtocol | None = None
         initialization_error: str | None = None
         try:
@@ -442,7 +598,7 @@ def run_exam(
             for question in manifest.questions:
                 for variant in variants:
                     if initialization_error is not None or client is None:
-                        records.append(
+                        append_record(
                             _failed_record(
                                 question,
                                 variant,
@@ -451,7 +607,7 @@ def run_exam(
                             )
                         )
                         continue
-                    records.append(
+                    append_record(
                         _run_attempt(
                             client=client,
                             question=question,
@@ -460,11 +616,75 @@ def run_exam(
                             system_prompt=system_prompts[variant.output_mode],
                         )
                     )
+                    if stopped:
+                        break
+                if stopped:
+                    break
+            target_records = records[target_start:]
+            base_fast = [
+                record
+                for record in target_records
+                if record.output_mode == "fast"
+            ]
+            truncated_fraction = (
+                sum(record.truncated for record in base_fast)
+                / len(base_fast)
+                if base_fast
+                else 0.0
+            )
+            if (
+                not stopped
+                and enable_relaxed
+                and truncated_fraction > FAST_RELAXED_TRIGGER_FRACTION
+            ):
+                relaxed_models.append(target.label)
+                relaxed_variants = tuple(
+                    ExamVariant(
+                        variant.send_width,
+                        variant.region_mode,
+                        variant.region_sparsity_max,
+                        "fast-relaxed",
+                    )
+                    for variant in variants
+                    if variant.output_mode == "fast"
+                )
+                for question in manifest.questions:
+                    for variant in relaxed_variants:
+                        if client is None:
+                            break
+                        append_record(
+                            _run_attempt(
+                                client=client,
+                                question=question,
+                                variant=variant,
+                                target=target,
+                                system_prompt=system_prompts["fast-relaxed"],
+                            )
+                        )
+                        if stopped:
+                            break
+                    if stopped:
+                        break
         finally:
             close = getattr(client, "close", None)
             if callable(close):
                 close()
-    return tuple(records)
+        if stopped:
+            break
+    return ExamRunOutcome(
+        records=tuple(records),
+        actual_cost_usd=actual_cost_usd,
+        cost_guard_stopped=stopped,
+        relaxed_models=tuple(relaxed_models),
+    )
+
+
+def _record_actual_cost(record: ExamRecord) -> float:
+    if record.upstream_cost_usd is not None:
+        return record.upstream_cost_usd
+    if record.configured_cost_usd is not None:
+        return record.configured_cost_usd
+    return 0.0
 
 
 def _run_attempt(
@@ -492,6 +712,7 @@ def _run_attempt(
             max_image_edge=None,
             max_tokens=variant.max_tokens,
             temperature=target.temperature,
+            reasoning_enabled=(False if target.reasoning_disabled else None),
         )
     except Exception as error:
         latency = (
@@ -543,6 +764,11 @@ def _record_from_result(
     image_dimensions: tuple[str, ...],
     image_byte_sizes: tuple[int, ...],
 ) -> ExamRecord:
+    visible_tokens = _visible_output_tokens(result)
+    visible_empty = not result.text.strip()
+    truncated = variant.output_mode.startswith("fast") and (
+        visible_empty or result.finish_reason in {"length", "max_tokens"}
+    )
     return ExamRecord(
         question_id=question.question_id,
         question_type=question.question_type,
@@ -566,6 +792,12 @@ def _record_from_result(
         output_tokens=result.usage.completion_tokens,
         configured_cost_usd=_configured_cost(result, target.price),
         upstream_cost_usd=result.usage.cost_usd,
+        reasoning_tokens=result.usage.reasoning_tokens,
+        visible_output_tokens=visible_tokens,
+        visible_output_empty=visible_empty,
+        truncated=truncated,
+        fast_relaxed=variant.output_mode == "fast-relaxed",
+        finish_reason=result.finish_reason,
     )
 
 
@@ -607,7 +839,21 @@ def _failed_record(
         output_tokens=None,
         configured_cost_usd=None,
         upstream_cost_usd=None,
+        reasoning_tokens=None,
+        visible_output_tokens=None,
+        visible_output_empty=True,
+        truncated=False,
+        fast_relaxed=variant.output_mode == "fast-relaxed",
+        finish_reason=None,
     )
+
+
+def _visible_output_tokens(result: LlmResult) -> int | None:
+    completion = result.usage.completion_tokens
+    if completion is None:
+        return None
+    reasoning = result.usage.reasoning_tokens or 0
+    return max(completion - reasoning, 0)
 
 
 def _configured_cost(result: LlmResult, price: ModelPrice | None) -> float | None:
@@ -644,6 +890,12 @@ CSV_COLUMNS = (
     "往返毫秒",
     "输入token",
     "实际输出token",
+    "推理token",
+    "可见输出token",
+    "可见输出是否为空",
+    "是否截断",
+    "是否fast-relaxed重跑",
+    "结束原因",
     "配置折算花费美元",
     "上游报告花费美元",
 )
@@ -654,13 +906,23 @@ def write_outputs(
     output_directory: Path,
     records: Sequence[ExamRecord],
     run_payload: Mapping[str, object],
+    answer_key_path: Path,
 ) -> None:
-    """Write the machine records, human marking table, and self-contained run data."""
+    """Write machine records, split human grading batches, and self-contained run data."""
     output_directory.mkdir(parents=True, exist_ok=False)
     _write_csv(output_directory / "results.csv", records)
     summary = summarize(records)
-    (output_directory / "report.md").write_text(
-        render_report(records, summary),
+    answers = load_answer_key(answer_key_path)
+    (output_directory / "grading-fast.md").write_text(
+        render_grading_sheet(records, answers, batch="fast"),
+        encoding="utf-8",
+    )
+    (output_directory / "grading-deep.md").write_text(
+        render_grading_sheet(records, answers, batch="deep"),
+        encoding="utf-8",
+    )
+    (output_directory / "summary.md").write_text(
+        render_machine_summary(summary),
         encoding="utf-8",
     )
     complete_payload = dict(run_payload)
@@ -669,6 +931,218 @@ def write_outputs(
         json.dumps(complete_payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerKeyEntry:
+    """Only the authoritative bullets needed beside human grading rows."""
+
+    question_id: str
+    core: tuple[str, ...]
+    details: tuple[str, ...]
+    doubtful: tuple[str, ...]
+    forbidden: tuple[str, ...]
+
+
+def load_answer_key(path: Path) -> Mapping[str, AnswerKeyEntry]:
+    """Extract authoritative scoring bullets without changing the answer-key source."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise VisionExamError(f"无法读取答案键 {path}：{error}") from error
+    sections = re.split(r"(?=^## \d+\. `)", text, flags=re.MULTILINE)[1:]
+    entries: dict[str, AnswerKeyEntry] = {}
+    for section in sections:
+        question_id = section.split("`", 2)[1]
+        owner = _markdown_subsection(section, "产品负责人判定", "离线复核")
+        forbidden = _markdown_subsection(section, "不得出现的内容", "不确定项")
+        entry = AnswerKeyEntry(
+            question_id=question_id,
+            core=_tagged_bullets(owner, "核心"),
+            details=_tagged_bullets(owner, "细节"),
+            doubtful=_tagged_bullets(owner, "存疑"),
+            forbidden=tuple(
+                line.removeprefix("- ").strip()
+                for line in forbidden.splitlines()
+                if line.startswith("- ")
+            ),
+        )
+        if not entry.core or not entry.forbidden:
+            raise VisionExamError(f"答案键题 {question_id} 缺少核心或不得出现条目")
+        entries[question_id] = entry
+    if not entries:
+        raise VisionExamError("答案键没有可解析题目")
+    return entries
+
+
+def _markdown_subsection(section: str, heading: str, next_heading: str) -> str:
+    marker = f"### {heading}"
+    next_marker = f"### {next_heading}"
+    if marker not in section or next_marker not in section:
+        raise VisionExamError(f"答案键小节不完整：{heading}")
+    return section.split(marker, 1)[1].split(next_marker, 1)[0]
+
+
+def _tagged_bullets(text: str, tag: str) -> tuple[str, ...]:
+    prefix = f"- 【{tag}】"
+    return tuple(
+        line.removeprefix("- ").strip()
+        for line in text.splitlines()
+        if line.startswith(prefix)
+    )
+
+
+def render_grading_sheet(
+    records: Sequence[ExamRecord],
+    answers: Mapping[str, AnswerKeyEntry],
+    *,
+    batch: Literal["fast", "deep"],
+) -> str:
+    """Render one unscored batch with authoritative bullets beside every question."""
+    selected_modes = {"fast", "fast-relaxed"} if batch == "fast" else {"deep"}
+    selected = [record for record in records if record.output_mode in selected_modes]
+    lines = [
+        f"# M5-T2.9 {'快线' if batch == 'fast' else '深线'}人工判卷表",
+        "",
+        "准确性判定、漏了什么、编造了什么由产品负责人填写；以下人工列均为空。",
+    ]
+    ordered_question_ids = tuple(dict.fromkeys(record.question_id for record in selected))
+    for question_id in ordered_question_ids:
+        answer = answers.get(question_id)
+        if answer is None:
+            raise VisionExamError(f"答案键缺少题目 {question_id}")
+        question_records = [
+            record for record in selected if record.question_id == question_id
+        ]
+        lines.extend(
+            (
+                "",
+                f"## `{question_id}`",
+                "",
+                "| 模型 | 变体 | max_tokens | 推理token | 可见输出token | 是否截断 | 回答原文 | 错误原文 | 准确性判定 | 漏了什么 | 编造了什么 |",
+                "|---|---|---:|---:|---:|---|---|---|---|---|---|",
+            )
+        )
+        for record in question_records:
+            lines.append(
+                "| "
+                + " | ".join(
+                    (
+                        _markdown_cell(record.target_label),
+                        _markdown_cell(record.variant),
+                        str(record.max_tokens),
+                        _display_number(record.reasoning_tokens, 0),
+                        _display_number(record.visible_output_tokens, 0),
+                        str(record.truncated).lower(),
+                        _markdown_cell(record.response_text),
+                        _markdown_cell(record.error or ""),
+                        "",
+                        "",
+                        "",
+                    )
+                )
+                + " |"
+            )
+        scoring_points = answer.core + (answer.details if batch == "deep" else ())
+        lines.extend(("", "### 计分要点", ""))
+        lines.extend(f"- {point}" for point in scoring_points)
+        if batch == "deep":
+            lines.extend(("", "### 【存疑】（不计分）", ""))
+            lines.extend(f"- {point}" for point in answer.doubtful)
+            if not answer.doubtful:
+                lines.append("- 无")
+        lines.extend(("", "### 不得出现的内容", ""))
+        lines.extend(f"- {point}" for point in answer.forbidden)
+    return "\n".join(lines) + "\n"
+
+
+def render_machine_summary(summary: Mapping[str, object]) -> str:
+    """Render objective statistics only; no ranking or quality language is generated."""
+    lines = [
+        "# M5-T2.9 机器统计",
+        "",
+        "## 按模型",
+        "",
+        "| 模型 | 调用数 | 失败数 | 截断数 | 延迟中位(ms) | 延迟P90(ms) | 延迟最大(ms) | 平均输入token | 推理token合计 | 平均可见输出token | 总花费(USD) |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    _append_machine_rows(lines, summary.get("models"))
+    lines.extend(
+        (
+            "",
+            "## 按输出模式",
+            "",
+        "| 输出模式 | 调用数 | 失败数 | 截断数 | 延迟中位(ms) | 延迟P90(ms) | "
+        "延迟最大(ms) | 平均输入token | 推理token合计 | 平均可见输出token | 总花费(USD) |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        )
+    )
+    _append_machine_rows(lines, summary.get("output_modes"))
+    lines.extend(
+        (
+            "",
+            "## 按上传宽度",
+            "",
+            "| 上传宽度 | 调用数 | 平均输入token | 延迟中位(ms) | 延迟P90(ms) | 延迟最大(ms) |",
+            "|---|---:|---:|---:|---:|---:|",
+        )
+    )
+    widths = summary.get("upload_widths")
+    if isinstance(widths, Mapping):
+        for name, raw in widths.items():
+            if isinstance(raw, Mapping):
+                lines.append(
+                    f"| {_markdown_cell(str(name))} | {raw.get('attempts', 0)} | "
+                    f"{_display_number(raw.get('average_input_tokens_per_attempt'), 2)} | "
+                    f"{_display_number(raw.get('latency_median_ms'), 3)} | "
+                    f"{_display_number(raw.get('latency_p90_ms'), 3)} | "
+                    f"{_display_number(raw.get('latency_max_ms'), 3)} |"
+                )
+    sparse = summary.get("sparse")
+    lines.extend(("", "## sparse 区域提示", ""))
+    if isinstance(sparse, Mapping):
+        lines.append(f"- 调用数：{sparse.get('attempts', 0)}")
+        lines.append(f"- 实际注入数：{sparse.get('injected', 0)}")
+        lines.append(
+            f"- 实际注入率：{_display_number(sparse.get('injection_rate'), 6)}"
+        )
+    lines.extend(
+        (
+            "",
+            "## 全部调用",
+            "",
+            f"- 失败数：{summary.get('failures', 0)}",
+            f"- 截断数：{summary.get('truncated', 0)}",
+            f"- 实际总花费（USD）：{_display_number(summary.get('total_actual_cost_usd'), 9)}",
+        )
+    )
+    relaxed_models = summary.get("relaxed_models")
+    if isinstance(relaxed_models, list) and relaxed_models:
+        lines.extend(("", "## fast-relaxed 重跑", ""))
+        for model in relaxed_models:
+            lines.append(
+                f"- `{model}`：该模型的快线受推理预算影响，60 token 档不可比。"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def _append_machine_rows(lines: list[str], raw_groups: object) -> None:
+    if not isinstance(raw_groups, Mapping):
+        return
+    for name, raw in raw_groups.items():
+        if not isinstance(raw, Mapping):
+            continue
+        lines.append(
+            f"| {_markdown_cell(str(name))} | {raw.get('attempts', 0)} | "
+            f"{raw.get('failures', 0)} | {raw.get('truncated', 0)} | "
+            f"{_display_number(raw.get('latency_median_ms'), 3)} | "
+            f"{_display_number(raw.get('latency_p90_ms'), 3)} | "
+            f"{_display_number(raw.get('latency_max_ms'), 3)} | "
+            f"{_display_number(raw.get('average_input_tokens_per_attempt'), 2)} | "
+            f"{raw.get('reasoning_tokens', 0)} | "
+            f"{_display_number(raw.get('average_visible_output_tokens'), 2)} | "
+            f"{_display_number(raw.get('total_actual_cost_usd'), 9)} |"
+        )
 
 
 def _write_csv(path: Path, records: Sequence[ExamRecord]) -> None:
@@ -708,6 +1182,20 @@ def _write_csv(path: Path, records: Sequence[ExamRecord]) -> None:
                         if record.output_tokens is not None
                         else ""
                     ),
+                    "推理token": (
+                        record.reasoning_tokens
+                        if record.reasoning_tokens is not None
+                        else ""
+                    ),
+                    "可见输出token": (
+                        record.visible_output_tokens
+                        if record.visible_output_tokens is not None
+                        else ""
+                    ),
+                    "可见输出是否为空": str(record.visible_output_empty).lower(),
+                    "是否截断": str(record.truncated).lower(),
+                    "是否fast-relaxed重跑": str(record.fast_relaxed).lower(),
+                    "结束原因": record.finish_reason or "",
                     "配置折算花费美元": _optional_number(record.configured_cost_usd, 9),
                     "上游报告花费美元": _optional_number(record.upstream_cost_usd, 9),
                 }
@@ -716,6 +1204,7 @@ def _write_csv(path: Path, records: Sequence[ExamRecord]) -> None:
 
 def summarize(records: Sequence[ExamRecord]) -> dict[str, object]:
     """Compute model, question, variant, width, and output-mode groups."""
+    sparse_records = [record for record in records if record.region_mode == "sparse"]
     return {
         "models": _group_summary(records, lambda item: item.target_label),
         "questions": _group_summary(records, lambda item: item.question_id),
@@ -725,6 +1214,22 @@ def summarize(records: Sequence[ExamRecord]) -> dict[str, object]:
             lambda item: "native" if item.upload_width == 0 else str(item.upload_width),
         ),
         "output_modes": _group_summary(records, lambda item: item.output_mode),
+        "sparse": {
+            "attempts": len(sparse_records),
+            "injected": sum(record.region_injected for record in sparse_records),
+            "injection_rate": (
+                sum(record.region_injected for record in sparse_records)
+                / len(sparse_records)
+                if sparse_records
+                else None
+            ),
+        },
+        "total_actual_cost_usd": sum(_record_actual_cost(record) for record in records),
+        "failures": sum(not record.succeeded for record in records),
+        "truncated": sum(record.truncated for record in records),
+        "relaxed_models": sorted(
+            {record.target_label for record in records if record.fast_relaxed}
+        ),
     }
 
 
@@ -754,17 +1259,37 @@ def _summary_row(records: Sequence[ExamRecord]) -> dict[str, object]:
         for item in records
         if item.configured_cost_usd is not None
     ]
+    actual_costs = [_record_actual_cost(item) for item in records]
+    visible_tokens = [
+        item.visible_output_tokens
+        for item in records
+        if item.visible_output_tokens is not None
+    ]
+    reasoning_tokens = [
+        item.reasoning_tokens
+        for item in records
+        if item.reasoning_tokens is not None
+    ]
     return {
         "attempts": len(records),
         "successes": len(successful),
         "failures": len(records) - len(successful),
         "latency_median_ms": statistics.median(latencies) if latencies else None,
         "latency_p90_ms": _percentile(latencies, 0.9) if latencies else None,
+        "latency_max_ms": max(latencies) if latencies else None,
         "average_tokens_per_attempt": statistics.fmean(token_totals) if token_totals else None,
         "average_input_tokens_per_attempt": (
             statistics.fmean(input_tokens) if input_tokens else None
         ),
         "average_configured_cost_usd_per_attempt": statistics.fmean(costs) if costs else None,
+        "total_actual_cost_usd": sum(actual_costs),
+        "reasoning_tokens": sum(reasoning_tokens),
+        "average_visible_output_tokens": (
+            statistics.fmean(visible_tokens) if visible_tokens else None
+        ),
+        "empty_visible_outputs": sum(item.visible_output_empty for item in records),
+        "truncated": sum(item.truncated for item in records),
+        "fast_relaxed_attempts": sum(item.fast_relaxed for item in records),
     }
 
 
@@ -780,143 +1305,6 @@ def _percentile(values: Sequence[float], percentile: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
-def render_report(
-    records: Sequence[ExamRecord],
-    summary: Mapping[str, object],
-) -> str:
-    """Render summary tables and one blank human-scoring row per attempt."""
-    lines = [
-        "# M5-T2 视觉模型考卷判卷表",
-        "",
-        "人工列由产品负责人填写；工具不对模型质量作结论。",
-        "",
-        "## 模型汇总",
-        "",
-        "| 模型/档位 | 成功/总数 | 延迟中位(ms) | 延迟P90(ms) | 每次平均token | 每次平均配置花费(USD) |",
-        "|---|---:|---:|---:|---:|---:|",
-    ]
-    model_summary = summary.get("models", {})
-    if isinstance(model_summary, Mapping):
-        for name, raw in model_summary.items():
-            if isinstance(raw, Mapping):
-                lines.append(_summary_markdown_row(str(name), raw))
-    lines.extend(
-        (
-            "",
-            "## 题目汇总",
-            "",
-            "| 题号 | 成功/总数 | 延迟中位(ms) | 延迟P90(ms) | 每次平均token | 每次平均配置花费(USD) |",
-            "|---|---:|---:|---:|---:|---:|",
-        )
-    )
-    question_summary = summary.get("questions", {})
-    if isinstance(question_summary, Mapping):
-        for name, raw in question_summary.items():
-            if isinstance(raw, Mapping):
-                lines.append(_summary_markdown_row(str(name), raw))
-    lines.extend(
-        (
-            "",
-            "## 变体轴同类对比",
-            "",
-            "| 变体 | 成功/总数 | 延迟中位(ms) | 延迟P90(ms) | 每次平均token | 每次平均配置花费(USD) |",
-            "|---|---:|---:|---:|---:|---:|",
-        )
-    )
-    variant_summary = summary.get("variants", {})
-    if isinstance(variant_summary, Mapping):
-        for name, raw in variant_summary.items():
-            if isinstance(raw, Mapping):
-                lines.append(_summary_markdown_row(str(name), raw))
-    lines.extend(
-        (
-            "",
-            "## 上传宽度同类对比",
-            "",
-            "| 上传宽度 | 成功/总数 | 延迟中位(ms) | 延迟P90(ms) | 每次平均输入token |",
-            "|---|---:|---:|---:|---:|",
-        )
-    )
-    width_summary = summary.get("upload_widths", {})
-    if isinstance(width_summary, Mapping):
-        for name, raw in width_summary.items():
-            if isinstance(raw, Mapping):
-                lines.append(
-                    f"| {_markdown_cell(str(name))} | "
-                    f"{raw.get('successes', 0)}/{raw.get('attempts', 0)} | "
-                    f"{_display_number(raw.get('latency_median_ms'), 3)} | "
-                    f"{_display_number(raw.get('latency_p90_ms'), 3)} | "
-                    f"{_display_number(raw.get('average_input_tokens_per_attempt'), 2)} |"
-                )
-    lines.extend(
-        (
-            "",
-            "## 输出模式同类对比",
-            "",
-            "| 输出模式 | 成功/总数 | 延迟中位(ms) | 延迟P90(ms) |",
-            "|---|---:|---:|---:|",
-        )
-    )
-    output_mode_summary = summary.get("output_modes", {})
-    if isinstance(output_mode_summary, Mapping):
-        for name, raw in output_mode_summary.items():
-            if isinstance(raw, Mapping):
-                lines.append(
-                    f"| {_markdown_cell(str(name))} | "
-                    f"{raw.get('successes', 0)}/{raw.get('attempts', 0)} | "
-                    f"{_display_number(raw.get('latency_median_ms'), 3)} | "
-                    f"{_display_number(raw.get('latency_p90_ms'), 3)} |"
-                )
-    lines.extend(
-        (
-            "",
-            "## 逐题判卷",
-            "",
-            "| 题号 | 变体 | 输出模式 | max_tokens | 实际输出token | 上传宽度 | 区域提示模式 | 变化格子占比 | 实际注入 | 图像像素尺寸 | 图像字节数 | 模型/档位 | 回答原文 | 错误原文 | 准确性判定 | 漏了什么 | 编造了什么 |",
-            "|---|---|---|---:|---:|---:|---|---:|---|---|---|---|---|---|---|---|---|",
-        )
-    )
-    for record in records:
-        lines.append(
-            "| "
-            + " | ".join(
-                (
-                    _markdown_cell(record.question_id),
-                    _markdown_cell(record.variant),
-                    _markdown_cell(record.output_mode),
-                    str(record.max_tokens),
-                    _display_number(record.output_tokens, 0),
-                    str(record.upload_width),
-                    _markdown_cell(record.region_mode),
-                    _display_number(record.region_grid_fraction, 9),
-                    str(record.region_injected).lower(),
-                    _markdown_cell(";".join(record.image_dimensions)),
-                    _markdown_cell(
-                        ";".join(str(value) for value in record.image_byte_sizes)
-                    ),
-                    _markdown_cell(record.target_label),
-                    _markdown_cell(record.response_text),
-                    _markdown_cell(record.error or ""),
-                    "",
-                    "",
-                    "",
-                )
-            )
-            + " |"
-        )
-    return "\n".join(lines) + "\n"
-
-
-def _summary_markdown_row(name: str, raw: Mapping[str, object]) -> str:
-    return (
-        f"| {_markdown_cell(name)} | {raw.get('successes', 0)}/{raw.get('attempts', 0)} | "
-        f"{_display_number(raw.get('latency_median_ms'), 3)} | "
-        f"{_display_number(raw.get('latency_p90_ms'), 3)} | "
-        f"{_display_number(raw.get('average_tokens_per_attempt'), 2)} | "
-        f"{_display_number(raw.get('average_configured_cost_usd_per_attempt'), 9)} |"
-    )
-
-
 def _markdown_cell(value: str) -> str:
     return value.replace("|", "\\|").replace("\r", "").replace("\n", "<br>")
 
@@ -929,6 +1317,218 @@ def _display_number(value: object, digits: int) -> str:
 
 def _optional_number(value: float | None, digits: int) -> str:
     return "" if value is None else f"{value:.{digits}f}"
+
+
+def resolve_models_from_openrouter(
+    requested_names: Sequence[str],
+    *,
+    client: httpx.Client | None = None,
+    fetched_at: datetime | None = None,
+) -> ModelResolution:
+    """Resolve names or slugs from one uncached official OpenRouter catalog fetch."""
+    if not requested_names:
+        raise VisionExamError("--resolve-models 至少需要一个 --model 名称")
+    owns_client = client is None
+    catalog_client = client or httpx.Client(timeout=30.0)
+    try:
+        try:
+            response = catalog_client.get(OPENROUTER_MODELS_URL)
+        except httpx.HTTPError as error:
+            raise VisionExamError(f"OpenRouter 型号目录请求失败：{error}") from error
+        if not response.is_success:
+            raise VisionExamError(
+                f"OpenRouter 型号目录请求失败（HTTP {response.status_code}）"
+            )
+        try:
+            payload: object = response.json()
+        except ValueError as error:
+            raise VisionExamError(f"OpenRouter 型号目录不是合法 JSON：{error}") from error
+    finally:
+        if owns_client:
+            catalog_client.close()
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("data"), list):
+        raise VisionExamError("OpenRouter 型号目录缺少 data 数组")
+    raw_models = [item for item in payload["data"] if isinstance(item, Mapping)]
+    if not raw_models:
+        raise VisionExamError("OpenRouter 型号目录没有可解析型号")
+
+    resolved: list[ResolvedModel] = []
+    errors: list[str] = []
+    for requested_name in requested_names:
+        match = _match_catalog_model(requested_name, raw_models)
+        if match is None:
+            candidates = _closest_catalog_slugs(requested_name, raw_models)
+            errors.append(
+                f"{requested_name}：不存在；最接近："
+                + ("、".join(candidates) if candidates else "无")
+            )
+            continue
+        try:
+            model = _parse_resolved_model(requested_name, match)
+        except VisionExamError as error:
+            errors.append(str(error))
+            continue
+        if "image" not in model.input_modalities:
+            candidates = _closest_catalog_slugs(requested_name, raw_models)
+            errors.append(
+                f"{requested_name} -> {model.slug}：不支持图像输入；最接近："
+                + ("、".join(candidates) if candidates else "无")
+            )
+            continue
+        resolved.append(model)
+    if errors:
+        raise VisionExamError("候选型号解析失败：\n- " + "\n- ".join(errors))
+    slugs = [model.slug for model in resolved]
+    if len(set(slugs)) != len(slugs):
+        raise VisionExamError("多个候选名称解析到了同一个 slug")
+    timestamp = fetched_at or datetime.now().astimezone()
+    return ModelResolution(
+        endpoint=OPENROUTER_MODELS_URL,
+        fetched_at=timestamp.isoformat(),
+        models=tuple(resolved),
+    )
+
+
+def _match_catalog_model(
+    requested_name: str,
+    raw_models: Sequence[Mapping[str, object]],
+) -> Mapping[str, object] | None:
+    requested = requested_name.strip()
+    if not requested:
+        return None
+    exact_slug = [item for item in raw_models if item.get("id") == requested]
+    if len(exact_slug) == 1:
+        return exact_slug[0]
+    normalized = _normalize_model_name(requested)
+    matches = [
+        item
+        for item in raw_models
+        if normalized in _catalog_match_keys(item)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _catalog_match_keys(raw: Mapping[str, object]) -> set[str]:
+    keys: set[str] = set()
+    slug = raw.get("id")
+    if isinstance(slug, str):
+        keys.add(_normalize_model_name(slug))
+    name = raw.get("name")
+    if isinstance(name, str):
+        keys.add(_normalize_model_name(name))
+        if ":" in name:
+            keys.add(_normalize_model_name(name.split(":", 1)[1]))
+    return keys
+
+
+def _normalize_model_name(value: str) -> str:
+    return "".join(character.lower() for character in value if character.isalnum())
+
+
+def _closest_catalog_slugs(
+    requested_name: str,
+    raw_models: Sequence[Mapping[str, object]],
+    *,
+    limit: int = 5,
+) -> tuple[str, ...]:
+    requested = _normalize_model_name(requested_name)
+    scored: list[tuple[float, str]] = []
+    for raw in raw_models:
+        slug = raw.get("id")
+        if not isinstance(slug, str):
+            continue
+        score = max(
+            (
+                difflib.SequenceMatcher(None, requested, key).ratio()
+                for key in _catalog_match_keys(raw)
+            ),
+            default=0.0,
+        )
+        scored.append((score, slug))
+    return tuple(slug for _, slug in sorted(scored, reverse=True)[:limit])
+
+
+def _parse_resolved_model(
+    requested_name: str,
+    raw: Mapping[str, object],
+) -> ResolvedModel:
+    slug = raw.get("id")
+    name = raw.get("name")
+    if not isinstance(slug, str) or not slug.strip():
+        raise VisionExamError(f"{requested_name}：目录条目缺少 slug")
+    if not isinstance(name, str) or not name.strip():
+        raise VisionExamError(f"{requested_name} -> {slug}：目录条目缺少名称")
+    architecture_value = raw.get("architecture")
+    architecture = (
+        architecture_value if isinstance(architecture_value, Mapping) else {}
+    )
+    modalities_value = architecture.get("input_modalities")
+    modalities = (
+        tuple(item for item in modalities_value if isinstance(item, str))
+        if isinstance(modalities_value, list)
+        else ()
+    )
+    pricing_value = raw.get("pricing")
+    pricing = pricing_value if isinstance(pricing_value, Mapping) else {}
+    try:
+        prompt_price = float(pricing["prompt"])
+        completion_price = float(pricing["completion"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise VisionExamError(
+            f"{requested_name} -> {slug}：无法解析当前输入/输出单价"
+        ) from error
+    if (
+        not math.isfinite(prompt_price)
+        or not math.isfinite(completion_price)
+        or prompt_price < 0
+        or completion_price < 0
+    ):
+        raise VisionExamError(f"{requested_name} -> {slug}：当前单价无效")
+    parameters_value = raw.get("supported_parameters")
+    parameters = (
+        tuple(item for item in parameters_value if isinstance(item, str))
+        if isinstance(parameters_value, list)
+        else ()
+    )
+    reasoning_value = raw.get("reasoning")
+    reasoning = reasoning_value if isinstance(reasoning_value, Mapping) else {}
+    mandatory = reasoning.get("mandatory") is True
+    canonical_value = raw.get("canonical_slug")
+    return ResolvedModel(
+        requested_name=requested_name,
+        name=name,
+        slug=slug,
+        canonical_slug=(canonical_value if isinstance(canonical_value, str) else None),
+        input_modalities=modalities,
+        price=ModelPrice(
+            input_per_million_usd=prompt_price * 1_000_000,
+            output_per_million_usd=completion_price * 1_000_000,
+        ),
+        supported_parameters=parameters,
+        reasoning_mandatory=mandatory,
+        reasoning_disabled=("reasoning" in parameters and not mandatory),
+    )
+
+
+def targets_from_resolution(
+    resolution: ModelResolution,
+    *,
+    temperature: float,
+    timeout_seconds: float,
+) -> tuple[ModelTarget, ...]:
+    """Convert exact live catalog records into runnable targets."""
+    return tuple(
+        ModelTarget(
+            label=model.slug,
+            model=model.slug,
+            provider=None,
+            temperature=temperature,
+            timeout_seconds=timeout_seconds,
+            price=model.price,
+            reasoning_disabled=model.reasoning_disabled,
+        )
+        for model in resolution.models
+    )
 
 
 def resolve_targets(
@@ -1030,6 +1630,9 @@ def print_upload_plan(
     files: Sequence[Path],
     targets: Sequence[ModelTarget],
     variants: Sequence[ExamVariant],
+    estimate: CostEstimate,
+    *,
+    cost_cap_usd: float,
 ) -> None:
     print("=" * 68)
     print("警告：M5-T2 将把下面列出的本地图像发送到网络模型服务。")
@@ -1044,6 +1647,13 @@ def print_upload_plan(
     print("变体：")
     for variant in variants:
         print(f"  - {variant.name}")
+    print("预计量（包含所有模型都触发 fast-relaxed 的上界）：")
+    print(f"  - 基础调用：{estimate.base_calls} 次")
+    print(f"  - 含重跑最多：{estimate.maximum_calls_with_relaxed} 次")
+    print(f"  - 估计输入 token：{estimate.estimated_input_tokens}")
+    print(f"  - 输出 token 预算上界：{estimate.maximum_output_tokens}")
+    print(f"  - 预计花费：${estimate.estimated_cost_usd:.6f}")
+    print(f"  - 花费上限：${cost_cap_usd:.6f}；运行中止线：${cost_cap_usd * 1.5:.6f}")
     print("待上传文件：")
     for path in files:
         print(f"  - {path}")
@@ -1061,6 +1671,40 @@ def confirm_upload(
     reader = input_function or input
     answer = reader("确认上传以上文件？请输入 YES 继续：")
     return answer.strip() == "YES"
+
+
+def render_copy_command(
+    *,
+    manifest_path: Path,
+    resolution: ModelResolution,
+    cost_cap_usd: float,
+    timeout_seconds: float,
+) -> str:
+    """Render a PowerShell-safe command with the exact live slugs and prices."""
+    arguments = [
+        "python",
+        "-m",
+        "pet.games.generic.eval.vision_exam",
+        str(manifest_path),
+        "--resolve-models",
+    ]
+    for model in resolution.models:
+        arguments.extend(("--model", model.slug))
+        arguments.extend(
+            (
+                "--price",
+                f"{model.slug}={model.price.input_per_million_usd:g},"
+                f"{model.price.output_per_million_usd:g}",
+            )
+        )
+    arguments.extend(("--cost-cap", f"{cost_cap_usd:g}", "--timeout", f"{timeout_seconds:g}"))
+    return " ".join(_powershell_quote(argument) for argument in arguments)
+
+
+def _powershell_quote(value: str) -> str:
+    if value and not any(character.isspace() or character in "'\"`$" for character in value):
+        return value
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _read_prompt(path: Path) -> str:
@@ -1086,6 +1730,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="M5-T2 离线视觉模型考卷")
     parser.add_argument("manifest", type=Path, help="TOML 考卷清单")
     parser.add_argument("--model", action="append", default=[], help="模型 ID 或 profile:<档位名>；可重复")
+    parser.add_argument(
+        "--resolve-models",
+        action="store_true",
+        help="实时读取 OpenRouter 官方型号目录；同时使用 M5-T2.9 的四个剪枝变体",
+    )
     parser.add_argument("--provider", help="直接模型的可选服务商锁定")
     parser.add_argument("--price", action="append", default=[], help="TARGET=输入百万token美元,输出百万token美元；可重复")
     parser.add_argument(
@@ -1105,7 +1754,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-mode",
         action="append",
-        choices=OUTPUT_MODES,
+        choices=CLI_OUTPUT_MODES,
         dest="output_modes",
         help="可重复：fast 或 deep；未传时默认 fast",
     )
@@ -1117,6 +1766,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--cost-cap", type=float, default=DEFAULT_COST_CAP_USD)
+    parser.add_argument(
+        "--estimated-input-tokens",
+        type=int,
+        default=DEFAULT_ESTIMATED_INPUT_TOKENS,
+        help="预估每次调用的输入 token，仅用于运行前花费护栏",
+    )
+    parser.add_argument("--answer-key", type=Path, default=DEFAULT_ANSWER_KEY_PATH)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--local-config", type=Path, default=DEFAULT_LOCAL_CONFIG_PATH)
     parser.add_argument("--yes", action="store_true", help="打印清单后跳过交互输入")
@@ -1140,41 +1797,94 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise VisionExamError("--temperature 必须在 0–2")
         if arguments.timeout <= 0:
             raise VisionExamError("--timeout 必须大于 0")
+        if arguments.cost_cap <= 0:
+            raise VisionExamError("--cost-cap 必须大于 0")
         manifest = load_manifest(arguments.manifest)
-        variants = build_variants(
-            send_widths=arguments.send_widths or (),
-            region_modes=arguments.region_modes or (),
-            output_modes=arguments.output_modes or (),
-            region_sparsity_max=arguments.region_sparsity_max,
+        resolution: ModelResolution | None = None
+        if arguments.resolve_models:
+            if arguments.send_widths or arguments.region_modes or arguments.output_modes:
+                raise VisionExamError(
+                    "--resolve-models 正式跑卷固定使用四个剪枝变体，不得同时传变体轴"
+                )
+            variants = build_formal_variants()
+            resolution = resolve_models_from_openrouter(arguments.model)
+            targets = targets_from_resolution(
+                resolution,
+                temperature=arguments.temperature,
+                timeout_seconds=arguments.timeout,
+            )
+            supplied_prices = parse_prices(arguments.price)
+            for model in resolution.models:
+                supplied = supplied_prices.get(model.slug)
+                if supplied is not None and supplied != model.price:
+                    raise VisionExamError(
+                        f"命令行单价与实时目录不一致：{model.slug}"
+                    )
+        else:
+            variants = build_variants(
+                send_widths=arguments.send_widths or (),
+                region_modes=arguments.region_modes or (),
+                output_modes=arguments.output_modes or (),
+                region_sparsity_max=arguments.region_sparsity_max,
+            )
+            prices = parse_prices(arguments.price)
+            config = load_config(arguments.config, arguments.local_config)
+            targets = resolve_targets(
+                arguments.model,
+                llm_config=config.llm,
+                provider=arguments.provider,
+                temperature=arguments.temperature,
+                timeout_seconds=arguments.timeout,
+                prices=prices,
+            )
+        estimate = estimate_formal_cost(
+            question_count=len(manifest.questions),
+            variants=variants,
+            targets=targets,
+            estimated_input_tokens_per_attempt=arguments.estimated_input_tokens,
         )
-        prices = parse_prices(arguments.price)
-        config = load_config(arguments.config, arguments.local_config)
-        targets = resolve_targets(
-            arguments.model,
-            llm_config=config.llm,
-            provider=arguments.provider,
-            temperature=arguments.temperature,
-            timeout_seconds=arguments.timeout,
-            prices=prices,
-        )
+        if estimate.estimated_cost_usd > arguments.cost_cap:
+            raise VisionExamError(
+                f"预计花费 ${estimate.estimated_cost_usd:.6f} 超过 "
+                f"--cost-cap ${arguments.cost_cap:.6f}"
+            )
+        if resolution is not None and not os.environ.get(OPENROUTER_API_KEY_ENV, "").strip():
+            print(f"未设置 {OPENROUTER_API_KEY_ENV}；未尝试模型调用。可复制命令：")
+            print(
+                render_copy_command(
+                    manifest_path=manifest.path,
+                    resolution=resolution,
+                    cost_cap_usd=arguments.cost_cap,
+                    timeout_seconds=arguments.timeout,
+                )
+            )
+            return 0
         files = upload_files(manifest, variants)
-        print_upload_plan(files, targets, variants)
+        print_upload_plan(
+            files,
+            targets,
+            variants,
+            estimate,
+            cost_cap_usd=arguments.cost_cap,
+        )
         if not confirm_upload(assume_yes=arguments.yes):
             print("未确认上传，考卷未执行。")
             return 2
 
         started_at = datetime.now().astimezone()
-        records = run_exam(
+        outcome = run_formal_exam(
             manifest=manifest,
             variants=variants,
             targets=targets,
             client_factory=_default_client_factory,
+            cost_cap_usd=arguments.cost_cap,
         )
         ended_at = datetime.now().astimezone()
         output_directory = _run_directory(DEFAULT_OUTPUT_ROOT, started_at)
         write_outputs(
             output_directory=output_directory,
-            records=records,
+            records=outcome.records,
+            answer_key_path=arguments.answer_key,
             run_payload={
                 "manifest": str(manifest.path),
                 "arguments": vars(arguments)
@@ -1186,21 +1896,44 @@ def main(argv: Sequence[str] | None = None) -> int:
                     },
                     "config": str(arguments.config),
                     "local_config": str(arguments.local_config),
+                    "answer_key": str(arguments.answer_key),
                 },
                 "started_at": started_at.isoformat(),
                 "ended_at": ended_at.isoformat(),
                 "targets": [asdict(target) for target in targets],
+                "model_resolution": (
+                    asdict(resolution) if resolution is not None else None
+                ),
+                "cost_estimate": asdict(estimate),
+                "cost_cap_usd": arguments.cost_cap,
+                "actual_cost_usd": outcome.actual_cost_usd,
+                "cost_guard_stopped": outcome.cost_guard_stopped,
+                "relaxed_models": list(outcome.relaxed_models),
                 "variants": [
                     asdict(variant)
                     | {"name": variant.name, "max_tokens": variant.max_tokens}
                     for variant in variants
                 ],
                 "uploaded_files": [str(path) for path in files],
-                "attempts": len(records),
+                "base_expected_rows": len(targets) * len(variants) * len(manifest.questions),
+                "attempts": len(outcome.records),
             },
         )
         print(f"考卷完成：{output_directory}")
-        print(f"调用 {len(records)} 次，成功 {sum(record.succeeded for record in records)} 次。")
+        print(
+            f"调用 {len(outcome.records)} 次，成功 "
+            f"{sum(record.succeeded for record in outcome.records)} 次。"
+        )
+        print(f"实际总花费：${outcome.actual_cost_usd:.9f}")
+        if outcome.relaxed_models:
+            for model in outcome.relaxed_models:
+                print(
+                    f"警告：{model} 的快线受推理预算影响，60 token 档不可比；"
+                    "已完成 fast-relaxed 重跑。"
+                )
+        if outcome.cost_guard_stopped:
+            print("运行中实际花费超过上限的 1.5 倍，已中止并保留已有结果。")
+            return 3
         return 0
     except VisionExamError as error:
         print(f"M5-T2 无法执行：{error}", file=sys.stderr)

@@ -26,6 +26,7 @@ class LlmUsage:
     prompt_tokens: int | None
     completion_tokens: int | None
     cost_usd: float | None
+    reasoning_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +38,7 @@ class LlmResult:
     latency_seconds: float
     model: str
     provider: str | None
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +107,7 @@ class LlmClientProtocol(Protocol):
         temperature: float,
         seed: int | None = None,
         reasoning_effort: str | None = None,
+        reasoning_enabled: bool | None = None,
     ) -> LlmResult:
         """Return one completed response without retrying."""
         ...
@@ -147,6 +150,7 @@ class LlmVisionClientProtocol(Protocol):
         temperature: float,
         seed: int | None = None,
         reasoning_effort: str | None = None,
+        reasoning_enabled: bool | None = None,
     ) -> LlmResult:
         """Return one completed response after locally encoding the images."""
         ...
@@ -206,6 +210,7 @@ class OpenRouterClient:
         temperature: float,
         seed: int | None = None,
         reasoning_effort: str | None = None,
+        reasoning_enabled: bool | None = None,
     ) -> LlmResult:
         """Send one non-streaming chat completion and never retry failures."""
         return self._complete_messages(
@@ -219,6 +224,7 @@ class OpenRouterClient:
             temperature=temperature,
             seed=seed,
             reasoning_effort=reasoning_effort,
+            reasoning_enabled=reasoning_enabled,
         )
 
     def complete_with_images(
@@ -234,6 +240,7 @@ class OpenRouterClient:
         temperature: float,
         seed: int | None = None,
         reasoning_effort: str | None = None,
+        reasoning_enabled: bool | None = None,
     ) -> LlmResult:
         """Send text and local images as OpenAI-compatible content blocks."""
         if not images:
@@ -278,6 +285,7 @@ class OpenRouterClient:
             temperature=temperature,
             seed=seed,
             reasoning_effort=reasoning_effort,
+            reasoning_enabled=reasoning_enabled,
         )
 
     def _complete_messages(
@@ -290,6 +298,7 @@ class OpenRouterClient:
         temperature: float,
         seed: int | None,
         reasoning_effort: str | None,
+        reasoning_enabled: bool | None,
     ) -> LlmResult:
         """Send one prepared non-streaming message list without retrying."""
         started_at = time.perf_counter()
@@ -307,10 +316,14 @@ class OpenRouterClient:
             }
         if seed is not None:
             request_body["seed"] = seed
+        if reasoning_effort is not None and reasoning_enabled is not None:
+            raise ValueError("reasoning effort and enabled flag are mutually exclusive")
         if reasoning_effort is not None:
             if reasoning_effort not in {"none", "minimal", "low", "medium", "high"}:
                 raise ValueError("unsupported reasoning effort")
             request_body["reasoning"] = {"effort": reasoning_effort}
+        elif reasoning_enabled is not None:
+            request_body["reasoning"] = {"enabled": reasoning_enabled}
 
         try:
             response = self._client.post(
@@ -529,9 +542,13 @@ def _parse_result(payload: object, *, latency_seconds: float) -> LlmResult:
     message = first_choice.get("message")
     if not isinstance(message, Mapping):
         raise TypeError("响应缺少 message")
-    text = message.get("content")
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("响应文本为空")
+    text_value = message.get("content")
+    if text_value is None:
+        text = ""
+    elif isinstance(text_value, str):
+        text = text_value.strip()
+    else:
+        raise TypeError("响应文本不是字符串或 null")
     model = payload.get("model")
     if not isinstance(model, str) or not model.strip():
         raise ValueError("响应缺少实际型号 ID")
@@ -539,12 +556,17 @@ def _parse_result(payload: object, *, latency_seconds: float) -> LlmResult:
     provider = provider_value if isinstance(provider_value, str) else None
     usage_value = payload.get("usage")
     usage = usage_value if isinstance(usage_value, Mapping) else {}
+    finish_reason_value = first_choice.get("finish_reason")
+    finish_reason = (
+        finish_reason_value if isinstance(finish_reason_value, str) else None
+    )
     return LlmResult(
-        text=text.strip(),
+        text=text,
         usage=_parse_usage(usage),
         latency_seconds=latency_seconds,
         model=model,
         provider=provider,
+        finish_reason=finish_reason,
     )
 
 
@@ -617,10 +639,16 @@ def _stream_content(chunk: Mapping[str, object]) -> str:
 
 
 def _parse_usage(usage: Mapping[str, object]) -> LlmUsage:
+    details_value = usage.get("completion_tokens_details")
+    details = details_value if isinstance(details_value, Mapping) else {}
+    reasoning_tokens = _optional_int(details.get("reasoning_tokens"))
+    if reasoning_tokens is None:
+        reasoning_tokens = _optional_int(usage.get("reasoning_tokens"))
     return LlmUsage(
         prompt_tokens=_optional_int(usage.get("prompt_tokens")),
         completion_tokens=_optional_int(usage.get("completion_tokens")),
         cost_usd=_optional_float(usage.get("cost")),
+        reasoning_tokens=reasoning_tokens,
     )
 
 

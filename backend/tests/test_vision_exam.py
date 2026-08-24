@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import csv
+from datetime import datetime, timezone
 from io import BytesIO
 import json
 from pathlib import Path
@@ -23,23 +24,30 @@ from pet.core.llm import LlmError, LlmResult, LlmUsage, OpenRouterClient
 from pet.games.generic.eval.vision_exam import (
     DEEP_MAX_TOKENS,
     DEEP_PROMPT_PATH,
+    FAST_RELAXED_MAX_TOKENS,
     FAST_MAX_TOKENS,
     FAST_PROMPT_PATH,
     ExamVariant,
     ModelPrice,
     ModelTarget,
     VisionExamError,
+    build_formal_variants,
     build_images,
     build_parser,
     build_timeline,
     build_user_prompt,
     build_variants,
     confirm_upload,
+    estimate_formal_cost,
     load_manifest,
     parse_prices,
     resolve_targets,
+    resolve_models_from_openrouter,
+    render_copy_command,
     run_exam,
+    run_formal_exam,
     summarize,
+    targets_from_resolution,
     upload_files,
     write_outputs,
 )
@@ -79,6 +87,8 @@ class _FakeVisionClient:
             outcome = self._outcomes.pop(0)
             if isinstance(outcome, Exception):
                 raise outcome
+            if isinstance(outcome, LlmResult):
+                return outcome
             assert isinstance(outcome, str)
             text = outcome
         else:
@@ -89,6 +99,7 @@ class _FakeVisionClient:
             latency_seconds=0.125,
             model="fake/actual",
             provider="fake-provider",
+            finish_reason="stop",
         )
 
     def close(self) -> None:
@@ -103,7 +114,50 @@ def _target() -> ModelTarget:
         temperature=0.0,
         timeout_seconds=5.0,
         price=ModelPrice(1.0, 2.0),
+        reasoning_disabled=True,
     )
+
+
+def _write_synthetic_answer_key(path: Path) -> Path:
+    path.write_text(
+        "# synthetic\n\n"
+        "## 1. `synthetic-single`\n\n"
+        "### 产品负责人判定\n\n"
+        "- 【核心】核心一。\n- 【细节】细节一。\n- 【存疑】存疑一。\n\n"
+        "### 离线复核\n\n- 【离线复核】复核。\n\n"
+        "### 不得出现的内容\n\n- 【离线复核】不得编造一。\n\n"
+        "### 不确定项\n\n- 【离线复核】无。\n\n"
+        "## 2. `synthetic-sequence`\n\n"
+        "### 产品负责人判定\n\n"
+        "- 【核心】核心二。\n- 【细节】细节二。\n\n"
+        "### 离线复核\n\n- 【离线复核】复核。\n\n"
+        "### 不得出现的内容\n\n- 【离线复核】不得编造二。\n\n"
+        "### 不确定项\n\n- 【离线复核】无。\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _catalog_entry(
+    slug: str,
+    name: str,
+    *,
+    image: bool = True,
+    mandatory_reasoning: bool = False,
+    prompt_price: str = "0.0000004",
+    completion_price: str = "0.000003",
+) -> dict[str, object]:
+    return {
+        "id": slug,
+        "canonical_slug": f"{slug}-dated",
+        "name": name,
+        "architecture": {
+            "input_modalities": ["text", "image"] if image else ["text"]
+        },
+        "pricing": {"prompt": prompt_price, "completion": completion_price},
+        "supported_parameters": ["max_tokens", "reasoning"],
+        "reasoning": {"mandatory": mandatory_reasoning},
+    }
 
 
 def _variant(
@@ -285,6 +339,7 @@ def test_fast_and_deep_modes_use_exact_prompts_and_fixed_token_budgets() -> None
     fast_call, deep_call = client.calls[:2]
     assert fast_call["system_prompt"] == FAST_PROMPT_PATH.read_text(encoding="utf-8")
     assert fast_call["max_tokens"] == FAST_MAX_TOKENS == 60
+    assert fast_call["reasoning_enabled"] is False
     assert deep_call["system_prompt"] == DEEP_PROMPT_PATH.read_text(encoding="utf-8")
     assert deep_call["max_tokens"] == DEEP_MAX_TOKENS == 1600
     forbidden_json_fields = (
@@ -327,6 +382,122 @@ def test_switches_build_two_by_three_by_two_cartesian_product() -> None:
 
     assert len(variants) == 12
     assert len({variant.name for variant in variants}) == 12
+
+
+def test_formal_variants_are_the_four_pruned_combinations() -> None:
+    assert [variant.name for variant in build_formal_variants()] == [
+        "output-fast__region-off__width-1280",
+        "output-fast__region-sparse__width-1280",
+        "output-deep__region-off__width-1280",
+        "output-deep__region-off__width-native",
+    ]
+
+
+def test_live_catalog_resolution_matches_names_prices_vision_and_reasoning() -> None:
+    payload = {
+        "data": [
+            _catalog_entry(
+                "qwen/qwen3.7-flash",
+                "Qwen: Qwen3.7 Flash",
+                prompt_price="0.00000003",
+                completion_price="0.00000013",
+            ),
+            _catalog_entry("qwen/qwen3.8-27b", "Qwen: Qwen3.8 27B"),
+            _catalog_entry(
+                "google/gemini-3.7-flash",
+                "Google: Gemini 3.7 Flash",
+                mandatory_reasoning=True,
+            ),
+            _catalog_entry("openai/gpt-5.6-sol", "OpenAI: GPT-5.6 Sol"),
+        ]
+    }
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    )
+    try:
+        resolution = resolve_models_from_openrouter(
+            (
+                "Qwen 3.7 Flash",
+                "Qwen 3.8 27B",
+                "Gemini 3.7 Flash",
+                "GPT-5.6 Sol",
+            ),
+            client=client,
+            fetched_at=datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+    finally:
+        client.close()
+
+    assert [model.slug for model in resolution.models] == [
+        "qwen/qwen3.7-flash",
+        "qwen/qwen3.8-27b",
+        "google/gemini-3.7-flash",
+        "openai/gpt-5.6-sol",
+    ]
+    assert resolution.models[0].price == ModelPrice(0.03, 0.13)
+    assert resolution.models[0].reasoning_disabled
+    assert resolution.models[2].reasoning_mandatory
+    assert not resolution.models[2].reasoning_disabled
+    targets = targets_from_resolution(
+        resolution,
+        temperature=0.0,
+        timeout_seconds=30.0,
+    )
+    assert targets[0].model == "qwen/qwen3.7-flash"
+    assert targets[0].reasoning_disabled
+    command = render_copy_command(
+        manifest_path=EXAMPLE_MANIFEST,
+        resolution=resolution,
+        cost_cap_usd=5.0,
+        timeout_seconds=30.0,
+    )
+    assert "--resolve-models" in command
+    assert "--model qwen/qwen3.7-flash" in command
+    assert "--price qwen/qwen3.7-flash=0.03,0.13" in command
+
+
+def test_live_catalog_missing_or_nonvision_candidate_stops_with_nearest_slugs() -> None:
+    payload = {
+        "data": [
+            _catalog_entry("openai/gpt-5.6-sol", "OpenAI: GPT-5.6 Sol"),
+            _catalog_entry(
+                "qwen/qwen3.8-27b",
+                "Qwen: Qwen3.8 27B",
+                image=False,
+            ),
+        ]
+    }
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    )
+    try:
+        with pytest.raises(VisionExamError) as caught:
+            resolve_models_from_openrouter(
+                ("GPT-5.6 Solar", "Qwen 3.8 27B"),
+                client=client,
+            )
+    finally:
+        client.close()
+
+    message = str(caught.value)
+    assert "GPT-5.6 Solar：不存在" in message
+    assert "openai/gpt-5.6-sol" in message
+    assert "qwen/qwen3.8-27b：不支持图像输入" in message
+
+
+def test_cost_estimate_includes_worst_case_relaxed_reruns() -> None:
+    estimate = estimate_formal_cost(
+        question_count=2,
+        variants=build_formal_variants(),
+        targets=(_target(), _target()),
+        estimated_input_tokens_per_attempt=100,
+    )
+
+    assert estimate.base_calls == 16
+    assert estimate.maximum_calls_with_relaxed == 24
+    assert estimate.estimated_input_tokens == 2400
+    assert estimate.maximum_output_tokens == 14880
+    assert estimate.estimated_cost_usd == pytest.approx(0.03216)
 
 
 def test_cli_collects_repeated_width_and_region_mode_switches() -> None:
@@ -433,6 +604,60 @@ def test_failure_is_recorded_and_arbitrary_plain_text_continues() -> None:
     assert client.closed
 
 
+def test_fast_truncation_over_thirty_percent_triggers_complete_relaxed_group() -> None:
+    manifest = load_manifest(EXAMPLE_MANIFEST)
+    blank = LlmResult(
+        text="",
+        usage=LlmUsage(120, 60, 0.001, reasoning_tokens=60),
+        latency_seconds=0.2,
+        model="fake/actual",
+        provider="fake-provider",
+        finish_reason="length",
+    )
+    visible = LlmResult(
+        text=VALID_RESPONSE,
+        usage=LlmUsage(120, 20, 0.001, reasoning_tokens=0),
+        latency_seconds=0.2,
+        model="fake/actual",
+        provider="fake-provider",
+        finish_reason="stop",
+    )
+    client = _FakeVisionClient([blank, visible, visible, visible])
+
+    outcome = run_formal_exam(
+        manifest=manifest,
+        variants=(_variant(output="fast"),),
+        targets=(_target(),),
+        client_factory=lambda _: client,
+        cost_cap_usd=5.0,
+    )
+
+    assert len(outcome.records) == 4
+    assert outcome.relaxed_models == ("fake/model",)
+    assert outcome.records[0].truncated
+    assert outcome.records[0].reasoning_tokens == 60
+    assert outcome.records[0].visible_output_tokens == 0
+    assert outcome.records[0].visible_output_empty
+    assert all(record.fast_relaxed for record in outcome.records[2:])
+    assert all(record.max_tokens == FAST_RELAXED_MAX_TOKENS for record in outcome.records[2:])
+
+
+def test_runtime_cost_guard_stops_after_one_and_preserves_record() -> None:
+    client = _FakeVisionClient()
+    outcome = run_formal_exam(
+        manifest=load_manifest(EXAMPLE_MANIFEST),
+        variants=(_variant(),),
+        targets=(_target(),),
+        client_factory=lambda _: client,
+        cost_cap_usd=0.005,
+    )
+
+    assert outcome.cost_guard_stopped
+    assert len(outcome.records) == 1
+    assert outcome.actual_cost_usd == pytest.approx(0.009)
+    assert client.closed
+
+
 def test_fake_client_runs_pruned_recommended_combinations_and_writes_outputs(
     tmp_path: Path,
 ) -> None:
@@ -451,32 +676,54 @@ def test_fake_client_runs_pruned_recommended_combinations_and_writes_outputs(
         client_factory=lambda _: client,
     )
     output = tmp_path / "vision-exam-test"
+    answer_key = _write_synthetic_answer_key(tmp_path / "answer-key.md")
 
     write_outputs(
         output_directory=output,
         records=records,
         run_payload={"arguments": {"yes": True}},
+        answer_key_path=answer_key,
     )
 
     with (output / "results.csv").open(encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
-    report = (output / "report.md").read_text(encoding="utf-8")
+    grading_fast = (output / "grading-fast.md").read_text(encoding="utf-8")
+    grading_deep = (output / "grading-deep.md").read_text(encoding="utf-8")
+    machine_summary = (output / "summary.md").read_text(encoding="utf-8")
     run_payload = json.loads((output / "run.json").read_text(encoding="utf-8"))
     assert len(rows) == 8
     assert rows[0]["回答原文"] == VALID_RESPONSE
     assert rows[0]["输出模式"] == "fast"
     assert rows[0]["max_tokens"] == "60"
     assert rows[0]["实际输出token"] == "30"
+    assert rows[0]["推理token"] == ""
+    assert rows[0]["可见输出token"] == "30"
+    assert rows[0]["可见输出是否为空"] == "false"
+    assert rows[0]["是否截断"] == "false"
+    assert rows[0]["是否fast-relaxed重跑"] == "false"
     assert rows[0]["上传宽度"] == "1280"
     assert rows[0]["区域提示模式"] == "off"
     assert rows[0]["本次是否实际注入了提示"] == "false"
     assert rows[0]["本次实际上传的图像像素尺寸"]
     assert rows[0]["本次实际上传的图像字节数"]
-    assert "准确性判定 | 漏了什么 | 编造了什么" in report
-    assert "## 题目汇总" in report
-    assert "## 变体轴同类对比" in report
-    assert "## 上传宽度同类对比" in report
-    assert "## 输出模式同类对比" in report
+    assert "准确性判定 | 漏了什么 | 编造了什么" in grading_fast
+    assert "【核心】核心一。" in grading_fast
+    assert "【细节】细节一。" not in grading_fast
+    assert "【核心】核心一。" in grading_deep
+    assert "【细节】细节一。" in grading_deep
+    assert "【存疑】存疑一。" in grading_deep
+    grading_rows = [
+        line for line in grading_fast.splitlines() if line.startswith("| fake/model ")
+    ]
+    assert grading_rows
+    assert all(line.endswith("|  |  |  |") for line in grading_rows)
+    assert "## 按模型" in machine_summary
+    assert "## 按上传宽度" in machine_summary
+    assert "准确性判定" not in machine_summary
+    assert all(
+        word not in machine_summary
+        for word in ("推荐模型", "最好", "最差", "表现更好", "能力不足")
+    )
     assert run_payload["summary"]["models"]["fake/model"]["successes"] == 8
     assert run_payload["summary"]["output_modes"]["fast"]["attempts"] == 4
     assert run_payload["summary"]["output_modes"]["deep"]["attempts"] == 4
