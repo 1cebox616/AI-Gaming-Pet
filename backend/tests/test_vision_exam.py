@@ -20,7 +20,13 @@ from PIL import Image
 import pytest
 
 from pet.core.config import LlmConfig, LlmProfileConfig
-from pet.core.llm import LlmError, LlmResult, LlmUsage, OpenRouterClient
+from pet.core.llm import (
+    LlmError,
+    LlmResult,
+    LlmStreamingUnsupported,
+    LlmUsage,
+    OpenRouterClient,
+)
 from pet.games.generic.eval.vision_exam import (
     DEEP_MAX_TOKENS,
     DEEP_PROMPT_PATH,
@@ -32,6 +38,7 @@ from pet.games.generic.eval.vision_exam import (
     ModelTarget,
     VisionExamError,
     build_formal_variants,
+    build_speed_round_variants,
     build_images,
     build_parser,
     build_timeline,
@@ -102,6 +109,19 @@ class _FakeVisionClient:
             finish_reason="stop",
         )
 
+    def complete_with_images_stream(self, **arguments: object) -> LlmResult:
+        result = self.complete_with_images(**arguments)
+        return LlmResult(
+            text=result.text,
+            usage=result.usage,
+            latency_seconds=result.latency_seconds,
+            model=result.model,
+            provider=result.provider,
+            finish_reason=result.finish_reason,
+            ttft_seconds=0.05,
+            streamed=True,
+        )
+
     def close(self) -> None:
         self.closed = True
 
@@ -158,6 +178,29 @@ def _catalog_entry(
         "supported_parameters": ["max_tokens", "reasoning"],
         "reasoning": {"mandatory": mandatory_reasoning},
     }
+
+
+def _endpoint_payload(
+    slug: str,
+    *,
+    with_alibaba: bool = True,
+    prompt_price: str = "0.0000004",
+    completion_price: str = "0.000003",
+) -> dict[str, object]:
+    endpoints: list[dict[str, object]] = []
+    if with_alibaba:
+        endpoints.append(
+            {
+                "provider_name": "Alibaba",
+                "tag": "alibaba",
+                "name": f"Alibaba | {slug}-dated",
+                "pricing": {
+                    "prompt": prompt_price,
+                    "completion": completion_price,
+                },
+            }
+        )
+    return {"data": {"endpoints": endpoints}}
 
 
 def _variant(
@@ -393,6 +436,14 @@ def test_formal_variants_are_the_four_pruned_combinations() -> None:
     ]
 
 
+def test_speed_round_variants_are_fast_sparse_at_three_widths() -> None:
+    assert [variant.name for variant in build_speed_round_variants()] == [
+        "output-fast__region-sparse__width-1280",
+        "output-fast__region-sparse__width-896",
+        "output-fast__region-sparse__width-640",
+    ]
+
+
 def test_live_catalog_resolution_matches_names_prices_vision_and_reasoning() -> None:
     payload = {
         "data": [
@@ -411,9 +462,25 @@ def test_live_catalog_resolution_matches_names_prices_vision_and_reasoning() -> 
             _catalog_entry("openai/gpt-5.6-sol", "OpenAI: GPT-5.6 Sol"),
         ]
     }
-    client = httpx.Client(
-        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
-    )
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/endpoints"):
+            slug = "/".join(request.url.path.split("/")[-3:-1])
+            prices = (
+                ("0.00000003", "0.00000013")
+                if slug == "qwen/qwen3.7-flash"
+                else ("0.0000004", "0.000003")
+            )
+            return httpx.Response(
+                200,
+                json=_endpoint_payload(
+                    slug,
+                    prompt_price=prices[0],
+                    completion_price=prices[1],
+                ),
+            )
+        return httpx.Response(200, json=payload)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
     try:
         resolution = resolve_models_from_openrouter(
             (
@@ -436,15 +503,20 @@ def test_live_catalog_resolution_matches_names_prices_vision_and_reasoning() -> 
     ]
     assert resolution.models[0].price == ModelPrice(0.03, 0.13)
     assert resolution.models[0].reasoning_disabled
+    assert resolution.models[0].provider_locked
+    assert resolution.models[0].selected_provider_slug == "alibaba"
     assert resolution.models[2].reasoning_mandatory
     assert not resolution.models[2].reasoning_disabled
     targets = targets_from_resolution(
         resolution,
         temperature=0.0,
         timeout_seconds=30.0,
+        lock_selected_provider=True,
     )
     assert targets[0].model == "qwen/qwen3.7-flash"
     assert targets[0].reasoning_disabled
+    assert targets[0].provider == "alibaba"
+    assert targets[0].provider_lock_status == "已锁定"
     command = render_copy_command(
         manifest_path=EXAMPLE_MANIFEST,
         resolution=resolution,
@@ -467,9 +539,15 @@ def test_live_catalog_missing_or_nonvision_candidate_stops_with_nearest_slugs() 
             ),
         ]
     }
-    client = httpx.Client(
-        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
-    )
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/endpoints"):
+            return httpx.Response(
+                200,
+                json=_endpoint_payload("openai/gpt-5.6-sol", with_alibaba=False),
+            )
+        return httpx.Response(200, json=payload)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
     try:
         with pytest.raises(VisionExamError) as caught:
             resolve_models_from_openrouter(
@@ -483,6 +561,35 @@ def test_live_catalog_missing_or_nonvision_candidate_stops_with_nearest_slugs() 
     assert "GPT-5.6 Solar：不存在" in message
     assert "openai/gpt-5.6-sol" in message
     assert "qwen/qwen3.8-27b：不支持图像输入" in message
+
+
+def test_missing_alibaba_endpoint_is_explicitly_unlocked() -> None:
+    payload = {
+        "data": [_catalog_entry("vendor/vision", "Vendor: Vision")]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/endpoints"):
+            return httpx.Response(
+                200,
+                json=_endpoint_payload("vendor/vision", with_alibaba=False),
+            )
+        return httpx.Response(200, json=payload)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        resolution = resolve_models_from_openrouter(("vendor/vision",), client=client)
+    finally:
+        client.close()
+    target = targets_from_resolution(
+        resolution,
+        temperature=0.0,
+        timeout_seconds=30.0,
+        lock_selected_provider=True,
+    )[0]
+    assert not resolution.models[0].provider_locked
+    assert target.provider is None
+    assert target.provider_lock_status == "未锁定"
 
 
 def test_cost_estimate_includes_worst_case_relaxed_reruns() -> None:
@@ -656,6 +763,77 @@ def test_runtime_cost_guard_stops_after_one_and_preserves_record() -> None:
     assert len(outcome.records) == 1
     assert outcome.actual_cost_usd == pytest.approx(0.009)
     assert client.closed
+
+
+def test_speed_round_runs_three_widths_twice_and_writes_ttft_outputs(
+    tmp_path: Path,
+) -> None:
+    manifest = load_manifest(EXAMPLE_MANIFEST)
+    client = _FakeVisionClient()
+    outcome = run_formal_exam(
+        manifest=manifest,
+        variants=build_speed_round_variants(),
+        targets=(_target(),),
+        client_factory=lambda _: client,
+        cost_cap_usd=5.0,
+        enable_relaxed=False,
+        repetitions=2,
+        streaming=True,
+    )
+    assert len(outcome.records) == 1 * 3 * 2 * 2
+    assert {record.repetition for record in outcome.records} == {1, 2}
+    assert all(record.streamed for record in outcome.records)
+    assert all(record.ttft_ms == pytest.approx(50) for record in outcome.records)
+
+    output = tmp_path / "speed-round"
+    write_outputs(
+        output_directory=output,
+        records=outcome.records,
+        run_payload={"arguments": {"speed_round": True}},
+        answer_key_path=_write_synthetic_answer_key(tmp_path / "answers.md"),
+        speed_round=True,
+    )
+    with (output / "results.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    summary = (output / "summary.md").read_text(encoding="utf-8")
+    grading = (output / "grading-fast.md").read_text(encoding="utf-8")
+    assert len(rows) == 12
+    assert rows[0]["TTFT毫秒"] == "50.000"
+    assert rows[0]["实际上游"] == "fake-provider"
+    assert {row["第几遍"] for row in rows} == {"1", "2"}
+    assert "## 模型 × 上传宽度" in summary
+    assert "## 两遍稳定性" in summary
+    assert "平均单帧花费" in summary
+    assert "第一遍" in grading
+    assert "第二遍" not in grading
+    assert not (output / "grading-deep.md").exists()
+
+
+def test_streaming_unsupported_falls_back_once_then_uses_nonstreaming() -> None:
+    class NoStreamClient(_FakeVisionClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stream_attempts = 0
+
+        def complete_with_images_stream(self, **arguments: object) -> LlmResult:
+            self.stream_attempts += 1
+            raise LlmStreamingUnsupported("stream not supported")
+
+    client = NoStreamClient()
+    outcome = run_formal_exam(
+        manifest=load_manifest(EXAMPLE_MANIFEST),
+        variants=(_variant(),),
+        targets=(_target(),),
+        client_factory=lambda _: client,
+        cost_cap_usd=5.0,
+        enable_relaxed=False,
+        repetitions=2,
+        streaming=True,
+    )
+    assert len(outcome.records) == 4
+    assert client.stream_attempts == 1
+    assert all(not record.streamed for record in outcome.records)
+    assert all(record.ttft_ms is None for record in outcome.records)
 
 
 def test_fake_client_runs_pruned_recommended_combinations_and_writes_outputs(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Mapping, Sequence
 import csv
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 import difflib
 import json
@@ -25,6 +25,7 @@ from pet.core.llm import (
     LlmError,
     LlmImage,
     LlmResult,
+    LlmStreamingUnsupported,
     LlmVisionClientProtocol,
     OPENROUTER_API_KEY_ENV,
     OPENROUTER_BASE_URL,
@@ -42,6 +43,8 @@ DEFAULT_ANSWER_KEY_PATH = (
     BACKEND_DIRECTORY / "data" / "generic" / "vision-exam" / "answer-key.md"
 )
 OPENROUTER_MODELS_URL = f"{OPENROUTER_BASE_URL}/models"
+OPENROUTER_MODEL_ENDPOINTS_URL = f"{OPENROUTER_BASE_URL}/models/{{slug}}/endpoints"
+SPEED_ROUND_PROVIDER_NAME = "Alibaba"
 QUESTION_TYPES = {"single", "sequence"}
 QUESTION_FIELDS = {
     "id",
@@ -146,6 +149,10 @@ class ResolvedModel:
     supported_parameters: tuple[str, ...]
     reasoning_mandatory: bool
     reasoning_disabled: bool
+    selected_provider_name: str | None
+    selected_provider_slug: str | None
+    selected_provider_endpoint: str | None
+    provider_locked: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +175,8 @@ class ModelTarget:
     timeout_seconds: float
     price: ModelPrice
     reasoning_disabled: bool = False
+    provider_lock_status: str = "未请求"
+    provider_endpoint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +211,9 @@ class ExamRecord:
     truncated: bool
     fast_relaxed: bool
     finish_reason: str | None
+    ttft_ms: float | None
+    streamed: bool
+    repetition: int
 
     @property
     def succeeded(self) -> bool:
@@ -496,21 +508,35 @@ def build_formal_variants() -> tuple[ExamVariant, ...]:
     )
 
 
+def build_speed_round_variants() -> tuple[ExamVariant, ...]:
+    """Return the three fixed M5-T2.10 fast/sparse upload widths."""
+    return tuple(
+        ExamVariant(width, "sparse", DEFAULT_REGION_SPARSITY_MAX, "fast")
+        for width in (1280, 896, 640)
+    )
+
+
 def estimate_formal_cost(
     *,
     question_count: int,
     variants: Sequence[ExamVariant],
     targets: Sequence[ModelTarget],
     estimated_input_tokens_per_attempt: int,
+    repetitions: int = 1,
+    include_relaxed: bool = True,
 ) -> CostEstimate:
     """Estimate worst-case cost, including every model's possible relaxed rerun."""
     if question_count <= 0:
         raise VisionExamError("预计花费需要至少一道题")
     if estimated_input_tokens_per_attempt <= 0:
         raise VisionExamError("--estimated-input-tokens 必须大于 0")
-    base_calls_per_model = question_count * len(variants)
+    if repetitions <= 0:
+        raise VisionExamError("重复遍数必须大于 0")
+    base_calls_per_model = question_count * len(variants) * repetitions
     fast_variants = [variant for variant in variants if variant.output_mode == "fast"]
-    relaxed_calls_per_model = question_count * len(fast_variants)
+    relaxed_calls_per_model = (
+        question_count * len(fast_variants) if include_relaxed else 0
+    )
     estimated_input_tokens = 0
     maximum_output_tokens = 0
     estimated_cost_usd = 0.0
@@ -518,7 +544,7 @@ def estimate_formal_cost(
         target_input_tokens = estimated_input_tokens_per_attempt * (
             base_calls_per_model + relaxed_calls_per_model
         )
-        target_output_tokens = question_count * sum(
+        target_output_tokens = question_count * repetitions * sum(
             variant.max_tokens for variant in variants
         ) + relaxed_calls_per_model * FAST_RELAXED_MAX_TOKENS
         estimated_input_tokens += target_input_tokens
@@ -565,8 +591,12 @@ def run_formal_exam(
     client_factory: ClientFactory,
     cost_cap_usd: float | None,
     enable_relaxed: bool = True,
+    repetitions: int = 1,
+    streaming: bool = False,
 ) -> ExamRunOutcome:
     """Run all targets, preserve failures, guard cost, and rerun truncated fast groups."""
+    if repetitions <= 0:
+        raise VisionExamError("重复遍数必须大于 0")
     system_prompts = {
         output_mode: _read_prompt(prompt_path)
         for output_mode, prompt_path in OUTPUT_PROMPT_PATHS.items()
@@ -588,6 +618,7 @@ def run_formal_exam(
 
     for target in targets:
         target_start = len(records)
+        stream_for_target = streaming
         client: LlmVisionClientProtocol | None = None
         initialization_error: str | None = None
         try:
@@ -595,27 +626,34 @@ def run_formal_exam(
         except Exception as error:
             initialization_error = f"客户端初始化失败：{error}"
         try:
-            for question in manifest.questions:
-                for variant in variants:
-                    if initialization_error is not None or client is None:
-                        append_record(
-                            _failed_record(
-                                question,
-                                variant,
-                                target,
-                                initialization_error or "客户端不可用",
+            for repetition in range(1, repetitions + 1):
+                for question in manifest.questions:
+                    for variant in variants:
+                        if initialization_error is not None or client is None:
+                            append_record(
+                                _failed_record(
+                                    question,
+                                    variant,
+                                    target,
+                                    initialization_error or "客户端不可用",
+                                    repetition=repetition,
+                                )
                             )
-                        )
-                        continue
-                    append_record(
-                        _run_attempt(
+                            continue
+                        record = _run_attempt(
                             client=client,
                             question=question,
                             variant=variant,
                             target=target,
                             system_prompt=system_prompts[variant.output_mode],
+                            streaming=stream_for_target,
+                            repetition=repetition,
                         )
-                    )
+                        append_record(record)
+                        if stream_for_target and record.succeeded and not record.streamed:
+                            stream_for_target = False
+                        if stopped:
+                            break
                     if stopped:
                         break
                 if stopped:
@@ -659,6 +697,8 @@ def run_formal_exam(
                                 variant=variant,
                                 target=target,
                                 system_prompt=system_prompts["fast-relaxed"],
+                                streaming=False,
+                                repetition=1,
                             )
                         )
                         if stopped:
@@ -694,6 +734,8 @@ def _run_attempt(
     variant: ExamVariant,
     target: ModelTarget,
     system_prompt: str,
+    streaming: bool = False,
+    repetition: int = 1,
 ) -> ExamRecord:
     images = build_images(question, variant)
     region_fraction = region_grid_fraction(question)
@@ -703,17 +745,26 @@ def _run_attempt(
         upload_metadata = tuple(
             image_upload_metadata(image, max_image_edge=None) for image in images
         )
-        result = client.complete_with_images(
-            model=target.model,
-            provider=target.provider,
-            system_prompt=system_prompt,
-            user_prompt=build_user_prompt(question, variant),
-            images=images,
-            max_image_edge=None,
-            max_tokens=variant.max_tokens,
-            temperature=target.temperature,
-            reasoning_enabled=(False if target.reasoning_disabled else None),
-        )
+        call_arguments = {
+            "model": target.model,
+            "provider": target.provider,
+            "system_prompt": system_prompt,
+            "user_prompt": build_user_prompt(question, variant),
+            "images": images,
+            "max_image_edge": None,
+            "max_tokens": variant.max_tokens,
+            "temperature": target.temperature,
+            "reasoning_enabled": False if target.reasoning_disabled else None,
+        }
+        if streaming:
+            try:
+                result = client.complete_with_images_stream(**call_arguments)
+            except LlmStreamingUnsupported:
+                # An explicit lack of SSE support is a transport capability result,
+                # not a model failure. The required fallback remains one normal call.
+                result = client.complete_with_images(**call_arguments)
+        else:
+            result = client.complete_with_images(**call_arguments)
     except Exception as error:
         latency = (
             error.latency_seconds * 1000
@@ -733,6 +784,8 @@ def _run_attempt(
             image_byte_sizes=tuple(
                 metadata.byte_size for metadata in upload_metadata
             ),
+            provider=(error.provider if isinstance(error, LlmError) else None),
+            repetition=repetition,
         )
 
     # JSON 外壳实测约耗 25–30 个输出 token（约 0.7 秒），快线 60-token
@@ -749,6 +802,7 @@ def _run_attempt(
             f"{metadata.width}x{metadata.height}" for metadata in upload_metadata
         ),
         image_byte_sizes=tuple(metadata.byte_size for metadata in upload_metadata),
+        repetition=repetition,
     )
 
 
@@ -763,6 +817,7 @@ def _record_from_result(
     region_injected: bool,
     image_dimensions: tuple[str, ...],
     image_byte_sizes: tuple[int, ...],
+    repetition: int,
 ) -> ExamRecord:
     visible_tokens = _visible_output_tokens(result)
     visible_empty = not result.text.strip()
@@ -784,7 +839,7 @@ def _record_from_result(
         target_label=target.label,
         requested_model=target.model,
         actual_model=result.model,
-        provider=result.provider,
+        provider=result.provider or target.provider,
         response_text=result.text,
         error=error,
         latency_ms=result.latency_seconds * 1000,
@@ -798,6 +853,13 @@ def _record_from_result(
         truncated=truncated,
         fast_relaxed=variant.output_mode == "fast-relaxed",
         finish_reason=result.finish_reason,
+        ttft_ms=(
+            result.ttft_seconds * 1000
+            if result.ttft_seconds is not None
+            else None
+        ),
+        streamed=result.streamed,
+        repetition=repetition,
     )
 
 
@@ -811,6 +873,8 @@ def _failed_record(
     region_injected: bool | None = None,
     image_dimensions: tuple[str, ...] = (),
     image_byte_sizes: tuple[int, ...] = (),
+    provider: str | None = None,
+    repetition: int = 1,
 ) -> ExamRecord:
     return ExamRecord(
         question_id=question.question_id,
@@ -831,7 +895,14 @@ def _failed_record(
         target_label=target.label,
         requested_model=target.model,
         actual_model=None,
-        provider=target.provider,
+        provider=(
+            provider
+            or (
+                SPEED_ROUND_PROVIDER_NAME
+                if target.provider_lock_status == "已锁定"
+                else target.provider
+            )
+        ),
         response_text="",
         error=error,
         latency_ms=latency_ms,
@@ -845,6 +916,9 @@ def _failed_record(
         truncated=False,
         fast_relaxed=variant.output_mode == "fast-relaxed",
         finish_reason=None,
+        ttft_ms=None,
+        streamed=False,
+        repetition=repetition,
     )
 
 
@@ -885,6 +959,10 @@ CSV_COLUMNS = (
     "请求模型",
     "实际模型",
     "服务商",
+    "实际上游",
+    "TTFT毫秒",
+    "是否流式",
+    "第几遍",
     "回答原文",
     "错误原文",
     "往返毫秒",
@@ -907,24 +985,30 @@ def write_outputs(
     records: Sequence[ExamRecord],
     run_payload: Mapping[str, object],
     answer_key_path: Path,
+    speed_round: bool = False,
 ) -> None:
     """Write machine records, split human grading batches, and self-contained run data."""
     output_directory.mkdir(parents=True, exist_ok=False)
     _write_csv(output_directory / "results.csv", records)
     summary = summarize(records)
     answers = load_answer_key(answer_key_path)
-    (output_directory / "grading-fast.md").write_text(
-        render_grading_sheet(records, answers, batch="fast"),
-        encoding="utf-8",
-    )
-    (output_directory / "grading-deep.md").write_text(
-        render_grading_sheet(records, answers, batch="deep"),
-        encoding="utf-8",
-    )
-    (output_directory / "summary.md").write_text(
-        render_machine_summary(summary),
-        encoding="utf-8",
-    )
+    if speed_round:
+        (output_directory / "grading-fast.md").write_text(
+            render_speed_grading_sheet(records, answers),
+            encoding="utf-8",
+        )
+        summary_text = render_speed_summary(summary)
+    else:
+        (output_directory / "grading-fast.md").write_text(
+            render_grading_sheet(records, answers, batch="fast"),
+            encoding="utf-8",
+        )
+        (output_directory / "grading-deep.md").write_text(
+            render_grading_sheet(records, answers, batch="deep"),
+            encoding="utf-8",
+        )
+        summary_text = render_machine_summary(summary)
+    (output_directory / "summary.md").write_text(summary_text, encoding="utf-8")
     complete_payload = dict(run_payload)
     complete_payload["summary"] = summary
     (output_directory / "run.json").write_text(
@@ -1056,6 +1140,70 @@ def render_grading_sheet(
     return "\n".join(lines) + "\n"
 
 
+def render_speed_grading_sheet(
+    records: Sequence[ExamRecord],
+    answers: Mapping[str, AnswerKeyEntry],
+) -> str:
+    """Render only repetition one, grouped by model and width for T2.10."""
+    selected = [
+        record
+        for record in records
+        if record.output_mode == "fast" and record.repetition == 1
+    ]
+    lines = [
+        "# M5-T2.10 快线人工判卷表（第一遍）",
+        "",
+        "准确性判定、漏了什么、编造了什么由产品负责人填写；以下人工列均为空。",
+    ]
+    configurations = tuple(
+        dict.fromkeys((record.target_label, record.upload_width) for record in selected)
+    )
+    for model, width in configurations:
+        width_label = "原生" if width == 0 else str(width)
+        lines.extend(("", f"## `{model}` × 宽度 {width_label}", ""))
+        configuration_records = [
+            record
+            for record in selected
+            if record.target_label == model and record.upload_width == width
+        ]
+        for record in configuration_records:
+            answer = answers.get(record.question_id)
+            if answer is None:
+                raise VisionExamError(f"答案键缺少题目 {record.question_id}")
+            lines.extend(
+                (
+                    f"### `{record.question_id}`",
+                    "",
+                    "| 实际上游 | TTFT(ms) | 总时延(ms) | 是否截断 | 回答原文 | "
+                    "错误原文 | 准确性判定 | 漏了什么 | 编造了什么 |",
+                    "|---|---:|---:|---|---|---|---|---|---|",
+                    "| "
+                    + " | ".join(
+                        (
+                            _markdown_cell(record.provider or ""),
+                            _display_number(record.ttft_ms, 3),
+                            _display_number(record.latency_ms, 3),
+                            str(record.truncated).lower(),
+                            _markdown_cell(record.response_text),
+                            _markdown_cell(record.error or ""),
+                            "",
+                            "",
+                            "",
+                        )
+                    )
+                    + " |",
+                    "",
+                    "#### 【核心】要点",
+                    "",
+                )
+            )
+            lines.extend(f"- {point}" for point in answer.core)
+            lines.extend(("", "#### 不得出现的内容", ""))
+            lines.extend(f"- {point}" for point in answer.forbidden)
+            lines.append("")
+    return "\n".join(lines) + "\n"
+
+
 def render_machine_summary(summary: Mapping[str, object]) -> str:
     """Render objective statistics only; no ranking or quality language is generated."""
     lines = [
@@ -1126,6 +1274,120 @@ def render_machine_summary(summary: Mapping[str, object]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_speed_summary(summary: Mapping[str, object]) -> str:
+    """Render only objective M5-T2.10 latency, stability, and cost statistics."""
+    lines = [
+        "# M5-T2.10 快线提速轮机器统计",
+        "",
+        "## 模型 × 上传宽度",
+        "",
+        "| 模型 × 宽度 | 调用数 | TTFT非空率 | TTFT中位/P90/最大(ms) | "
+        "总时延中位/P90/最大(ms) | 失败率 | 截断率 |",
+        "|---|---:|---:|---|---|---:|---:|",
+    ]
+    model_widths = summary.get("model_widths")
+    if isinstance(model_widths, Mapping):
+        for name, raw in model_widths.items():
+            if not isinstance(raw, Mapping):
+                continue
+            lines.append(
+                f"| {_markdown_cell(str(name))} | {raw.get('attempts', 0)} | "
+                f"{_display_number(raw.get('ttft_nonempty_rate'), 6)} | "
+                f"{_display_number(raw.get('ttft_median_ms'), 3)} / "
+                f"{_display_number(raw.get('ttft_p90_ms'), 3)} / "
+                f"{_display_number(raw.get('ttft_max_ms'), 3)} | "
+                f"{_display_number(raw.get('latency_median_ms'), 3)} / "
+                f"{_display_number(raw.get('latency_p90_ms'), 3)} / "
+                f"{_display_number(raw.get('latency_max_ms'), 3)} | "
+                f"{_display_number(raw.get('failure_rate'), 6)} | "
+                f"{_display_number(raw.get('truncated_rate'), 6)} |"
+            )
+    lines.extend(
+        (
+            "",
+            "## 两遍稳定性",
+            "",
+            "| 模型 × 宽度 | 第一遍中位(ms) | 第二遍中位(ms) | "
+            "中位差：第二遍-第一遍(ms) | 绝对差(ms) |",
+            "|---|---:|---:|---:|---:|",
+        )
+    )
+    stability = summary.get("repetition_stability")
+    if isinstance(stability, Mapping):
+        for name, raw in stability.items():
+            if not isinstance(raw, Mapping):
+                continue
+            medians = raw.get("repetition_medians_ms")
+            median_map = medians if isinstance(medians, Mapping) else {}
+            lines.append(
+                f"| {_markdown_cell(str(name))} | "
+                f"{_display_number(median_map.get('1'), 3)} | "
+                f"{_display_number(median_map.get('2'), 3)} | "
+                f"{_display_number(raw.get('median_difference_ms'), 3)} | "
+                f"{_display_number(raw.get('absolute_median_difference_ms'), 3)} |"
+            )
+    lines.extend(
+        (
+            "",
+            "## 按上传宽度",
+            "",
+            "| 宽度 | 调用数 | 平均输入token | 平均单帧花费(USD) |",
+            "|---|---:|---:|---:|",
+        )
+    )
+    widths = summary.get("upload_widths")
+    if isinstance(widths, Mapping):
+        for name, raw in widths.items():
+            if isinstance(raw, Mapping):
+                lines.append(
+                    f"| {_markdown_cell(str(name))} | {raw.get('attempts', 0)} | "
+                    f"{_display_number(raw.get('average_input_tokens_per_attempt'), 2)} | "
+                    f"{_display_number(raw.get('average_cost_per_frame_usd'), 9)} |"
+                )
+    lines.extend(("", "## 流式与实际上游", ""))
+    total_attempts = sum(
+        int(raw.get("attempts", 0))
+        for raw in model_widths.values()
+        if isinstance(raw, Mapping)
+    ) if isinstance(model_widths, Mapping) else 0
+    lines.append(f"- TTFT 非空：{summary.get('ttft_nonempty', 0)}/{total_attempts}")
+    lines.append(f"- 流式完成：{summary.get('streamed', 0)}/{total_attempts}")
+    providers = summary.get("providers")
+    if isinstance(providers, Mapping):
+        for name, raw in providers.items():
+            if isinstance(raw, Mapping):
+                lines.append(
+                    f"- `{name}`：调用 {raw.get('attempts', 0)}，"
+                    f"TTFT 非空率 {_display_number(raw.get('ttft_nonempty_rate'), 6)}"
+                )
+    high_failure: list[tuple[str, float]] = []
+    if isinstance(model_widths, Mapping):
+        for name, raw in model_widths.items():
+            if isinstance(raw, Mapping):
+                rate = raw.get("failure_rate")
+                if isinstance(rate, (int, float)) and rate > 0.30:
+                    high_failure.append((str(name), float(rate)))
+    lines.extend(("", "## 失败率超过 30% 的配置", ""))
+    if high_failure:
+        lines.extend(
+            f"- `{name}`：{rate:.6f}" for name, rate in high_failure
+        )
+    else:
+        lines.append("- 无")
+    lines.extend(
+        (
+            "",
+            "## 全部调用",
+            "",
+            f"- 失败数：{summary.get('failures', 0)}",
+            f"- 截断数：{summary.get('truncated', 0)}",
+            f"- 实际总花费（USD）："
+            f"{_display_number(summary.get('total_actual_cost_usd'), 9)}",
+        )
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _append_machine_rows(lines: list[str], raw_groups: object) -> None:
     if not isinstance(raw_groups, Mapping):
         return
@@ -1173,6 +1435,10 @@ def _write_csv(path: Path, records: Sequence[ExamRecord]) -> None:
                     "请求模型": record.requested_model,
                     "实际模型": record.actual_model or "",
                     "服务商": record.provider or "",
+                    "实际上游": record.provider or "",
+                    "TTFT毫秒": _optional_number(record.ttft_ms, 3),
+                    "是否流式": str(record.streamed).lower(),
+                    "第几遍": record.repetition,
                     "回答原文": record.response_text,
                     "错误原文": record.error or "",
                     "往返毫秒": _optional_number(record.latency_ms, 3),
@@ -1214,6 +1480,17 @@ def summarize(records: Sequence[ExamRecord]) -> dict[str, object]:
             lambda item: "native" if item.upload_width == 0 else str(item.upload_width),
         ),
         "output_modes": _group_summary(records, lambda item: item.output_mode),
+        "model_widths": _group_summary(
+            records,
+            lambda item: (
+                f"{item.target_label} | "
+                f"{'native' if item.upload_width == 0 else item.upload_width}"
+            ),
+        ),
+        "repetition_stability": _repetition_stability(records),
+        "providers": _group_summary(
+            records, lambda item: item.provider or "未取得"
+        ),
         "sparse": {
             "attempts": len(sparse_records),
             "injected": sum(record.region_injected for record in sparse_records),
@@ -1227,6 +1504,8 @@ def summarize(records: Sequence[ExamRecord]) -> dict[str, object]:
         "total_actual_cost_usd": sum(_record_actual_cost(record) for record in records),
         "failures": sum(not record.succeeded for record in records),
         "truncated": sum(record.truncated for record in records),
+        "ttft_nonempty": sum(record.ttft_ms is not None for record in records),
+        "streamed": sum(record.streamed for record in records),
         "relaxed_models": sorted(
             {record.target_label for record in records if record.fast_relaxed}
         ),
@@ -1270,27 +1549,72 @@ def _summary_row(records: Sequence[ExamRecord]) -> dict[str, object]:
         for item in records
         if item.reasoning_tokens is not None
     ]
+    ttft_values = [item.ttft_ms for item in records if item.ttft_ms is not None]
+    total_frames = sum(len(item.image_dimensions) for item in records)
+    failure_count = len(records) - len(successful)
+    truncated_count = sum(item.truncated for item in records)
     return {
         "attempts": len(records),
         "successes": len(successful),
-        "failures": len(records) - len(successful),
+        "failures": failure_count,
+        "failure_rate": failure_count / len(records) if records else None,
         "latency_median_ms": statistics.median(latencies) if latencies else None,
         "latency_p90_ms": _percentile(latencies, 0.9) if latencies else None,
         "latency_max_ms": max(latencies) if latencies else None,
+        "ttft_median_ms": statistics.median(ttft_values) if ttft_values else None,
+        "ttft_p90_ms": _percentile(ttft_values, 0.9) if ttft_values else None,
+        "ttft_max_ms": max(ttft_values) if ttft_values else None,
+        "ttft_nonempty_rate": len(ttft_values) / len(records) if records else None,
         "average_tokens_per_attempt": statistics.fmean(token_totals) if token_totals else None,
         "average_input_tokens_per_attempt": (
             statistics.fmean(input_tokens) if input_tokens else None
         ),
         "average_configured_cost_usd_per_attempt": statistics.fmean(costs) if costs else None,
         "total_actual_cost_usd": sum(actual_costs),
+        "average_cost_per_frame_usd": (
+            sum(actual_costs) / total_frames if total_frames else None
+        ),
         "reasoning_tokens": sum(reasoning_tokens),
         "average_visible_output_tokens": (
             statistics.fmean(visible_tokens) if visible_tokens else None
         ),
         "empty_visible_outputs": sum(item.visible_output_empty for item in records),
-        "truncated": sum(item.truncated for item in records),
+        "truncated": truncated_count,
+        "truncated_rate": truncated_count / len(records) if records else None,
         "fast_relaxed_attempts": sum(item.fast_relaxed for item in records),
     }
+
+
+def _repetition_stability(
+    records: Sequence[ExamRecord],
+) -> dict[str, dict[str, object]]:
+    groups: dict[str, list[ExamRecord]] = {}
+    for record in records:
+        width = "native" if record.upload_width == 0 else str(record.upload_width)
+        groups.setdefault(f"{record.target_label} | {width}", []).append(record)
+    output: dict[str, dict[str, object]] = {}
+    for name, group in sorted(groups.items()):
+        by_repetition: dict[int, list[float]] = {}
+        for record in group:
+            if record.latency_ms is not None:
+                by_repetition.setdefault(record.repetition, []).append(record.latency_ms)
+        medians = {
+            repetition: statistics.median(values)
+            for repetition, values in sorted(by_repetition.items())
+            if values
+        }
+        first = medians.get(1)
+        second = medians.get(2)
+        output[name] = {
+            "repetition_medians_ms": {str(key): value for key, value in medians.items()},
+            "median_difference_ms": (
+                second - first if first is not None and second is not None else None
+            ),
+            "absolute_median_difference_ms": (
+                abs(second - first) if first is not None and second is not None else None
+            ),
+        }
+    return output
 
 
 def _percentile(values: Sequence[float], percentile: float) -> float:
@@ -1325,67 +1649,123 @@ def resolve_models_from_openrouter(
     client: httpx.Client | None = None,
     fetched_at: datetime | None = None,
 ) -> ModelResolution:
-    """Resolve names or slugs from one uncached official OpenRouter catalog fetch."""
+    """Resolve live models, prices, and Alibaba endpoint availability."""
     if not requested_names:
         raise VisionExamError("--resolve-models 至少需要一个 --model 名称")
     owns_client = client is None
     catalog_client = client or httpx.Client(timeout=30.0)
     try:
-        try:
-            response = catalog_client.get(OPENROUTER_MODELS_URL)
-        except httpx.HTTPError as error:
-            raise VisionExamError(f"OpenRouter 型号目录请求失败：{error}") from error
-        if not response.is_success:
-            raise VisionExamError(
-                f"OpenRouter 型号目录请求失败（HTTP {response.status_code}）"
+        payload = _get_openrouter_json(
+            catalog_client, OPENROUTER_MODELS_URL, "型号目录"
+        )
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("data"), list):
+            raise VisionExamError("OpenRouter 型号目录缺少 data 数组")
+        raw_models = [item for item in payload["data"] if isinstance(item, Mapping)]
+        if not raw_models:
+            raise VisionExamError("OpenRouter 型号目录没有可解析型号")
+
+        resolved: list[ResolvedModel] = []
+        errors: list[str] = []
+        for requested_name in requested_names:
+            match = _match_catalog_model(requested_name, raw_models)
+            if match is None:
+                candidates = _closest_catalog_slugs(requested_name, raw_models)
+                errors.append(
+                    f"{requested_name}：不存在；最接近："
+                    + ("、".join(candidates) if candidates else "无")
+                )
+                continue
+            try:
+                model = _parse_resolved_model(requested_name, match)
+            except VisionExamError as error:
+                errors.append(str(error))
+                continue
+            if "image" not in model.input_modalities:
+                candidates = _closest_catalog_slugs(requested_name, raw_models)
+                errors.append(
+                    f"{requested_name} -> {model.slug}：不支持图像输入；最接近："
+                    + ("、".join(candidates) if candidates else "无")
+                )
+                continue
+            endpoints_url = OPENROUTER_MODEL_ENDPOINTS_URL.format(slug=model.slug)
+            endpoint_payload = _get_openrouter_json(
+                catalog_client, endpoints_url, f"{model.slug} 端点目录"
             )
-        try:
-            payload: object = response.json()
-        except ValueError as error:
-            raise VisionExamError(f"OpenRouter 型号目录不是合法 JSON：{error}") from error
+            model = _attach_selected_provider(model, endpoint_payload)
+            resolved.append(model)
+        if errors:
+            raise VisionExamError("候选型号解析失败：\n- " + "\n- ".join(errors))
+        slugs = [model.slug for model in resolved]
+        if len(set(slugs)) != len(slugs):
+            raise VisionExamError("多个候选名称解析到了同一个 slug")
+        timestamp = fetched_at or datetime.now().astimezone()
+        return ModelResolution(
+            endpoint=OPENROUTER_MODELS_URL,
+            fetched_at=timestamp.isoformat(),
+            models=tuple(resolved),
+        )
     finally:
         if owns_client:
             catalog_client.close()
-    if not isinstance(payload, Mapping) or not isinstance(payload.get("data"), list):
-        raise VisionExamError("OpenRouter 型号目录缺少 data 数组")
-    raw_models = [item for item in payload["data"] if isinstance(item, Mapping)]
-    if not raw_models:
-        raise VisionExamError("OpenRouter 型号目录没有可解析型号")
 
-    resolved: list[ResolvedModel] = []
-    errors: list[str] = []
-    for requested_name in requested_names:
-        match = _match_catalog_model(requested_name, raw_models)
-        if match is None:
-            candidates = _closest_catalog_slugs(requested_name, raw_models)
-            errors.append(
-                f"{requested_name}：不存在；最接近："
-                + ("、".join(candidates) if candidates else "无")
-            )
-            continue
-        try:
-            model = _parse_resolved_model(requested_name, match)
-        except VisionExamError as error:
-            errors.append(str(error))
-            continue
-        if "image" not in model.input_modalities:
-            candidates = _closest_catalog_slugs(requested_name, raw_models)
-            errors.append(
-                f"{requested_name} -> {model.slug}：不支持图像输入；最接近："
-                + ("、".join(candidates) if candidates else "无")
-            )
-            continue
-        resolved.append(model)
-    if errors:
-        raise VisionExamError("候选型号解析失败：\n- " + "\n- ".join(errors))
-    slugs = [model.slug for model in resolved]
-    if len(set(slugs)) != len(slugs):
-        raise VisionExamError("多个候选名称解析到了同一个 slug")
-    timestamp = fetched_at or datetime.now().astimezone()
-    return ModelResolution(
-        endpoint=OPENROUTER_MODELS_URL,
-        fetched_at=timestamp.isoformat(),
-        models=tuple(resolved),
+
+def _get_openrouter_json(
+    client: httpx.Client,
+    url: str,
+    label: str,
+) -> object:
+    try:
+        response = client.get(url)
+    except httpx.HTTPError as error:
+        raise VisionExamError(f"OpenRouter {label}请求失败：{error}") from error
+    if not response.is_success:
+        raise VisionExamError(
+            f"OpenRouter {label}请求失败（HTTP {response.status_code}）"
+        )
+    try:
+        return response.json()
+    except ValueError as error:
+        raise VisionExamError(f"OpenRouter {label}不是合法 JSON：{error}") from error
+
+
+def _attach_selected_provider(
+    model: ResolvedModel,
+    payload: object,
+) -> ResolvedModel:
+    if not isinstance(payload, Mapping):
+        raise VisionExamError(f"{model.slug}：端点目录不是 JSON 对象")
+    data_value = payload.get("data")
+    data = data_value if isinstance(data_value, Mapping) else {}
+    endpoints_value = data.get("endpoints")
+    if not isinstance(endpoints_value, list):
+        raise VisionExamError(f"{model.slug}：端点目录缺少 endpoints 数组")
+    matches = [
+        endpoint
+        for endpoint in endpoints_value
+        if isinstance(endpoint, Mapping)
+        and isinstance(endpoint.get("provider_name"), str)
+        and endpoint["provider_name"].casefold() == SPEED_ROUND_PROVIDER_NAME.casefold()
+    ]
+    if not matches:
+        return model
+    endpoint = matches[0]
+    provider_slug = endpoint.get("tag")
+    endpoint_name = endpoint.get("name")
+    if not isinstance(provider_slug, str) or not provider_slug.strip():
+        raise VisionExamError(f"{model.slug}：Alibaba 端点缺少路由 tag")
+    endpoint_price = _parse_price_mapping(
+        endpoint.get("pricing"),
+        label=f"{model.slug} Alibaba 端点",
+    )
+    return replace(
+        model,
+        price=endpoint_price,
+        selected_provider_name=SPEED_ROUND_PROVIDER_NAME,
+        selected_provider_slug=provider_slug,
+        selected_provider_endpoint=(
+            endpoint_name if isinstance(endpoint_name, str) else None
+        ),
+        provider_locked=True,
     )
 
 
@@ -1468,22 +1848,9 @@ def _parse_resolved_model(
         if isinstance(modalities_value, list)
         else ()
     )
-    pricing_value = raw.get("pricing")
-    pricing = pricing_value if isinstance(pricing_value, Mapping) else {}
-    try:
-        prompt_price = float(pricing["prompt"])
-        completion_price = float(pricing["completion"])
-    except (KeyError, TypeError, ValueError) as error:
-        raise VisionExamError(
-            f"{requested_name} -> {slug}：无法解析当前输入/输出单价"
-        ) from error
-    if (
-        not math.isfinite(prompt_price)
-        or not math.isfinite(completion_price)
-        or prompt_price < 0
-        or completion_price < 0
-    ):
-        raise VisionExamError(f"{requested_name} -> {slug}：当前单价无效")
+    price = _parse_price_mapping(
+        raw.get("pricing"), label=f"{requested_name} -> {slug}"
+    )
     parameters_value = raw.get("supported_parameters")
     parameters = (
         tuple(item for item in parameters_value if isinstance(item, str))
@@ -1500,14 +1867,32 @@ def _parse_resolved_model(
         slug=slug,
         canonical_slug=(canonical_value if isinstance(canonical_value, str) else None),
         input_modalities=modalities,
-        price=ModelPrice(
-            input_per_million_usd=prompt_price * 1_000_000,
-            output_per_million_usd=completion_price * 1_000_000,
-        ),
+        price=price,
         supported_parameters=parameters,
         reasoning_mandatory=mandatory,
         reasoning_disabled=("reasoning" in parameters and not mandatory),
+        selected_provider_name=None,
+        selected_provider_slug=None,
+        selected_provider_endpoint=None,
+        provider_locked=False,
     )
+
+
+def _parse_price_mapping(value: object, *, label: str) -> ModelPrice:
+    pricing = value if isinstance(value, Mapping) else {}
+    try:
+        prompt_price = float(pricing["prompt"])
+        completion_price = float(pricing["completion"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise VisionExamError(f"{label}：无法解析当前输入/输出单价") from error
+    if (
+        not math.isfinite(prompt_price)
+        or not math.isfinite(completion_price)
+        or prompt_price < 0
+        or completion_price < 0
+    ):
+        raise VisionExamError(f"{label}：当前单价无效")
+    return ModelPrice(prompt_price * 1_000_000, completion_price * 1_000_000)
 
 
 def targets_from_resolution(
@@ -1515,17 +1900,30 @@ def targets_from_resolution(
     *,
     temperature: float,
     timeout_seconds: float,
+    lock_selected_provider: bool = False,
 ) -> tuple[ModelTarget, ...]:
     """Convert exact live catalog records into runnable targets."""
     return tuple(
         ModelTarget(
             label=model.slug,
             model=model.slug,
-            provider=None,
+            provider=(
+                model.selected_provider_slug
+                if lock_selected_provider and model.provider_locked
+                else None
+            ),
             temperature=temperature,
             timeout_seconds=timeout_seconds,
             price=model.price,
             reasoning_disabled=model.reasoning_disabled,
+            provider_lock_status=(
+                "已锁定"
+                if lock_selected_provider and model.provider_locked
+                else "未锁定" if lock_selected_provider else "未请求"
+            ),
+            provider_endpoint=(
+                model.selected_provider_endpoint if lock_selected_provider else None
+            ),
         )
         for model in resolution.models
     )
@@ -1633,6 +2031,7 @@ def print_upload_plan(
     estimate: CostEstimate,
     *,
     cost_cap_usd: float,
+    repetitions: int = 1,
 ) -> None:
     print("=" * 68)
     print("警告：M5-T2 将把下面列出的本地图像发送到网络模型服务。")
@@ -1642,12 +2041,15 @@ def print_upload_plan(
         print(
             f"  - {target.label} -> {target.model}；"
             f"输入/输出百万 token 单价 ${target.price.input_per_million_usd:g}/"
-            f"${target.price.output_per_million_usd:g}"
+            f"${target.price.output_per_million_usd:g}；"
+            f"上游{target.provider_lock_status}"
+            + (f" {target.provider} ({target.provider_endpoint})" if target.provider else "")
         )
     print("变体：")
     for variant in variants:
         print(f"  - {variant.name}")
-    print("预计量（包含所有模型都触发 fast-relaxed 的上界）：")
+    print("预计量（包含本轮配置允许的全部调用）：")
+    print(f"  - 每个配置完整遍数：{repetitions}")
     print(f"  - 基础调用：{estimate.base_calls} 次")
     print(f"  - 含重跑最多：{estimate.maximum_calls_with_relaxed} 次")
     print(f"  - 估计输入 token：{estimate.estimated_input_tokens}")
@@ -1679,6 +2081,7 @@ def render_copy_command(
     resolution: ModelResolution,
     cost_cap_usd: float,
     timeout_seconds: float,
+    speed_round: bool = False,
 ) -> str:
     """Render a PowerShell-safe command with the exact live slugs and prices."""
     arguments = [
@@ -1688,6 +2091,8 @@ def render_copy_command(
         str(manifest_path),
         "--resolve-models",
     ]
+    if speed_round:
+        arguments.append("--speed-round")
     for model in resolution.models:
         arguments.extend(("--model", model.slug))
         arguments.extend(
@@ -1726,6 +2131,35 @@ def _run_directory(root: Path, started_at: datetime) -> Path:
     return root / f"vision-exam-{timestamp}"
 
 
+def _provider_lock_verification(
+    records: Sequence[ExamRecord],
+    targets: Sequence[ModelTarget],
+) -> dict[str, object]:
+    verification: dict[str, object] = {}
+    for target in targets:
+        target_records = [record for record in records if record.target_label == target.label]
+        actual = sorted(
+            {record.provider for record in target_records if record.provider is not None}
+        )
+        expected = target.provider
+        verification[target.label] = {
+            "lock_status": target.provider_lock_status,
+            "expected_provider_slug": expected,
+            "endpoint": target.provider_endpoint,
+            "actual_providers": actual,
+            "consistent": (
+                bool(actual)
+                and all(
+                    name.casefold() == SPEED_ROUND_PROVIDER_NAME.casefold()
+                    for name in actual
+                )
+                if target.provider_lock_status == "已锁定"
+                else None
+            ),
+        }
+    return verification
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="M5-T2 离线视觉模型考卷")
     parser.add_argument("manifest", type=Path, help="TOML 考卷清单")
@@ -1734,6 +2168,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--resolve-models",
         action="store_true",
         help="实时读取 OpenRouter 官方型号目录；同时使用 M5-T2.9 的四个剪枝变体",
+    )
+    parser.add_argument(
+        "--speed-round",
+        action="store_true",
+        help="M5-T2.10：只跑 fast/sparse、1280/896/640，各两遍并记录 TTFT",
     )
     parser.add_argument("--provider", help="直接模型的可选服务商锁定")
     parser.add_argument("--price", action="append", default=[], help="TARGET=输入百万token美元,输出百万token美元；可重复")
@@ -1799,19 +2238,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise VisionExamError("--timeout 必须大于 0")
         if arguments.cost_cap <= 0:
             raise VisionExamError("--cost-cap 必须大于 0")
+        if arguments.speed_round and not arguments.resolve_models:
+            raise VisionExamError("--speed-round 必须与 --resolve-models 同时使用")
         manifest = load_manifest(arguments.manifest)
         resolution: ModelResolution | None = None
+        repetitions = 1
+        streaming = False
+        enable_relaxed = True
         if arguments.resolve_models:
             if arguments.send_widths or arguments.region_modes or arguments.output_modes:
                 raise VisionExamError(
                     "--resolve-models 正式跑卷固定使用四个剪枝变体，不得同时传变体轴"
                 )
-            variants = build_formal_variants()
+            if arguments.speed_round:
+                variants = build_speed_round_variants()
+                repetitions = 2
+                streaming = True
+                enable_relaxed = False
+            else:
+                variants = build_formal_variants()
             resolution = resolve_models_from_openrouter(arguments.model)
             targets = targets_from_resolution(
                 resolution,
                 temperature=arguments.temperature,
                 timeout_seconds=arguments.timeout,
+                lock_selected_provider=arguments.speed_round,
             )
             supplied_prices = parse_prices(arguments.price)
             for model in resolution.models:
@@ -1842,6 +2293,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             variants=variants,
             targets=targets,
             estimated_input_tokens_per_attempt=arguments.estimated_input_tokens,
+            repetitions=repetitions,
+            include_relaxed=enable_relaxed,
         )
         if estimate.estimated_cost_usd > arguments.cost_cap:
             raise VisionExamError(
@@ -1856,6 +2309,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     resolution=resolution,
                     cost_cap_usd=arguments.cost_cap,
                     timeout_seconds=arguments.timeout,
+                    speed_round=arguments.speed_round,
                 )
             )
             return 0
@@ -1866,6 +2320,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             variants,
             estimate,
             cost_cap_usd=arguments.cost_cap,
+            repetitions=repetitions,
         )
         if not confirm_upload(assume_yes=arguments.yes):
             print("未确认上传，考卷未执行。")
@@ -1878,6 +2333,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             targets=targets,
             client_factory=_default_client_factory,
             cost_cap_usd=arguments.cost_cap,
+            enable_relaxed=enable_relaxed,
+            repetitions=repetitions,
+            streaming=streaming,
         )
         ended_at = datetime.now().astimezone()
         output_directory = _run_directory(DEFAULT_OUTPUT_ROOT, started_at)
@@ -1915,9 +2373,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     for variant in variants
                 ],
                 "uploaded_files": [str(path) for path in files],
-                "base_expected_rows": len(targets) * len(variants) * len(manifest.questions),
+                "base_expected_rows": (
+                    len(targets)
+                    * len(variants)
+                    * len(manifest.questions)
+                    * repetitions
+                ),
                 "attempts": len(outcome.records),
+                "repetitions": repetitions,
+                "streaming_requested": streaming,
+                "provider_lock_verification": _provider_lock_verification(
+                    outcome.records, targets
+                ),
             },
+            speed_round=arguments.speed_round,
         )
         print(f"考卷完成：{output_directory}")
         print(

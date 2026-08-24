@@ -435,6 +435,69 @@ def test_complete_with_images_honors_smaller_per_attachment_limit(tmp_path) -> N
     assert uploaded_size == (6, 3)
 
 
+def test_streamed_vision_completion_measures_first_visible_token_and_usage(
+    tmp_path,
+) -> None:
+    image_path = tmp_path / "frame.png"
+    Image.new("RGB", (12, 6), (1, 2, 3)).save(image_path)
+    request_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_body.update(json.loads(request.content))
+        body = "".join(
+            (
+                'data: {"model":"vendor/vision-actual","provider":"Alibaba",'
+                '"choices":[{"delta":{"content":"第一"}}]}\n\n',
+                'data: {"model":"vendor/vision-actual","provider":"Alibaba",'
+                '"choices":[{"delta":{"content":"句话"},"finish_reason":"stop"}]}\n\n',
+                'data: {"model":"vendor/vision-actual","provider":"Alibaba",'
+                '"choices":[],"usage":{"prompt_tokens":80,"completion_tokens":4,'
+                '"cost":0.0002}}\n\n',
+                "data: [DONE]\n\n",
+            )
+        )
+        return httpx.Response(
+            200,
+            text=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    client = OpenRouterClient(
+        "test-api-key",
+        transport=httpx.MockTransport(handler),
+        clock=_StepClock(step=0.1),
+    )
+    try:
+        result = client.complete_with_images_stream(
+            model="vendor/vision",
+            provider="alibaba",
+            system_prompt="system",
+            user_prompt="observe",
+            images=(LlmImage(image_path, "帧1", target_width=8),),
+            max_image_edge=None,
+            max_tokens=60,
+            temperature=0.0,
+            reasoning_enabled=False,
+        )
+    finally:
+        client.close()
+
+    assert request_body["stream"] is True
+    assert request_body["provider"] == {
+        "only": ["alibaba"],
+        "allow_fallbacks": False,
+    }
+    assert request_body["reasoning"] == {"enabled": False}
+    assert result.text == "第一句话"
+    assert result.ttft_seconds == pytest.approx(0.1)
+    assert result.latency_seconds > result.ttft_seconds
+    assert result.streamed
+    assert result.provider == "Alibaba"
+    assert result.finish_reason == "stop"
+    assert result.usage.prompt_tokens == 80
+    assert result.usage.completion_tokens == 4
+
+
 def test_streamed_analysis_parses_three_fields_usage_and_event_line_latency() -> None:
     request_body: dict[str, object] = {}
 

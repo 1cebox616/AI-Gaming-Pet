@@ -39,6 +39,8 @@ class LlmResult:
     model: str
     provider: str | None
     finish_reason: str | None = None
+    ttft_seconds: float | None = None
+    streamed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,12 +87,18 @@ class LlmError(Exception):
         latency_seconds: float | None = None,
         partial_event_text: str | None = None,
         event_latency_seconds: float | None = None,
+        provider: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.latency_seconds = latency_seconds
         self.partial_event_text = partial_event_text
         self.event_latency_seconds = event_latency_seconds
+        self.provider = provider
+
+
+class LlmStreamingUnsupported(LlmError):
+    """The selected upstream explicitly cannot return this request as SSE."""
 
 
 class LlmClientProtocol(Protocol):
@@ -153,6 +161,24 @@ class LlmVisionClientProtocol(Protocol):
         reasoning_enabled: bool | None = None,
     ) -> LlmResult:
         """Return one completed response after locally encoding the images."""
+        ...
+
+    def complete_with_images_stream(
+        self,
+        *,
+        model: str,
+        provider: str | None = None,
+        system_prompt: str,
+        user_prompt: str,
+        images: Sequence[LlmImage],
+        max_image_edge: int | None,
+        max_tokens: int,
+        temperature: float,
+        seed: int | None = None,
+        reasoning_effort: str | None = None,
+        reasoning_enabled: bool | None = None,
+    ) -> LlmResult:
+        """Stream one image response and report first visible-token latency."""
         ...
 
 
@@ -243,44 +269,49 @@ class OpenRouterClient:
         reasoning_enabled: bool | None = None,
     ) -> LlmResult:
         """Send text and local images as OpenAI-compatible content blocks."""
-        if not images:
-            raise ValueError("at least one image is required")
-        if max_image_edge is not None and max_image_edge <= 0:
-            raise ValueError("maximum image edge must be positive")
-        user_content: list[dict[str, object]] = [
-            {"type": "text", "text": user_prompt}
-        ]
-        for attachment in images:
-            if not attachment.label.strip():
-                raise ValueError("image label must not be blank")
-            if attachment.max_edge is not None and attachment.max_edge <= 0:
-                raise ValueError("image attachment maximum edge must be positive")
-            if attachment.target_width is not None and attachment.target_width <= 0:
-                raise ValueError("image attachment target width must be positive")
-            effective_max_edge = _smallest_limit(
-                max_image_edge,
-                attachment.max_edge,
-            )
-            user_content.append({"type": "text", "text": attachment.label})
-            user_content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": _image_data_url(
-                            attachment.path,
-                            max_image_edge=effective_max_edge,
-                            target_width=attachment.target_width,
-                        )
-                    },
-                }
-            )
+        messages = _image_messages(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            images=images,
+            max_image_edge=max_image_edge,
+        )
         return self._complete_messages(
             model=model,
             provider=provider,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            seed=seed,
+            reasoning_effort=reasoning_effort,
+            reasoning_enabled=reasoning_enabled,
+        )
+
+    def complete_with_images_stream(
+        self,
+        *,
+        model: str,
+        provider: str | None = None,
+        system_prompt: str,
+        user_prompt: str,
+        images: Sequence[LlmImage],
+        max_image_edge: int | None,
+        max_tokens: int,
+        temperature: float,
+        seed: int | None = None,
+        reasoning_effort: str | None = None,
+        reasoning_enabled: bool | None = None,
+    ) -> LlmResult:
+        """Stream text for local images and measure the first visible token."""
+        messages = _image_messages(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            images=images,
+            max_image_edge=max_image_edge,
+        )
+        return self._stream_messages(
+            model=model,
+            provider=provider,
+            messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
             seed=seed,
@@ -359,6 +390,125 @@ class OpenRouterClient:
                 latency_seconds=latency,
             ) from error
         return result
+
+    def _stream_messages(
+        self,
+        *,
+        model: str,
+        provider: str | None,
+        messages: list[dict[str, object]],
+        max_tokens: int,
+        temperature: float,
+        seed: int | None,
+        reasoning_effort: str | None,
+        reasoning_enabled: bool | None,
+    ) -> LlmResult:
+        """Stream one prepared message list without retrying."""
+        started_at = self._clock()
+        request_body: dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        _apply_provider_and_reasoning(
+            request_body,
+            provider=provider,
+            seed=seed,
+            reasoning_effort=reasoning_effort,
+            reasoning_enabled=reasoning_enabled,
+        )
+        text_parts: list[str] = []
+        ttft_seconds: float | None = None
+        actual_model: str | None = None
+        actual_provider: str | None = None
+        finish_reason: str | None = None
+        usage = LlmUsage(None, None, None)
+        try:
+            with self._client.stream(
+                "POST", "chat/completions", json=request_body
+            ) as response:
+                if not response.is_success:
+                    response.read()
+                    message = _response_error_message(response)
+                    error_type = (
+                        LlmStreamingUnsupported
+                        if _streaming_is_unsupported(response, message)
+                        else LlmError
+                    )
+                    raise error_type(
+                        message,
+                        status_code=response.status_code,
+                        latency_seconds=self._clock() - started_at,
+                        provider=provider,
+                    )
+                media_type = response.headers.get("content-type", "").lower()
+                if media_type and "text/event-stream" not in media_type:
+                    response.read()
+                    raise LlmStreamingUnsupported(
+                        "OpenRouter 上游未返回流式 SSE；改用非流式请求",
+                        status_code=response.status_code,
+                        latency_seconds=self._clock() - started_at,
+                        provider=provider,
+                    )
+                for line in response.iter_lines():
+                    if not line or line.startswith(":") or not line.startswith("data:"):
+                        continue
+                    data = line.removeprefix("data:").strip()
+                    if data == "[DONE]":
+                        break
+                    chunk = _parse_stream_chunk(data)
+                    chunk_model = chunk.get("model")
+                    if isinstance(chunk_model, str) and chunk_model.strip():
+                        actual_model = chunk_model
+                    chunk_provider = chunk.get("provider")
+                    if isinstance(chunk_provider, str) and chunk_provider.strip():
+                        actual_provider = chunk_provider
+                    usage_value = chunk.get("usage")
+                    if isinstance(usage_value, Mapping):
+                        usage = _parse_usage(usage_value)
+                    chunk_finish_reason = _stream_finish_reason(chunk)
+                    if chunk_finish_reason is not None:
+                        finish_reason = chunk_finish_reason
+                    content = _stream_content(chunk)
+                    if content:
+                        if ttft_seconds is None:
+                            ttft_seconds = self._clock() - started_at
+                        text_parts.append(content)
+        except LlmError:
+            raise
+        except httpx.TimeoutException as error:
+            latency = self._clock() - started_at
+            raise LlmError(
+                f"OpenRouter 流式请求超时：{error}",
+                latency_seconds=latency,
+                provider=actual_provider or provider,
+            ) from error
+        except httpx.RequestError as error:
+            latency = self._clock() - started_at
+            raise LlmError(
+                f"OpenRouter 流式网络请求失败：{error}",
+                latency_seconds=latency,
+                provider=actual_provider or provider,
+            ) from error
+        latency = self._clock() - started_at
+        if actual_model is None:
+            raise LlmError(
+                "OpenRouter 流式响应缺少实际型号 ID",
+                latency_seconds=latency,
+                provider=actual_provider or provider,
+            )
+        return LlmResult(
+            text="".join(text_parts).strip(),
+            usage=usage,
+            latency_seconds=latency,
+            model=actual_model,
+            provider=actual_provider or provider,
+            finish_reason=finish_reason,
+            ttft_seconds=ttft_seconds,
+            streamed=True,
+        )
 
     def analyze_stream(
         self,
@@ -638,6 +788,27 @@ def _stream_content(chunk: Mapping[str, object]) -> str:
     return content if isinstance(content, str) else ""
 
 
+def _stream_finish_reason(chunk: Mapping[str, object]) -> str | None:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, Mapping):
+        return None
+    value = first.get("finish_reason")
+    return value if isinstance(value, str) else None
+
+
+def _streaming_is_unsupported(response: httpx.Response, message: str) -> bool:
+    if response.status_code not in {400, 404, 405, 422, 501}:
+        return False
+    normalized = message.casefold()
+    return "stream" in normalized and any(
+        marker in normalized
+        for marker in ("unsupported", "not support", "does not support", "不支持")
+    )
+
+
 def _parse_usage(usage: Mapping[str, object]) -> LlmUsage:
     details_value = usage.get("completion_tokens_details")
     details = details_value if isinstance(details_value, Mapping) else {}
@@ -676,6 +847,72 @@ def _optional_float(value: object) -> float | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     return None
+
+
+def _apply_provider_and_reasoning(
+    request_body: dict[str, object],
+    *,
+    provider: str | None,
+    seed: int | None,
+    reasoning_effort: str | None,
+    reasoning_enabled: bool | None,
+) -> None:
+    if provider is not None:
+        # OpenRouter 2026-08-24 官方路由字段：only 限定唯一上游，
+        # allow_fallbacks=false 禁止该上游失败后切到别家。
+        request_body["provider"] = {
+            "only": [provider],
+            "allow_fallbacks": False,
+        }
+    if seed is not None:
+        request_body["seed"] = seed
+    if reasoning_effort is not None and reasoning_enabled is not None:
+        raise ValueError("reasoning effort and enabled flag are mutually exclusive")
+    if reasoning_effort is not None:
+        if reasoning_effort not in {"none", "minimal", "low", "medium", "high"}:
+            raise ValueError("unsupported reasoning effort")
+        request_body["reasoning"] = {"effort": reasoning_effort}
+    elif reasoning_enabled is not None:
+        request_body["reasoning"] = {"enabled": reasoning_enabled}
+
+
+def _image_messages(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    images: Sequence[LlmImage],
+    max_image_edge: int | None,
+) -> list[dict[str, object]]:
+    if not images:
+        raise ValueError("at least one image is required")
+    if max_image_edge is not None and max_image_edge <= 0:
+        raise ValueError("maximum image edge must be positive")
+    user_content: list[dict[str, object]] = [{"type": "text", "text": user_prompt}]
+    for attachment in images:
+        if not attachment.label.strip():
+            raise ValueError("image label must not be blank")
+        if attachment.max_edge is not None and attachment.max_edge <= 0:
+            raise ValueError("image attachment maximum edge must be positive")
+        if attachment.target_width is not None and attachment.target_width <= 0:
+            raise ValueError("image attachment target width must be positive")
+        effective_max_edge = _smallest_limit(max_image_edge, attachment.max_edge)
+        user_content.append({"type": "text", "text": attachment.label})
+        user_content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": _image_data_url(
+                        attachment.path,
+                        max_image_edge=effective_max_edge,
+                        target_width=attachment.target_width,
+                    )
+                },
+            }
+        )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
 
 
 def _image_data_url(
