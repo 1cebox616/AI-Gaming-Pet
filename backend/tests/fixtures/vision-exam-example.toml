@@ -14,4 +14,3 @@ type = "sequence"
 frames = ["vision-exam-frame-a.ppm", "vision-exam-frame-b.ppm"]
 seconds = [0.0, 3.0]
 region_grid = ["r12c7", "r12c8"]
-crops = ["vision-exam-crop.ppm"]

@@ -30,7 +30,6 @@ region_grid = [
   "r15c2", "r15c3", "r15c4", "r15c5", "r15c7", "r15c8",
   "r16c2", "r16c3", "r16c4", "r16c5",
 ]
-crops = ["../../../recordings/capture/20260823-150920/vision-exam-crops-mechanical/frame-000035-20260823T191028.340744Z-grid-crop.png"]
 
 [[questions]]
 id = "gzw-near-black"
@@ -51,7 +50,6 @@ region_grid = [
   "r10c2", "r10c5", "r11c5", "r12c4", "r12c5", "r13c5", "r14c4", "r14c5",
   "r15c4", "r15c5", "r15c6", "r16c4", "r16c5",
 ]
-crops = ["../../../recordings/capture/20260823-201700/vision-exam-crops-mechanical/frame-000058-20260824T001854.718295Z-grid-crop.png"]
 
 [[questions]]
 id = "subnautica-night-underwater"
@@ -68,7 +66,6 @@ region_grid = [
   "r13c4", "r13c5", "r13c6", "r13c7", "r14c4", "r14c5", "r14c6", "r14c7",
   "r15c3", "r15c4", "r15c7", "r15c9", "r16c3", "r16c4", "r16c7",
 ]
-crops = ["../../../recordings/capture/20260823-183828/vision-exam-crops-mechanical/frame-000013-20260823T223852.427674Z-grid-crop.png"]
 
 [[questions]]
 id = "gzw-static-control-a"
@@ -111,7 +108,6 @@ region_grid = [
   "r5c1", "r5c2", "r5c3", "r5c5", "r5c6", "r8c1", "r8c2", "r8c3",
   "r9c1", "r9c2", "r9c3", "r10c1", "r10c2", "r10c3",
 ]
-crops = ["../../../recordings/capture/20260823-161013/vision-exam-crops-mechanical/frame-000045-20260823T201141.415143Z-grid-crop.png"]
 
 [[questions]]
 id = "subnautica-wave-sequence"
@@ -133,7 +129,6 @@ region_grid = [
   "r15c1", "r15c2", "r15c3", "r15c4", "r15c5", "r15c6", "r15c8", "r15c9",
   "r16c1", "r16c2", "r16c3", "r16c4", "r16c5", "r16c6", "r16c7", "r16c9",
 ]
-crops = ["../../../recordings/capture/20260823-183136/vision-exam-crops-mechanical/frame-000008-20260823T223150.809244Z-grid-crop.png"]
 
 [[questions]]
 id = "spire-combat-ui-nocontext"
@@ -146,7 +141,6 @@ region_grid = [
   "r10c2", "r10c5", "r11c5", "r12c4", "r12c5", "r13c5", "r14c4", "r14c5",
   "r15c4", "r15c5", "r15c6", "r16c4", "r16c5",
 ]
-crops = ["../../../recordings/capture/20260823-201700/vision-exam-crops-mechanical/frame-000058-20260824T001854.718295Z-grid-crop.png"]
 
 [[questions]]
 id = "subnautica-night-underwater-nocontext"
@@ -162,4 +156,3 @@ region_grid = [
   "r13c4", "r13c5", "r13c6", "r13c7", "r14c4", "r14c5", "r14c6", "r14c7",
   "r15c3", "r15c4", "r15c7", "r15c9", "r16c3", "r16c4", "r16c7",
 ]
-crops = ["../../../recordings/capture/20260823-183828/vision-exam-crops-mechanical/frame-000013-20260823T223852.427674Z-grid-crop.png"]

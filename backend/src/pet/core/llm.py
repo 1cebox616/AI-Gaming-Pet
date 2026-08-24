@@ -50,6 +50,15 @@ class LlmImage:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmImageUploadMetadata:
+    """Pixel dimensions and PNG payload size produced by local preprocessing."""
+
+    width: int
+    height: int
+    byte_size: int
+
+
+@dataclass(frozen=True, slots=True)
 class LlmAnalysisResult:
     """A streamed self-audit, event line, and factual scene description."""
 
@@ -647,7 +656,42 @@ def _image_data_url(
     max_image_edge: int | None,
     target_width: int | None,
 ) -> str:
-    """Load, optionally shrink, and re-encode one image without its metadata."""
+    """Load, optionally resize, and re-encode one image without its metadata."""
+    payload, _ = _prepare_image_upload(
+        path,
+        max_image_edge=max_image_edge,
+        target_width=target_width,
+    )
+    encoded = base64.b64encode(payload).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def image_upload_metadata(
+    image: LlmImage,
+    *,
+    max_image_edge: int | None,
+) -> LlmImageUploadMetadata:
+    """Inspect the exact locally encoded payload without sending it anywhere."""
+    if max_image_edge is not None and max_image_edge <= 0:
+        raise ValueError("maximum image edge must be positive")
+    if image.max_edge is not None and image.max_edge <= 0:
+        raise ValueError("image attachment maximum edge must be positive")
+    if image.target_width is not None and image.target_width <= 0:
+        raise ValueError("image attachment target width must be positive")
+    payload, size = _prepare_image_upload(
+        image.path,
+        max_image_edge=_smallest_limit(max_image_edge, image.max_edge),
+        target_width=image.target_width,
+    )
+    return LlmImageUploadMetadata(size[0], size[1], len(payload))
+
+
+def _prepare_image_upload(
+    path: Path,
+    *,
+    max_image_edge: int | None,
+    target_width: int | None,
+) -> tuple[bytes, tuple[int, int]]:
     try:
         with Image.open(path) as source:
             source.load()
@@ -655,7 +699,7 @@ def _image_data_url(
     except (OSError, ValueError) as error:
         raise LlmError(f"无法读取待上传图像 {path}：{error}") from error
 
-    if target_width is not None and image.width > target_width:
+    if target_width is not None and image.width != target_width:
         target_height = max(1, round(image.height * target_width / image.width))
         image = image.resize(
             (target_width, target_height),
@@ -668,8 +712,7 @@ def _image_data_url(
         )
     output = BytesIO()
     image.save(output, format="PNG", optimize=True)
-    encoded = base64.b64encode(output.getvalue()).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
+    return output.getvalue(), image.size
 
 
 def _smallest_limit(first: int | None, second: int | None) -> int | None:

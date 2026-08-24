@@ -14,7 +14,7 @@ import re
 import statistics
 import sys
 import tomllib
-from typing import Literal
+from typing import Literal, cast
 
 from pet.core.config import LlmConfig, load_config
 from pet.core.llm import (
@@ -23,6 +23,7 @@ from pet.core.llm import (
     LlmResult,
     LlmVisionClientProtocol,
     OpenRouterClient,
+    image_upload_metadata,
 )
 
 BACKEND_DIRECTORY = Path(__file__).resolve().parents[5]
@@ -38,11 +39,14 @@ QUESTION_FIELDS = {
     "frames",
     "seconds",
     "region_grid",
-    "crops",
 }
 REGION_CELL_PATTERN = re.compile(r"r(?:[1-9]|1[0-6])c[1-9]")
 REGION_ROWS = 16
 REGION_COLUMNS = 9
+REGION_CELL_COUNT = REGION_ROWS * REGION_COLUMNS
+RegionMode = Literal["off", "sparse", "always"]
+REGION_MODES: tuple[RegionMode, ...] = ("off", "sparse", "always")
+DEFAULT_REGION_SPARSITY_MAX = 0.25  # 此数待实测确定。
 
 
 class VisionExamError(Exception):
@@ -58,8 +62,7 @@ class ExamQuestion:
     game_context: str | None
     frames: tuple[Path, ...]
     relative_seconds: tuple[float, ...]
-    region_grid: tuple[str, ...]
-    crops: tuple[Path, ...]
+    region_grid: tuple[str, ...] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,17 +75,16 @@ class ExamManifest:
 
 @dataclass(frozen=True, slots=True)
 class ExamVariant:
-    """One Cartesian-product choice on the two optional context axes."""
+    """One upload-width and region-mode Cartesian-product choice."""
 
-    with_region_grid: bool
-    with_crops: bool
     send_width: int
+    region_mode: RegionMode
+    region_sparsity_max: float
 
     @property
     def name(self) -> str:
-        region = "region-grid-on" if self.with_region_grid else "region-grid-off"
-        crops = "crops-on" if self.with_crops else "crops-off"
-        return f"{region}__{crops}__width-{self.send_width}"
+        width = "native" if self.send_width == 0 else str(self.send_width)
+        return f"region-{self.region_mode}__width-{width}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +115,12 @@ class ExamRecord:
     question_id: str
     question_type: str
     variant: str
+    upload_width: int
+    region_mode: str
+    region_grid_fraction: float | None
+    region_injected: bool
+    image_dimensions: tuple[str, ...]
+    image_byte_sizes: tuple[int, ...]
     target_label: str
     requested_model: str
     actual_model: str | None
@@ -199,9 +207,11 @@ def _parse_question(
     if any(current <= previous for previous, current in zip(seconds, seconds[1:])):
         raise VisionExamError(f"题 {question_id} 的 seconds 必须严格递增")
 
-    crops_value = raw.get("crops", [])
-    crops = _path_list(crops_value, "crops", question_id, base_directory, allow_empty=True)
-    region_grid = _region_grid(raw.get("region_grid", []), question_id)
+    region_grid = (
+        _region_grid(raw["region_grid"], question_id)
+        if "region_grid" in raw
+        else None
+    )
     game_context = _optional_text(
         raw.get("game_context"),
         "game_context",
@@ -214,7 +224,6 @@ def _parse_question(
         frames=frames,
         relative_seconds=seconds,
         region_grid=region_grid,
-        crops=crops,
     )
 
 
@@ -312,59 +321,70 @@ def build_user_prompt(question: ExamQuestion, variant: ExamVariant) -> str:
     timeline = build_timeline(question)
     if timeline:
         parts.append(timeline)
-    if variant.with_region_grid and question.region_grid:
+    if should_inject_region(question, variant):
         parts.append(
             f"画面被划分为 {REGION_ROWS} 行 {REGION_COLUMNS} 列的网格。"
             "与上一采样帧相比，以下格子发生了变化："
             + "、".join(question.region_grid)
             + "。"
         )
-    if variant.with_crops and question.crops:
-        parts.append(f"另附 {len(question.crops)} 张机器裁剪图。")
     return "\n".join(parts)
 
 
+def region_grid_fraction(question: ExamQuestion) -> float | None:
+    """Return the objective share of the fixed grid marked as changed."""
+    if question.region_grid is None:
+        return None
+    return len(question.region_grid) / REGION_CELL_COUNT
+
+
+def should_inject_region(question: ExamQuestion, variant: ExamVariant) -> bool:
+    """Apply the selected production sparsity policy to available grid data."""
+    if not question.region_grid or variant.region_mode == "off":
+        return False
+    if variant.region_mode == "always":
+        return True
+    fraction = region_grid_fraction(question)
+    return fraction is not None and fraction <= variant.region_sparsity_max
+
+
 def build_images(question: ExamQuestion, variant: ExamVariant) -> tuple[LlmImage, ...]:
-    """Select ordered full frames and optional crops for one request."""
-    images = [
+    """Select only ordered full frames for one request."""
+    target_width = None if variant.send_width == 0 else variant.send_width
+    return tuple(
         LlmImage(
             path=path,
             label=f"全图帧{index}（相对第{second:.1f}秒）",
-            target_width=variant.send_width,
+            target_width=target_width,
         )
         for index, (path, second) in enumerate(
             zip(question.frames, question.relative_seconds),
             start=1,
         )
-    ]
-    if variant.with_crops:
-        images.extend(
-            LlmImage(path=path, label=f"机器裁剪图{index}")
-            for index, path in enumerate(question.crops, start=1)
-        )
-    return tuple(images)
+    )
 
 
 def build_variants(
     *,
-    send_width: int,
-    region_choices: Sequence[bool],
-    crop_choices: Sequence[bool],
+    send_widths: Sequence[int],
+    region_modes: Sequence[str],
+    region_sparsity_max: float,
 ) -> tuple[ExamVariant, ...]:
     """Build a stable Cartesian product while removing repeated switches."""
-    if send_width <= 0:
-        raise VisionExamError("--send-width 必须大于 0")
-    regions = _unique_bools(region_choices or (False,))
-    crops = _unique_bools(crop_choices or (False,))
+    widths = tuple(dict.fromkeys(send_widths or (1280,)))
+    if any(width < 0 for width in widths):
+        raise VisionExamError("--send-width 不得为负数；0 表示原生分辨率")
+    if not 0.0 <= region_sparsity_max <= 1.0:
+        raise VisionExamError("--region-sparsity-max 必须在 0–1")
+    raw_modes = tuple(dict.fromkeys(region_modes or ("off",)))
+    if any(mode not in REGION_MODES for mode in raw_modes):
+        raise VisionExamError("--region-mode 必须是 off、sparse 或 always")
+    modes = tuple(cast(RegionMode, mode) for mode in raw_modes)
     return tuple(
-        ExamVariant(region, crop, send_width)
-        for region in regions
-        for crop in crops
+        ExamVariant(width, mode, region_sparsity_max)
+        for width in widths
+        for mode in modes
     )
-
-
-def _unique_bools(values: Sequence[bool]) -> tuple[bool, ...]:
-    return tuple(dict.fromkeys(values))
 
 
 def validate_observation_json(text: str) -> None:
@@ -448,20 +468,44 @@ def _run_attempt(
     target: ModelTarget,
     system_prompt: str,
 ) -> ExamRecord:
+    images = build_images(question, variant)
+    region_fraction = region_grid_fraction(question)
+    region_injected = should_inject_region(question, variant)
+    upload_metadata = ()
     try:
+        upload_metadata = tuple(
+            image_upload_metadata(image, max_image_edge=None) for image in images
+        )
         result = client.complete_with_images(
             model=target.model,
             provider=target.provider,
             system_prompt=system_prompt,
             user_prompt=build_user_prompt(question, variant),
-            images=build_images(question, variant),
+            images=images,
             max_image_edge=None,
             max_tokens=target.max_tokens,
             temperature=target.temperature,
         )
     except Exception as error:
-        latency = error.latency_seconds * 1000 if isinstance(error, LlmError) and error.latency_seconds is not None else None
-        return _failed_record(question, variant, target, str(error), latency_ms=latency)
+        latency = (
+            error.latency_seconds * 1000
+            if isinstance(error, LlmError) and error.latency_seconds is not None
+            else None
+        )
+        return _failed_record(
+            question,
+            variant,
+            target,
+            str(error),
+            latency_ms=latency,
+            region_injected=region_injected,
+            image_dimensions=tuple(
+                f"{metadata.width}x{metadata.height}" for metadata in upload_metadata
+            ),
+            image_byte_sizes=tuple(
+                metadata.byte_size for metadata in upload_metadata
+            ),
+        )
 
     validation_error: str | None = None
     try:
@@ -474,6 +518,12 @@ def _run_attempt(
         target,
         result,
         error=validation_error,
+        region_fraction=region_fraction,
+        region_injected=region_injected,
+        image_dimensions=tuple(
+            f"{metadata.width}x{metadata.height}" for metadata in upload_metadata
+        ),
+        image_byte_sizes=tuple(metadata.byte_size for metadata in upload_metadata),
     )
 
 
@@ -484,11 +534,21 @@ def _record_from_result(
     result: LlmResult,
     *,
     error: str | None,
+    region_fraction: float | None,
+    region_injected: bool,
+    image_dimensions: tuple[str, ...],
+    image_byte_sizes: tuple[int, ...],
 ) -> ExamRecord:
     return ExamRecord(
         question_id=question.question_id,
         question_type=question.question_type,
         variant=variant.name,
+        upload_width=variant.send_width,
+        region_mode=variant.region_mode,
+        region_grid_fraction=region_fraction,
+        region_injected=region_injected,
+        image_dimensions=image_dimensions,
+        image_byte_sizes=image_byte_sizes,
         target_label=target.label,
         requested_model=target.model,
         actual_model=result.model,
@@ -510,11 +570,24 @@ def _failed_record(
     error: str,
     *,
     latency_ms: float | None = None,
+    region_injected: bool | None = None,
+    image_dimensions: tuple[str, ...] = (),
+    image_byte_sizes: tuple[int, ...] = (),
 ) -> ExamRecord:
     return ExamRecord(
         question_id=question.question_id,
         question_type=question.question_type,
         variant=variant.name,
+        upload_width=variant.send_width,
+        region_mode=variant.region_mode,
+        region_grid_fraction=region_grid_fraction(question),
+        region_injected=(
+            should_inject_region(question, variant)
+            if region_injected is None
+            else region_injected
+        ),
+        image_dimensions=image_dimensions,
+        image_byte_sizes=image_byte_sizes,
         target_label=target.label,
         requested_model=target.model,
         actual_model=None,
@@ -546,6 +619,12 @@ CSV_COLUMNS = (
     "题号",
     "题型",
     "变体",
+    "上传宽度",
+    "区域提示模式",
+    "本题变化格子占比",
+    "本次是否实际注入了提示",
+    "本次实际上传的图像像素尺寸",
+    "本次实际上传的图像字节数",
     "目标档位",
     "请求模型",
     "实际模型",
@@ -592,6 +671,18 @@ def _write_csv(path: Path, records: Sequence[ExamRecord]) -> None:
                     "题号": record.question_id,
                     "题型": record.question_type,
                     "变体": record.variant,
+                    "上传宽度": record.upload_width,
+                    "区域提示模式": record.region_mode,
+                    "本题变化格子占比": (
+                        ""
+                        if record.region_grid_fraction is None
+                        else f"{record.region_grid_fraction:.9f}"
+                    ),
+                    "本次是否实际注入了提示": str(record.region_injected).lower(),
+                    "本次实际上传的图像像素尺寸": ";".join(record.image_dimensions),
+                    "本次实际上传的图像字节数": ";".join(
+                        str(value) for value in record.image_byte_sizes
+                    ),
                     "目标档位": record.target_label,
                     "请求模型": record.requested_model,
                     "实际模型": record.actual_model or "",
@@ -608,11 +699,15 @@ def _write_csv(path: Path, records: Sequence[ExamRecord]) -> None:
 
 
 def summarize(records: Sequence[ExamRecord]) -> dict[str, object]:
-    """Compute model, question, and variant groups from actual recorded attempts."""
+    """Compute model, question, variant, and width groups from recorded attempts."""
     return {
         "models": _group_summary(records, lambda item: item.target_label),
         "questions": _group_summary(records, lambda item: item.question_id),
         "variants": _group_summary(records, lambda item: item.variant),
+        "upload_widths": _group_summary(
+            records,
+            lambda item: "native" if item.upload_width == 0 else str(item.upload_width),
+        ),
     }
 
 
@@ -634,6 +729,9 @@ def _summary_row(records: Sequence[ExamRecord]) -> dict[str, object]:
         for item in records
         if item.input_tokens is not None and item.output_tokens is not None
     ]
+    input_tokens = [
+        item.input_tokens for item in records if item.input_tokens is not None
+    ]
     costs = [
         item.configured_cost_usd
         for item in records
@@ -646,6 +744,9 @@ def _summary_row(records: Sequence[ExamRecord]) -> dict[str, object]:
         "latency_median_ms": statistics.median(latencies) if latencies else None,
         "latency_p90_ms": _percentile(latencies, 0.9) if latencies else None,
         "average_tokens_per_attempt": statistics.fmean(token_totals) if token_totals else None,
+        "average_input_tokens_per_attempt": (
+            statistics.fmean(input_tokens) if input_tokens else None
+        ),
         "average_configured_cost_usd_per_attempt": statistics.fmean(costs) if costs else None,
     }
 
@@ -713,10 +814,30 @@ def render_report(
     lines.extend(
         (
             "",
+            "## 上传宽度同类对比",
+            "",
+            "| 上传宽度 | 成功/总数 | 延迟中位(ms) | 延迟P90(ms) | 每次平均输入token |",
+            "|---|---:|---:|---:|---:|",
+        )
+    )
+    width_summary = summary.get("upload_widths", {})
+    if isinstance(width_summary, Mapping):
+        for name, raw in width_summary.items():
+            if isinstance(raw, Mapping):
+                lines.append(
+                    f"| {_markdown_cell(str(name))} | "
+                    f"{raw.get('successes', 0)}/{raw.get('attempts', 0)} | "
+                    f"{_display_number(raw.get('latency_median_ms'), 3)} | "
+                    f"{_display_number(raw.get('latency_p90_ms'), 3)} | "
+                    f"{_display_number(raw.get('average_input_tokens_per_attempt'), 2)} |"
+                )
+    lines.extend(
+        (
+            "",
             "## 逐题判卷",
             "",
-            "| 题号 | 变体 | 模型/档位 | 回答原文 | 错误原文 | 准确性判定 | 漏了什么 | 编造了什么 |",
-            "|---|---|---|---|---|---|---|---|",
+            "| 题号 | 变体 | 上传宽度 | 区域提示模式 | 变化格子占比 | 实际注入 | 图像像素尺寸 | 图像字节数 | 模型/档位 | 回答原文 | 错误原文 | 准确性判定 | 漏了什么 | 编造了什么 |",
+            "|---|---|---:|---|---:|---|---|---|---|---|---|---|---|---|",
         )
     )
     for record in records:
@@ -726,6 +847,14 @@ def render_report(
                 (
                     _markdown_cell(record.question_id),
                     _markdown_cell(record.variant),
+                    str(record.upload_width),
+                    _markdown_cell(record.region_mode),
+                    _display_number(record.region_grid_fraction, 9),
+                    str(record.region_injected).lower(),
+                    _markdown_cell(";".join(record.image_dimensions)),
+                    _markdown_cell(
+                        ";".join(str(value) for value in record.image_byte_sizes)
+                    ),
                     _markdown_cell(record.target_label),
                     _markdown_cell(record.response_text),
                     _markdown_cell(record.error or ""),
@@ -860,11 +989,8 @@ def _blank_to_none(value: str | None) -> str | None:
 def upload_files(manifest: ExamManifest, variants: Sequence[ExamVariant]) -> tuple[Path, ...]:
     """Return the exact de-duplicated file set selected by all variants."""
     paths: list[Path] = []
-    include_crops = any(variant.with_crops for variant in variants)
     for question in manifest.questions:
         paths.extend(question.frames)
-        if include_crops:
-            paths.extend(question.crops)
     return tuple(dict.fromkeys(paths))
 
 
@@ -930,11 +1056,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", action="append", default=[], help="模型 ID 或 profile:<档位名>；可重复")
     parser.add_argument("--provider", help="直接模型的可选服务商锁定")
     parser.add_argument("--price", action="append", default=[], help="TARGET=输入百万token美元,输出百万token美元；可重复")
-    parser.add_argument("--send-width", type=int, default=1280, help="全图发送前的宽度，默认 1280")
-    parser.add_argument("--with-region-grid", dest="region_choices", action="append_const", const=True)
-    parser.add_argument("--without-region-grid", dest="region_choices", action="append_const", const=False)
-    parser.add_argument("--with-crops", dest="crop_choices", action="append_const", const=True)
-    parser.add_argument("--without-crops", dest="crop_choices", action="append_const", const=False)
+    parser.add_argument(
+        "--send-width",
+        type=int,
+        action="append",
+        dest="send_widths",
+        help="可重复；0=原生分辨率，未传时默认 1280",
+    )
+    parser.add_argument(
+        "--region-mode",
+        action="append",
+        choices=REGION_MODES,
+        dest="region_modes",
+        help="可重复：off、sparse、always；未传时默认 off",
+    )
+    parser.add_argument(
+        "--region-sparsity-max",
+        type=float,
+        default=DEFAULT_REGION_SPARSITY_MAX,
+        help="sparse 模式的最大变化格子占比，默认 0.25（待实测）",
+    )
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--max-tokens", type=int, default=512)
@@ -965,9 +1106,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise VisionExamError("--max-tokens 必须大于 0")
         manifest = load_manifest(arguments.manifest)
         variants = build_variants(
-            send_width=arguments.send_width,
-            region_choices=arguments.region_choices or (),
-            crop_choices=arguments.crop_choices or (),
+            send_widths=arguments.send_widths or (),
+            region_modes=arguments.region_modes or (),
+            region_sparsity_max=arguments.region_sparsity_max,
         )
         prices = parse_prices(arguments.price)
         config = load_config(arguments.config, arguments.local_config)

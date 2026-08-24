@@ -1,4 +1,4 @@
-"""Mechanically derive region grids and native crops from adjacent captured frames."""
+"""Mechanically derive region grids from adjacent captured frames."""
 
 from __future__ import annotations
 
@@ -24,8 +24,6 @@ DEFAULT_MANIFEST_PATH = (
 FRAME_NAME_PATTERN = re.compile(r"^frame-(\d{6})-.+\.png$")
 GRID_ROWS = 16
 GRID_COLUMNS = 9
-CROP_MARGIN_RATIO = 0.02
-CROP_DIRECTORY_NAME = "vision-exam-crops-mechanical"
 
 
 class RegionAssetError(Exception):
@@ -34,14 +32,12 @@ class RegionAssetError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class RegionAssetResult:
-    """One reproducible region/crop result for an exam question."""
+    """One reproducible region-grid result for an exam question."""
 
     question_id: str
     current_frame: str
     previous_frame: str | None
     region_grid: tuple[str, ...]
-    crop_path: str | None
-    crop_bounds: tuple[int, int, int, int] | None
     reason: str | None
 
 
@@ -115,36 +111,7 @@ def changed_region_grid(
     return cells
 
 
-def crop_bounds_for_grid(
-    image_size: tuple[int, int], cells: Sequence[str]
-) -> tuple[int, int, int, int]:
-    """Map the grid envelope to native pixels and add a fixed 2% frame margin."""
-    if not cells:
-        raise RegionAssetError("无变化格子时不能生成裁剪范围")
-    coordinates = [
-        tuple(int(value) for value in re.fullmatch(r"r(\d+)c(\d+)", cell).groups())
-        for cell in cells
-    ]
-    rows = [row for row, _ in coordinates]
-    columns = [column for _, column in coordinates]
-    width, height = image_size
-    left = math.floor((min(columns) - 1) * width / GRID_COLUMNS)
-    right = math.ceil(max(columns) * width / GRID_COLUMNS)
-    top = math.floor((min(rows) - 1) * height / GRID_ROWS)
-    bottom = math.ceil(max(rows) * height / GRID_ROWS)
-    margin_x = round(width * CROP_MARGIN_RATIO)
-    margin_y = round(height * CROP_MARGIN_RATIO)
-    return (
-        max(0, left - margin_x),
-        max(0, top - margin_y),
-        min(width, right + margin_x),
-        min(height, bottom + margin_y),
-    )
-
-
-def generate_region_assets(
-    manifest_path: Path, *, write_crops: bool
-) -> tuple[RegionAssetResult, ...]:
+def generate_region_assets(manifest_path: Path) -> tuple[RegionAssetResult, ...]:
     """Calculate every question from its adjacent frame without semantic input."""
     try:
         with manifest_path.open("rb") as handle:
@@ -172,8 +139,6 @@ def generate_region_assets(
                     current_path.name,
                     None,
                     (),
-                    None,
-                    None,
                     reason,
                 )
             )
@@ -190,33 +155,16 @@ def generate_region_assets(
                     current_path.name,
                     previous_path.name,
                     (),
-                    None,
-                    None,
                     "没有格子的平均差超过检测器块阈值",
                 )
             )
             continue
-        bounds = crop_bounds_for_grid(current.size, cells)
-        crop_path = (
-            current_path.parent
-            / CROP_DIRECTORY_NAME
-            / f"{current_path.stem}-grid-crop.png"
-        )
-        if write_crops:
-            crop_path.parent.mkdir(parents=True, exist_ok=True)
-            current.crop(bounds).save(crop_path, format="PNG", optimize=True)
-        try:
-            relative_crop = crop_path.relative_to(BACKEND_DIRECTORY).as_posix()
-        except ValueError:
-            relative_crop = crop_path.as_posix()
         results.append(
             RegionAssetResult(
                 question_id,
                 current_path.name,
                 previous_path.name,
                 cells,
-                relative_crop,
-                bounds,
                 None,
             )
         )
@@ -224,9 +172,8 @@ def generate_region_assets(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="M5-T2.6 机械变化区域与裁剪生成器")
+    parser = argparse.ArgumentParser(description="M5-T2.7 机械变化区域生成器")
     parser.add_argument("manifest", nargs="?", type=Path, default=DEFAULT_MANIFEST_PATH)
-    parser.add_argument("--write-crops", action="store_true", help="把机械裁剪写入录制目录")
     return parser
 
 
@@ -241,7 +188,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _configure_console_encoding()
     arguments = build_parser().parse_args(argv)
     try:
-        results = generate_region_assets(arguments.manifest, write_crops=arguments.write_crops)
+        results = generate_region_assets(arguments.manifest)
     except RegionAssetError as error:
         print(f"M5-T2.6 无法生成：{error}", file=sys.stderr)
         return 2

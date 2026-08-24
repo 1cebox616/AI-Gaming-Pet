@@ -1,4 +1,4 @@
-"""M5-T2.6 region/crop generation uses only synthetic local images."""
+"""M5-T2.7 region generation uses only synthetic local images."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from PIL import Image
 
 from pet.core.capture import FrameChangeDetector
 from pet.games.generic.eval.region_assets import (
-    crop_bounds_for_grid,
     changed_region_grid,
     generate_region_assets,
 )
@@ -33,11 +32,7 @@ def test_changed_region_grid_uses_detector_block_threshold() -> None:
     assert changed_region_grid(detector, previous, current) == ("r3c5",)
 
 
-def test_crop_bounds_are_grid_envelope_plus_fixed_two_percent_margin() -> None:
-    assert crop_bounds_for_grid((900, 1600), ("r3c5",)) == (382, 168, 518, 332)
-
-
-def test_generator_writes_mechanical_crop_for_adjacent_frame(tmp_path: Path) -> None:
+def test_generator_only_returns_grid_for_adjacent_frame(tmp_path: Path) -> None:
     previous, current = _synthetic_pair()
     previous_path = tmp_path / "frame-000001-20260101T000000.000000Z.png"
     current_path = tmp_path / "frame-000002-20260101T000002.000000Z.png"
@@ -50,13 +45,12 @@ def test_generator_writes_mechanical_crop_for_adjacent_frame(tmp_path: Path) -> 
         encoding="utf-8",
     )
 
-    result = generate_region_assets(manifest_path, write_crops=True)[0]
+    files_before = set(tmp_path.iterdir())
+    result = generate_region_assets(manifest_path)[0]
 
     assert result.previous_frame == previous_path.name
     assert result.region_grid
-    assert result.crop_bounds is not None
-    assert result.crop_path is not None
-    assert Path(result.crop_path).is_file()
+    assert set(tmp_path.iterdir()) == files_before
 
 
 def test_generator_reports_missing_exact_previous_frame(tmp_path: Path) -> None:
@@ -70,7 +64,7 @@ def test_generator_reports_missing_exact_previous_frame(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    result = generate_region_assets(manifest_path, write_crops=False)[0]
+    result = generate_region_assets(manifest_path)[0]
 
     assert result.previous_frame is None
     assert result.region_grid == ()

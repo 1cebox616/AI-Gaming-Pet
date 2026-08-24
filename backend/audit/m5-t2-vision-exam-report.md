@@ -32,10 +32,10 @@
    签名，另加 `LlmVisionClientProtocol.complete_with_images()`。这样生产语音路径不会
    因视觉附件获得新的可选分支。
 2. 图片在本机用 Pillow 读取、缩放并重新编码为无元数据 PNG，再组成 OpenAI 兼容的
-   `image_url` data URL 内容块。每次调用可设全局最大边长；考卷还对全图单独应用
-   `--send-width`，原生裁剪图不缩放，除非调用方另设全局上限。
-3. 默认只跑“不带区域格子、不带裁剪”一个变体。把 with/without 两种开关同时写上，
-   工具会对所选状态作笛卡尔积，一次跑完最多四种变体；不需要拆成四份结果目录。
+   `image_url` data URL 内容块。每次调用可设全局最大边长；考卷用可重复的
+   `--send-width` 测试整图上传宽度，`0` 表示原生分辨率。
+3. 默认只跑 `region-mode=off + width=1280`。可重复传入上传宽度与区域提示模式，
+   工具会对二者作笛卡尔积；完整建议组合是 3 档提示 × 2 档宽度。
 4. 模型 ID 不写死。`--model` 可重复，也可写 `profile:<档位名>` 读取现有
    `[llm.profiles.*]`。每个目标必须用 `--price` 明确给出输入/输出百万 token 美元
    单价；缺价时在上传前拒绝执行，不猜单价，也不拿上游账单代替配置折算。
@@ -48,7 +48,7 @@
 ## 给产品负责人的出卷指引
 
 正式、经审计的考卷 manifest 放在 `backend/data/generic/vision-exam/`；其中可记录指向
-本机 `recordings/` 的相对路径，但截图和机械裁剪本身继续由 Git 忽略。临时试卷仍可放
+本机 `recordings/` 的相对路径，但截图本身继续由 Git 忽略。临时试卷仍可放
 在 `backend/eval-reports/`。路径相对 TOML 所在目录解析，也可以写绝对路径。
 
 最小 single 题：
@@ -62,7 +62,6 @@ type = "single"
 frames = ["C:/本地路径/frame.png"]
 seconds = [0.0]
 region_grid = ["r3c5", "r3c6", "r4c5"]
-crops = ["C:/本地路径/machine-crop.png"]
 ```
 
 sequence 题把多帧和相对秒数一一对应；秒数必须严格递增：
@@ -99,16 +98,16 @@ seconds = [0.0, 2.0, 5.0]
   --price "profile:<档位名>=<输入单价>,<输出单价>"
 ```
 
-一次对比机械区域格子和机械裁剪的四种组合：
+一次对比三档区域提示与 1280/原生两档整图宽度：
 
 ```powershell
 .venv\Scripts\python -m pet.games.generic.eval.vision_exam `
   eval-reports\my-exam.toml `
   --model "<候选模型ID>" `
   --price "<候选模型ID>=<输入单价>,<输出单价>" `
-  --with-region-grid --without-region-grid `
-  --with-crops --without-crops `
-  --send-width 1280
+  --region-mode off --region-mode sparse --region-mode always `
+  --send-width 1280 --send-width 0 `
+  --region-sparsity-max 0.25
 ```
 
 命令会先打印每个模型、单价、变体和所有待上传文件。逐项看完后输入大写 `YES`；
@@ -119,31 +118,31 @@ seconds = [0.0, 2.0, 5.0]
 
 每次运行写到 `backend/eval-reports/vision-exam-<时间戳>/`：
 
-- `results.csv`：机器可读的每次调用明细，包括原始回答、错误、延迟、token、配置
-  折算花费和上游报告花费。
+- `results.csv`：机器可读的每次调用明细，包括上传宽度、区域模式、格子占比、
+  是否实际注入、实际图像像素尺寸与字节数，以及回答、错误、延迟、token 和花费。
 - `report.md`：产品负责人主要填写的判卷表。每题 × 每变体 × 每模型一行，在最后
   三列填写「准确性判定」「漏了什么」「编造了什么」。不要让工具替人打分。
 - `run.json`：本次参数、单价、起止时间、上传文件、目标、变体，以及按模型、题号、
   变体分组的汇总统计。
 
 报告中的模型表给出延迟中位/P90；题号表和变体表给出同组成功数、延迟、每次平均
-token 和配置花费。比较模型质量时仍以逐题人工三列为准，自动汇总不代表选型结论。
+token 和配置花费；上传宽度表另列延迟中位/P90 与平均输入 token。比较模型质量时
+仍以逐题人工三列为准，自动汇总不代表选型结论。
 
 ## 假客户端全流程产物样例
 
-验收测试用两道合成题、两个变体和一个假客户端生成 4 行。CSV 的结构如下：
+验收测试用两道合成题、3×2 变体和一个假客户端生成 12 行。CSV 的结构如下：
 
 ```text
-题号,题型,变体,目标档位,请求模型,实际模型,服务商,回答原文,错误原文,往返毫秒,输入token,输出token,配置折算花费美元,上游报告花费美元
-synthetic-single,single,region-off__crops-off__width-1280,fake/model,fake/model,fake/actual,fake-provider,"{...}",,125.000,120,30,0.000180000,0.009000000
+题号,题型,变体,上传宽度,区域提示模式,本题变化格子占比,本次是否实际注入了提示,本次实际上传的图像像素尺寸,本次实际上传的图像字节数,目标档位,请求模型,实际模型,服务商,回答原文,错误原文,往返毫秒,输入token,输出token,配置折算花费美元,上游报告花费美元
+synthetic-single,single,region-off__width-1280,1280,off,0.020833333,false,1280x960,123229,fake/model,fake/model,fake/actual,fake-provider,"{...}",,125.000,120,30,0.000180000,0.009000000
 ```
 
 `report.md` 的人工表结构如下；测试同时断言三个判卷列初始为空：
 
 ```text
-| 题号 | 变体 | 模型/档位 | 回答原文 | 错误原文 | 准确性判定 | 漏了什么 | 编造了什么 |
-|---|---|---|---|---|---|---|---|
-| synthetic-single | ... | fake/model | {...} |  |  |  |  |
+| 题号 | 变体 | 上传宽度 | 区域提示模式 | 变化格子占比 | 实际注入 | 图像像素尺寸 | 图像字节数 | 模型/档位 | 回答原文 | 错误原文 | 准确性判定 | 漏了什么 | 编造了什么 |
+| synthetic-single | ... | 1280 | off | 0.020833333 | false | 1280x720 | ... | fake/model | {...} |  |  |  |  |
 ```
 
 以上 `fake/model` 与回答只存在于合成测试和本文结构样例，不在生产路径中，也不是候选
@@ -485,3 +484,112 @@ mechanical_match questions=13 with_grid=7 unique_crops=5
 - 无规格偏差。6 道无 `region_grid` 的题均因不存在严格相邻的落盘前帧，不是检测器
   计算失败，也没有用较早的兜底帧冒充前一采样帧。
 - 本任务未调用模型、未联网、未评分；产品负责人修订答案草稿与正式跑卷仍属后续流程。
+
+## M5-T2.7：整图上传与稀疏区域提示
+
+本节覆盖前文所有涉及旧图像附件变体的操作建议；旧段落只保留为历史验收记录。
+当前每次请求永远只上传题目的完整画面。变体轴只有上传宽度和区域提示模式：
+
+- 上传宽度：可重复传 `--send-width`；`0` 表示原生分辨率，正整数表示按该宽度等比缩放。
+- 区域模式：可重复传 `--region-mode off|sparse|always`。
+- `sparse` 仅在 `变化格子数 / 144 <= --region-sparsity-max` 时注入中性格子模板。
+  默认上限 0.25 是待实测初值，不代表已选定阈值。
+- `always` 是“即使区域很密也发送”的干扰对照；`off` 从不发送区域信息。
+
+### 旧机制清除与整图尺寸验证
+
+`ExamQuestion`、manifest 解析、消息构造、CLI、变体名和机械生成器均已移除旧的第二类
+图像附件。此前位于 Git 忽略目录下的 5 张 `*-grid-crop.png` 已逐个删除；正式截图
+没有删除。当前静态检索范围是生产考卷代码、正式 manifest、合成 manifest 与考卷测试：
+
+```text
+rg -n "crops|with-crops|without-crops|write-crops|grid-crop|crop_bounds|crop_paths" src/pet/games/generic/eval tests/test_vision_exam.py tests/test_vision_exam_region_assets.py data/generic/vision-exam/manifest.toml tests/fixtures/vision-exam-example.toml
+（无输出）
+```
+
+测试通过真实 `OpenRouterClient` + `httpx.MockTransport` 解码实际消息体中的 base64 PNG，
+同一张 20×10 合成图得到：`--send-width 0 -> 20×10`、`10 -> 10×5`、
+`40 -> 40×20`。因此断言的是实际上传内容，不是仅检查声明字段。
+
+### 13 题变化格子占比与默认抑制结果
+
+占比由正式 manifest 中机械生成的 `region_grid` 数量除以固定 16×9=144 格得出；
+无严格相邻前帧的题没有客观格子数据，在 `sparse` 和 `always` 下都不会注入。
+
+| 题号 | 变化格子 | 占比 | `sparse`（0.25） |
+|---|---:|---:|---|
+| `gzw-helicopter-landing` | 无数据 | 无数据 | 不注入 |
+| `disco-dialogue-panel` | 113 | 0.784722222 | 抑制 |
+| `gzw-near-black` | 无数据 | 无数据 | 不注入 |
+| `spire-combat-ui` | 32 | 0.222222222 | 注入 |
+| `subnautica-night-underwater` | 54 | 0.375000000 | 抑制 |
+| `gzw-static-control-a` | 无数据 | 无数据 | 不注入 |
+| `gzw-static-control-b` | 无数据 | 无数据 | 不注入 |
+| `gzw-rain-small-helicopter` | 无数据 | 无数据 | 不注入 |
+| `subnautica-wave-surface` | 无数据 | 无数据 | 不注入 |
+| `disco-task-switch-sequence` | 14 | 0.097222222 | 注入 |
+| `subnautica-wave-sequence` | 78 | 0.541666667 | 抑制 |
+| `spire-combat-ui-nocontext` | 32 | 0.222222222 | 注入 |
+| `subnautica-night-underwater-nocontext` | 54 | 0.375000000 | 抑制 |
+
+默认阈值下明确被稀疏度规则抑制的 4 题是 `disco-dialogue-panel`、
+`subnautica-night-underwater`、`subnautica-wave-sequence`、
+`subnautica-night-underwater-nocontext`。另有 6 题因没有严格相邻前帧而没有区域信息；
+这不是“占比为零”，CSV 中对应占比留空。
+
+生产解析器实际输出：
+
+```text
+manifest_ok questions=13
+disco-dialogue-panel grid=113 fraction=0.784722222 sparse_0.25=suppressed
+spire-combat-ui grid=32 fraction=0.222222222 sparse_0.25=inject
+subnautica-night-underwater grid=54 fraction=0.375000000 sparse_0.25=suppressed
+disco-task-switch-sequence grid=14 fraction=0.097222222 sparse_0.25=inject
+subnautica-wave-sequence grid=78 fraction=0.541666667 sparse_0.25=suppressed
+spire-combat-ui-nocontext grid=32 fraction=0.222222222 sparse_0.25=inject
+subnautica-night-underwater-nocontext grid=54 fraction=0.375000000 sparse_0.25=suppressed
+```
+
+### 当前跑卷建议
+
+建议仍选 3 个不同成本/能力档位，不在代码或报告中写死型号。每个档位对全部 13 题跑：
+
+```powershell
+.venv\Scripts\python -m pet.games.generic.eval.vision_exam `
+  data\generic\vision-exam\manifest.toml `
+  --model "<候选模型或 profile:档位>" `
+  --price "<同一目标>=<输入百万token美元>,<输出百万token美元>" `
+  --region-mode off --region-mode sparse --region-mode always `
+  --send-width 1280 --send-width 0 `
+  --region-sparsity-max 0.25
+```
+
+这构成 6 个变体。正式卷每个档位实际调用 `13 × 6 = 78` 次；3 个档位共 234 次。
+每个档位共上传 90 张完整画面附件（11 道 single × 6 + 2 道双帧 sequence × 6），
+3 个档位共 270 张附件。参考既有短 JSON 预算并考虑原生图视觉 token 的模型差异，
+整轮输入约为 20 万至 90 万 token 等价值、输出约 2 万至 7 万 token；这只是跑卷前
+量级预算，不是计费结果。单价留空到执行当天填写，实际 token、延迟和花费以
+`run.json` 为准。
+
+假客户端用 2 道合成题完整跑过 3×2 组合，实际产生 12 次调用和 12 行 CSV；
+`results.csv` 会逐行记录上传宽度、区域模式、格子占比、是否实际注入、每张实际上传
+PNG 的像素尺寸与字节数。`report.md` 与 `run.json` 另按上传宽度汇总延迟中位/P90 和
+平均输入 token，用来比较原生分辨率的额外延迟与成本。
+
+### M5-T2.7 测试
+
+```text
+.venv\Scripts\python -m pytest tests/test_vision_exam.py tests/test_vision_exam_region_assets.py tests/test_llm.py tests/test_layering.py -q --basetemp .codex-tmp\pytest-targeted-2 -p no:cacheprovider
+51 passed in 4.74s
+
+.venv\Scripts\python -m pytest tests/ -q --basetemp .codex-tmp\pytest-full -p no:cacheprovider
+467 passed, 4 failed, 1 warning in 20.11s
+```
+
+4 项失败仍全部是 `tests/test_speech.py` 的既有真实 OneCore 中文语音环境项，报错为当前
+执行环境无法枚举已安装中文语音。其余测试（包括 `test_layering.py`）全部通过。
+
+### M5-T2.7 偏差与未完成项
+
+- 无已知规格偏差；没有改观察提示词、中性区域模板、题目选帧、截屏或变化检测算法。
+- 本任务未调用模型、未联网、未评分；参考答案仍须产品负责人离线复核，正式跑卷尚未开始。

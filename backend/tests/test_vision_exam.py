@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import base64
 import csv
+from io import BytesIO
 import json
 from pathlib import Path
 import re
 import tomllib
 
+import httpx
+from PIL import Image
 import pytest
 
 from pet.core.config import LlmConfig, LlmProfileConfig
-from pet.core.llm import LlmError, LlmResult, LlmUsage
+from pet.core.llm import LlmError, LlmResult, LlmUsage, OpenRouterClient
 from pet.games.generic.eval.vision_exam import (
     DEFAULT_PROMPT_PATH,
     ExamVariant,
@@ -19,6 +23,7 @@ from pet.games.generic.eval.vision_exam import (
     ModelTarget,
     VisionExamError,
     build_images,
+    build_parser,
     build_timeline,
     build_user_prompt,
     build_variants,
@@ -88,6 +93,10 @@ def _target() -> ModelTarget:
     )
 
 
+def _variant(*, width: int = 1280, mode: str = "off", limit: float = 0.25) -> ExamVariant:
+    return ExamVariant(width, mode, limit)  # type: ignore[arg-type]
+
+
 def test_manifest_parses_single_sequence_and_resolves_synthetic_files() -> None:
     manifest = load_manifest(EXAMPLE_MANIFEST)
 
@@ -129,11 +138,13 @@ def test_manifest_rejects_out_of_order_seconds(tmp_path: Path) -> None:
         load_manifest(manifest_path)
 
 
-def test_manifest_rejects_removed_or_descriptive_fields(tmp_path: Path) -> None:
+@pytest.mark.parametrize("removed_field", ("prompt" + "_override", "crop" + "s"))
+def test_manifest_rejects_removed_or_descriptive_fields(
+    tmp_path: Path, removed_field: str
+) -> None:
     frame = tmp_path / "frame.ppm"
     frame.write_text("P3\n1 1\n255\n0 0 0\n", encoding="ascii")
     manifest_path = tmp_path / "leaky.toml"
-    removed_field = "prompt" + "_override"
     manifest_path.write_text(
         'version = 1\n[[questions]]\nid = "q1"\ntype = "single"\n'
         'frames = ["frame.ppm"]\nseconds = [0.0]\n'
@@ -145,10 +156,10 @@ def test_manifest_rejects_removed_or_descriptive_fields(tmp_path: Path) -> None:
         load_manifest(manifest_path)
 
 
-def test_variant_request_includes_neutral_region_grid_crops_and_sparse_timeline() -> None:
+def test_variant_request_includes_neutral_region_grid_and_sparse_timeline() -> None:
     manifest = load_manifest(EXAMPLE_MANIFEST)
     question = manifest.questions[1]
-    variant = ExamVariant(with_region_grid=True, with_crops=True, send_width=1280)
+    variant = _variant(mode="always")
 
     prompt = build_user_prompt(question, variant)
     images = build_images(question, variant)
@@ -159,11 +170,10 @@ def test_variant_request_includes_neutral_region_grid_crops_and_sparse_timeline(
     ) in prompt
     assert "这是稀疏采样截图，不是连续视频" in prompt
     assert "第0.0秒：帧1；第0.1至3.0秒未采样；第3.0秒：帧2" in prompt
-    assert len(images) == 3
+    assert len(images) == 2
     assert images[0].target_width == 1280
-    assert images[-1].label == "机器裁剪图1"
-    assert images[-1].max_edge is None
-    assert images[-1].target_width is None
+    assert images[-1].label == "全图帧2（相对第3.0秒）"
+    assert images[-1].target_width == 1280
 
     client = _FakeVisionClient()
     run_exam(
@@ -177,21 +187,21 @@ def test_variant_request_includes_neutral_region_grid_crops_and_sparse_timeline(
     assert sequence_call["system_prompt"] == DEFAULT_PROMPT_PATH.read_text(
         encoding="utf-8"
     )
-    assert len(sequence_call["images"]) == 3
+    assert len(sequence_call["images"]) == 2
 
 
-def test_without_axes_omits_region_grid_and_crops() -> None:
+def test_off_mode_omits_region_grid() -> None:
     question = load_manifest(EXAMPLE_MANIFEST).questions[1]
-    variant = ExamVariant(with_region_grid=False, with_crops=False, send_width=640)
+    variant = _variant(width=640, mode="off")
 
     assert "region" not in build_user_prompt(question, variant).lower()
     assert "r12c7" not in build_user_prompt(question, variant)
-    assert len(build_images(question, variant)) == 2
+    assert all(image.target_width == 640 for image in build_images(question, variant))
 
 
 def test_game_context_is_injected_and_absence_keeps_prompt_context_free() -> None:
     manifest = load_manifest(EXAMPLE_MANIFEST)
-    variant = ExamVariant(False, False, 1280)
+    variant = _variant()
 
     with_context = build_user_prompt(manifest.questions[0], variant)
     without_context = build_user_prompt(manifest.questions[1], variant)
@@ -218,7 +228,7 @@ def test_model_messages_have_no_question_id_or_semantic_leakage() -> None:
     client = _FakeVisionClient()
     run_exam(
         manifest=manifest,
-        variants=(ExamVariant(True, True, 1280),),
+        variants=(_variant(mode="always"),),
         targets=(_target(),),
         client_factory=lambda _: client,
     )
@@ -235,15 +245,107 @@ def test_model_messages_have_no_question_id_or_semantic_leakage() -> None:
         assert call["system_prompt"] == expected_system_prompt
 
 
-def test_switches_can_request_full_cartesian_product() -> None:
-    variants = build_variants(
-        send_width=1280,
-        region_choices=(True, False),
-        crop_choices=(True, False),
+def test_region_modes_apply_sparse_suppression_without_changing_template() -> None:
+    question = load_manifest(EXAMPLE_MANIFEST).questions[0]
+    neutral_template = (
+        "画面被划分为 16 行 9 列的网格。与上一采样帧相比，"
+        "以下格子发生了变化：r3c5、r3c6、r4c5。"
     )
 
-    assert len(variants) == 4
-    assert len({variant.name for variant in variants}) == 4
+    assert neutral_template not in build_user_prompt(question, _variant(mode="off"))
+    assert neutral_template not in build_user_prompt(
+        question, _variant(mode="sparse", limit=0.01)
+    )
+    assert neutral_template in build_user_prompt(
+        question, _variant(mode="sparse", limit=0.25)
+    )
+    assert neutral_template in build_user_prompt(
+        question, _variant(mode="always", limit=0.0)
+    )
+
+
+def test_switches_build_three_by_two_cartesian_product() -> None:
+    variants = build_variants(
+        send_widths=(1280, 0),
+        region_modes=("off", "sparse", "always"),
+        region_sparsity_max=0.25,
+    )
+
+    assert len(variants) == 6
+    assert len({variant.name for variant in variants}) == 6
+
+
+def test_cli_collects_repeated_width_and_region_mode_switches() -> None:
+    arguments = build_parser().parse_args(
+        [
+            "exam.toml",
+            "--send-width",
+            "1280",
+            "--send-width",
+            "0",
+            "--region-mode",
+            "off",
+            "--region-mode",
+            "sparse",
+            "--region-mode",
+            "always",
+        ]
+    )
+
+    assert arguments.send_widths == [1280, 0]
+    assert arguments.region_modes == ["off", "sparse", "always"]
+
+
+def test_native_and_fixed_width_match_actual_message_payload(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.png"
+    Image.new("RGB", (20, 10), (10, 20, 30)).save(image_path)
+    manifest_path = tmp_path / "manifest.toml"
+    manifest_path.write_text(
+        'version = 1\n[[questions]]\nid = "size-test"\ntype = "single"\n'
+        'frames = ["frame.png"]\nseconds = [0.0]\n',
+        encoding="utf-8",
+    )
+    uploaded_sizes: list[tuple[int, int]] = []
+    uploaded_bytes: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        data_url = payload["messages"][1]["content"][2]["image_url"]["url"]
+        image_bytes = base64.b64decode(data_url.partition(",")[2])
+        with Image.open(BytesIO(image_bytes)) as uploaded:
+            uploaded_sizes.append(uploaded.size)
+        uploaded_bytes.append(len(image_bytes))
+        return httpx.Response(
+            200,
+            json={
+                "model": "fake/actual",
+                "choices": [{"message": {"content": VALID_RESPONSE}}],
+            },
+        )
+
+    client = OpenRouterClient("test-api-key", transport=httpx.MockTransport(handler))
+    records = run_exam(
+        manifest=load_manifest(manifest_path),
+        variants=build_variants(
+            send_widths=(0, 10, 40),
+            region_modes=("off",),
+            region_sparsity_max=0.25,
+        ),
+        targets=(_target(),),
+        client_factory=lambda _: client,
+    )
+
+    assert uploaded_sizes == [(20, 10), (10, 5), (40, 20)]
+    assert [record.image_dimensions for record in records] == [
+        ("20x10",),
+        ("10x5",),
+        ("40x20",),
+    ]
+    assert [record.image_byte_sizes for record in records] == [
+        (uploaded_bytes[0],),
+        (uploaded_bytes[1],),
+        (uploaded_bytes[2],),
+    ]
 
 
 def test_failure_and_invalid_json_are_recorded_while_exam_continues() -> None:
@@ -257,7 +359,7 @@ def test_failure_and_invalid_json_are_recorded_while_exam_continues() -> None:
 
     records = run_exam(
         manifest=manifest,
-        variants=(ExamVariant(False, False, 1280),),
+        variants=(_variant(),),
         targets=(_target(),),
         client_factory=lambda _: client,
     )
@@ -274,9 +376,10 @@ def test_failure_and_invalid_json_are_recorded_while_exam_continues() -> None:
 def test_fake_client_full_flow_writes_csv_report_and_run_json(tmp_path: Path) -> None:
     manifest = load_manifest(EXAMPLE_MANIFEST)
     client = _FakeVisionClient()
-    variants = (
-        ExamVariant(False, False, 1280),
-        ExamVariant(True, True, 1280),
+    variants = build_variants(
+        send_widths=(1280, 0),
+        region_modes=("off", "sparse", "always"),
+        region_sparsity_max=0.25,
     )
     records = run_exam(
         manifest=manifest,
@@ -296,20 +399,26 @@ def test_fake_client_full_flow_writes_csv_report_and_run_json(tmp_path: Path) ->
         rows = list(csv.DictReader(handle))
     report = (output / "report.md").read_text(encoding="utf-8")
     run_payload = json.loads((output / "run.json").read_text(encoding="utf-8"))
-    assert len(rows) == 4
+    assert len(rows) == 12
     assert rows[0]["回答原文"] == VALID_RESPONSE
+    assert rows[0]["上传宽度"] == "1280"
+    assert rows[0]["区域提示模式"] == "off"
+    assert rows[0]["本次是否实际注入了提示"] == "false"
+    assert rows[0]["本次实际上传的图像像素尺寸"]
+    assert rows[0]["本次实际上传的图像字节数"]
     assert "准确性判定 | 漏了什么 | 编造了什么" in report
     assert "## 题目汇总" in report
     assert "## 变体轴同类对比" in report
-    assert run_payload["summary"]["models"]["fake/model"]["successes"] == 4
-    assert len(client.calls) == 4
+    assert "## 上传宽度同类对比" in report
+    assert run_payload["summary"]["models"]["fake/model"]["successes"] == 12
+    assert len(client.calls) == 12
 
 
 def test_summary_uses_configured_price_not_upstream_cost() -> None:
     manifest = load_manifest(EXAMPLE_MANIFEST)
     records = run_exam(
         manifest=manifest,
-        variants=(ExamVariant(False, False, 1280),),
+        variants=(_variant(),),
         targets=(_target(),),
         client_factory=lambda _: _FakeVisionClient(),
     )
@@ -366,13 +475,13 @@ def test_target_resolution_refuses_to_guess_missing_price() -> None:
         )
 
 
-def test_upload_plan_only_includes_crops_when_selected() -> None:
+def test_upload_plan_contains_only_full_frames() -> None:
     manifest = load_manifest(EXAMPLE_MANIFEST)
-    without = upload_files(manifest, (ExamVariant(False, False, 1280),))
-    with_crops = upload_files(manifest, (ExamVariant(False, True, 1280),))
+    files = upload_files(manifest, (_variant(),))
 
-    assert all("crop" not in path.name for path in without)
-    assert any("crop" in path.name for path in with_crops)
+    assert files == tuple(
+        dict.fromkeys(path for question in manifest.questions for path in question.frames)
+    )
 
 
 def test_confirmation_requires_exact_yes_or_explicit_override() -> None:
@@ -385,7 +494,7 @@ def test_real_exam_answer_key_has_every_required_section_and_sourced_point() -> 
     text = ANSWER_KEY.read_text(encoding="utf-8")
     question_sections = re.split(r"(?=^## \d+\. `)", text, flags=re.MULTILINE)[1:]
     required_headings = (
-        "### 机械区域与裁剪",
+        "### 机械区域",
         "### 现场记录",
         "### 离线复核",
         "### 参考答案要点",
@@ -405,6 +514,26 @@ def test_real_exam_answer_key_has_every_required_section_and_sourced_point() -> 
                     question_id,
                     line,
                 )
+
+
+def test_real_exam_answer_key_fractions_match_manifest_grids() -> None:
+    manifest = load_manifest(REAL_MANIFEST)
+    text = ANSWER_KEY.read_text(encoding="utf-8")
+    sections = {
+        section.split("`", 2)[1]: section
+        for section in re.split(r"(?=^## \d+\. `)", text, flags=re.MULTILINE)[1:]
+    }
+
+    for question in manifest.questions:
+        section = sections[question.question_id]
+        if question.region_grid is None:
+            assert "变化格子占比：未能计算" in section
+            continue
+        expected = (
+            f"{len(question.region_grid)} / 144 = "
+            f"{len(question.region_grid) / 144:.9f}"
+        )
+        assert expected in section
 
 
 def test_real_exam_field_notes_are_verbatim_after_markdown_reflow() -> None:
@@ -445,7 +574,6 @@ def test_real_exam_uses_only_allowed_fields_and_plain_game_names() -> None:
         "frames",
         "seconds",
         "region_grid",
-        "crops",
     }
     allowed_contexts = {
         "Grey Zone Warfare",
