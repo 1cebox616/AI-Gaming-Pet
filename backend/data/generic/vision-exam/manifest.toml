@@ -68,18 +68,21 @@ region_grid = [
 ]
 
 [[questions]]
-id = "gzw-static-control-a"
+id = "gzw-static-single"
 type = "single"
 game_context = "Grey Zone Warfare"
 frames = ["../../../recordings/capture/20260823-135202/frame-000001-20260823T175206.287712Z.png"]
 seconds = [0.0]
 
 [[questions]]
-id = "gzw-static-control-b"
-type = "single"
+id = "gzw-static-sequence"
+type = "sequence"
 game_context = "Grey Zone Warfare"
-frames = ["../../../recordings/capture/20260823-135202/frame-000031-20260823T175306.283718Z.png"]
-seconds = [0.0]
+frames = [
+  "../../../recordings/capture/20260823-135202/frame-000001-20260823T175206.287712Z.png",
+  "../../../recordings/capture/20260823-135202/frame-000031-20260823T175306.283718Z.png",
+]
+seconds = [0.0, 59.996006]
 
 [[questions]]
 id = "gzw-rain-small-helicopter"
@@ -128,31 +131,4 @@ region_grid = [
   "r14c1", "r14c2", "r14c3", "r14c4", "r14c5", "r14c6", "r14c7", "r14c8", "r14c9",
   "r15c1", "r15c2", "r15c3", "r15c4", "r15c5", "r15c6", "r15c8", "r15c9",
   "r16c1", "r16c2", "r16c3", "r16c4", "r16c5", "r16c6", "r16c7", "r16c9",
-]
-
-[[questions]]
-id = "spire-combat-ui-nocontext"
-type = "single"
-frames = ["../../../recordings/capture/20260823-201700/frame-000058-20260824T001854.718295Z.png"]
-seconds = [0.0]
-region_grid = [
-  "r4c5", "r5c4", "r5c5", "r6c4", "r6c5", "r7c2", "r7c4", "r7c5", "r7c6",
-  "r8c2", "r8c4", "r8c5", "r8c6", "r8c7", "r9c2", "r9c3", "r9c4", "r9c5", "r9c7",
-  "r10c2", "r10c5", "r11c5", "r12c4", "r12c5", "r13c5", "r14c4", "r14c5",
-  "r15c4", "r15c5", "r15c6", "r16c4", "r16c5",
-]
-
-[[questions]]
-id = "subnautica-night-underwater-nocontext"
-type = "single"
-frames = ["../../../recordings/capture/20260823-183828/frame-000013-20260823T223852.427674Z.png"]
-seconds = [0.0]
-region_grid = [
-  "r1c4", "r1c5", "r1c6", "r2c5", "r2c6", "r3c5", "r3c6", "r3c7", "r3c9",
-  "r4c4", "r4c5", "r4c6", "r4c7", "r5c5", "r5c6", "r5c7",
-  "r6c5", "r6c6", "r6c7", "r6c8", "r7c5", "r7c6", "r7c7", "r7c8",
-  "r8c5", "r8c6", "r8c7", "r8c8", "r9c5", "r9c6", "r9c7", "r9c8",
-  "r10c6", "r10c7", "r10c8", "r11c7", "r11c8", "r12c6", "r12c7",
-  "r13c4", "r13c5", "r13c6", "r13c7", "r14c4", "r14c5", "r14c6", "r14c7",
-  "r15c3", "r15c4", "r15c7", "r15c9", "r16c3", "r16c4", "r16c7",
 ]

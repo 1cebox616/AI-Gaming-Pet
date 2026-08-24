@@ -27,7 +27,8 @@ from pet.core.llm import (
 )
 
 BACKEND_DIRECTORY = Path(__file__).resolve().parents[5]
-DEFAULT_PROMPT_PATH = BACKEND_DIRECTORY / "prompts" / "generic" / "observation.md"
+FAST_PROMPT_PATH = BACKEND_DIRECTORY / "prompts" / "generic" / "observation-fast.md"
+DEEP_PROMPT_PATH = BACKEND_DIRECTORY / "prompts" / "generic" / "observation-deep.md"
 DEFAULT_OUTPUT_ROOT = BACKEND_DIRECTORY / "eval-reports"
 DEFAULT_CONFIG_PATH = BACKEND_DIRECTORY / "config.toml"
 DEFAULT_LOCAL_CONFIG_PATH = BACKEND_DIRECTORY / "config.local.toml"
@@ -46,6 +47,18 @@ REGION_COLUMNS = 9
 REGION_CELL_COUNT = REGION_ROWS * REGION_COLUMNS
 RegionMode = Literal["off", "sparse", "always"]
 REGION_MODES: tuple[RegionMode, ...] = ("off", "sparse", "always")
+OutputMode = Literal["fast", "deep"]
+OUTPUT_MODES: tuple[OutputMode, ...] = ("fast", "deep")
+FAST_MAX_TOKENS = 60  # 初始值，待考卷实测修订。
+DEEP_MAX_TOKENS = 1600  # 初始值，待考卷实测修订。
+OUTPUT_PROMPT_PATHS: Mapping[OutputMode, Path] = {
+    "fast": FAST_PROMPT_PATH,
+    "deep": DEEP_PROMPT_PATH,
+}
+OUTPUT_MAX_TOKENS: Mapping[OutputMode, int] = {
+    "fast": FAST_MAX_TOKENS,
+    "deep": DEEP_MAX_TOKENS,
+}
 DEFAULT_REGION_SPARSITY_MAX = 0.25  # 此数待实测确定。
 
 
@@ -75,16 +88,25 @@ class ExamManifest:
 
 @dataclass(frozen=True, slots=True)
 class ExamVariant:
-    """One upload-width and region-mode Cartesian-product choice."""
+    """One output-mode, upload-width, and region-mode variant."""
 
     send_width: int
     region_mode: RegionMode
     region_sparsity_max: float
+    output_mode: OutputMode
+
+    @property
+    def max_tokens(self) -> int:
+        return OUTPUT_MAX_TOKENS[self.output_mode]
+
+    @property
+    def prompt_path(self) -> Path:
+        return OUTPUT_PROMPT_PATHS[self.output_mode]
 
     @property
     def name(self) -> str:
         width = "native" if self.send_width == 0 else str(self.send_width)
-        return f"region-{self.region_mode}__width-{width}"
+        return f"output-{self.output_mode}__region-{self.region_mode}__width-{width}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +126,6 @@ class ModelTarget:
     provider: str | None
     temperature: float
     timeout_seconds: float
-    max_tokens: int
     price: ModelPrice
 
 
@@ -115,6 +136,8 @@ class ExamRecord:
     question_id: str
     question_type: str
     variant: str
+    output_mode: str
+    max_tokens: int
     upload_width: int
     region_mode: str
     region_grid_fraction: float | None
@@ -315,8 +338,8 @@ def build_user_prompt(question: ExamQuestion, variant: ExamVariant) -> str:
     parts: list[str] = []
     if question.game_context is not None:
         parts.append(
-            "游戏上下文（由窗口标题与进程名确定）："
-            f"{question.game_context}。请在 game_guess 中填写这个名称，不要另行猜测。"
+            "已知上下文（由窗口标题与进程名确定）："
+            f"游戏名为 {question.game_context}。"
         )
     timeline = build_timeline(question)
     if timeline:
@@ -368,6 +391,7 @@ def build_variants(
     *,
     send_widths: Sequence[int],
     region_modes: Sequence[str],
+    output_modes: Sequence[str],
     region_sparsity_max: float,
 ) -> tuple[ExamVariant, ...]:
     """Build a stable Cartesian product while removing repeated switches."""
@@ -380,38 +404,18 @@ def build_variants(
     if any(mode not in REGION_MODES for mode in raw_modes):
         raise VisionExamError("--region-mode 必须是 off、sparse 或 always")
     modes = tuple(cast(RegionMode, mode) for mode in raw_modes)
+    raw_output_modes = tuple(dict.fromkeys(output_modes or ("fast",)))
+    if any(mode not in OUTPUT_MODES for mode in raw_output_modes):
+        raise VisionExamError("--output-mode 必须是 fast 或 deep")
+    selected_output_modes = tuple(
+        cast(OutputMode, mode) for mode in raw_output_modes
+    )
     return tuple(
-        ExamVariant(width, mode, region_sparsity_max)
+        ExamVariant(width, mode, region_sparsity_max, output_mode)
+        for output_mode in selected_output_modes
         for width in widths
         for mode in modes
     )
-
-
-def validate_observation_json(text: str) -> None:
-    """Reject answers that cannot be handed to the human scoring sheet as specified."""
-    try:
-        payload = json.loads(text)
-    except ValueError as error:
-        raise VisionExamError(f"非法 JSON 输出：{error}") from error
-    if not isinstance(payload, Mapping):
-        raise VisionExamError("非法 JSON 输出：顶层必须是对象")
-    required = {"scene", "notable_events", "game_guess", "confidence"}
-    if set(payload) != required:
-        raise VisionExamError("非法 JSON 输出：字段必须恰为 scene、notable_events、game_guess、confidence")
-    if not isinstance(payload["scene"], str) or not payload["scene"].strip():
-        raise VisionExamError("非法 JSON 输出：scene 必须是非空字符串")
-    events = payload["notable_events"]
-    if not isinstance(events, list) or any(not isinstance(item, str) for item in events):
-        raise VisionExamError("非法 JSON 输出：notable_events 必须是字符串数组")
-    if not isinstance(payload["game_guess"], str) or not payload["game_guess"].strip():
-        raise VisionExamError("非法 JSON 输出：game_guess 必须是非空字符串")
-    confidence = payload["confidence"]
-    if (
-        not isinstance(confidence, (int, float))
-        or isinstance(confidence, bool)
-        or not 0 <= float(confidence) <= 1
-    ):
-        raise VisionExamError("非法 JSON 输出：confidence 必须是 0–1 数字")
 
 
 def run_exam(
@@ -422,7 +426,10 @@ def run_exam(
     client_factory: ClientFactory,
 ) -> tuple[ExamRecord, ...]:
     """Run all targets and keep going after every individual failure."""
-    system_prompt = _read_prompt(DEFAULT_PROMPT_PATH)
+    system_prompts = {
+        output_mode: _read_prompt(prompt_path)
+        for output_mode, prompt_path in OUTPUT_PROMPT_PATHS.items()
+    }
     records: list[ExamRecord] = []
     for target in targets:
         client: LlmVisionClientProtocol | None = None
@@ -450,7 +457,7 @@ def run_exam(
                             question=question,
                             variant=variant,
                             target=target,
-                            system_prompt=system_prompt,
+                            system_prompt=system_prompts[variant.output_mode],
                         )
                     )
         finally:
@@ -483,7 +490,7 @@ def _run_attempt(
             user_prompt=build_user_prompt(question, variant),
             images=images,
             max_image_edge=None,
-            max_tokens=target.max_tokens,
+            max_tokens=variant.max_tokens,
             temperature=target.temperature,
         )
     except Exception as error:
@@ -507,17 +514,14 @@ def _run_attempt(
             ),
         )
 
-    validation_error: str | None = None
-    try:
-        validate_observation_json(result.text)
-    except VisionExamError as error:
-        validation_error = str(error)
+    # JSON 外壳实测约耗 25–30 个输出 token（约 0.7 秒），快线 60-token
+    # 初始预算付不起；游戏身份也已经由窗口标题查表确定，因此两线都保留纯文本。
     return _record_from_result(
         question,
         variant,
         target,
         result,
-        error=validation_error,
+        error=None,
         region_fraction=region_fraction,
         region_injected=region_injected,
         image_dimensions=tuple(
@@ -543,6 +547,8 @@ def _record_from_result(
         question_id=question.question_id,
         question_type=question.question_type,
         variant=variant.name,
+        output_mode=variant.output_mode,
+        max_tokens=variant.max_tokens,
         upload_width=variant.send_width,
         region_mode=variant.region_mode,
         region_grid_fraction=region_fraction,
@@ -578,6 +584,8 @@ def _failed_record(
         question_id=question.question_id,
         question_type=question.question_type,
         variant=variant.name,
+        output_mode=variant.output_mode,
+        max_tokens=variant.max_tokens,
         upload_width=variant.send_width,
         region_mode=variant.region_mode,
         region_grid_fraction=region_grid_fraction(question),
@@ -619,6 +627,8 @@ CSV_COLUMNS = (
     "题号",
     "题型",
     "变体",
+    "输出模式",
+    "max_tokens",
     "上传宽度",
     "区域提示模式",
     "本题变化格子占比",
@@ -633,7 +643,7 @@ CSV_COLUMNS = (
     "错误原文",
     "往返毫秒",
     "输入token",
-    "输出token",
+    "实际输出token",
     "配置折算花费美元",
     "上游报告花费美元",
 )
@@ -671,6 +681,8 @@ def _write_csv(path: Path, records: Sequence[ExamRecord]) -> None:
                     "题号": record.question_id,
                     "题型": record.question_type,
                     "变体": record.variant,
+                    "输出模式": record.output_mode,
+                    "max_tokens": record.max_tokens,
                     "上传宽度": record.upload_width,
                     "区域提示模式": record.region_mode,
                     "本题变化格子占比": (
@@ -691,7 +703,11 @@ def _write_csv(path: Path, records: Sequence[ExamRecord]) -> None:
                     "错误原文": record.error or "",
                     "往返毫秒": _optional_number(record.latency_ms, 3),
                     "输入token": record.input_tokens if record.input_tokens is not None else "",
-                    "输出token": record.output_tokens if record.output_tokens is not None else "",
+                    "实际输出token": (
+                        record.output_tokens
+                        if record.output_tokens is not None
+                        else ""
+                    ),
                     "配置折算花费美元": _optional_number(record.configured_cost_usd, 9),
                     "上游报告花费美元": _optional_number(record.upstream_cost_usd, 9),
                 }
@@ -699,7 +715,7 @@ def _write_csv(path: Path, records: Sequence[ExamRecord]) -> None:
 
 
 def summarize(records: Sequence[ExamRecord]) -> dict[str, object]:
-    """Compute model, question, variant, and width groups from recorded attempts."""
+    """Compute model, question, variant, width, and output-mode groups."""
     return {
         "models": _group_summary(records, lambda item: item.target_label),
         "questions": _group_summary(records, lambda item: item.question_id),
@@ -708,6 +724,7 @@ def summarize(records: Sequence[ExamRecord]) -> dict[str, object]:
             records,
             lambda item: "native" if item.upload_width == 0 else str(item.upload_width),
         ),
+        "output_modes": _group_summary(records, lambda item: item.output_mode),
     }
 
 
@@ -834,10 +851,29 @@ def render_report(
     lines.extend(
         (
             "",
+            "## 输出模式同类对比",
+            "",
+            "| 输出模式 | 成功/总数 | 延迟中位(ms) | 延迟P90(ms) |",
+            "|---|---:|---:|---:|",
+        )
+    )
+    output_mode_summary = summary.get("output_modes", {})
+    if isinstance(output_mode_summary, Mapping):
+        for name, raw in output_mode_summary.items():
+            if isinstance(raw, Mapping):
+                lines.append(
+                    f"| {_markdown_cell(str(name))} | "
+                    f"{raw.get('successes', 0)}/{raw.get('attempts', 0)} | "
+                    f"{_display_number(raw.get('latency_median_ms'), 3)} | "
+                    f"{_display_number(raw.get('latency_p90_ms'), 3)} |"
+                )
+    lines.extend(
+        (
+            "",
             "## 逐题判卷",
             "",
-            "| 题号 | 变体 | 上传宽度 | 区域提示模式 | 变化格子占比 | 实际注入 | 图像像素尺寸 | 图像字节数 | 模型/档位 | 回答原文 | 错误原文 | 准确性判定 | 漏了什么 | 编造了什么 |",
-            "|---|---|---:|---|---:|---|---|---|---|---|---|---|---|---|",
+            "| 题号 | 变体 | 输出模式 | max_tokens | 实际输出token | 上传宽度 | 区域提示模式 | 变化格子占比 | 实际注入 | 图像像素尺寸 | 图像字节数 | 模型/档位 | 回答原文 | 错误原文 | 准确性判定 | 漏了什么 | 编造了什么 |",
+            "|---|---|---|---:|---:|---:|---|---:|---|---|---|---|---|---|---|---|---|",
         )
     )
     for record in records:
@@ -847,6 +883,9 @@ def render_report(
                 (
                     _markdown_cell(record.question_id),
                     _markdown_cell(record.variant),
+                    _markdown_cell(record.output_mode),
+                    str(record.max_tokens),
+                    _display_number(record.output_tokens, 0),
                     str(record.upload_width),
                     _markdown_cell(record.region_mode),
                     _display_number(record.region_grid_fraction, 9),
@@ -899,7 +938,6 @@ def resolve_targets(
     provider: str | None,
     temperature: float,
     timeout_seconds: float,
-    max_tokens: int,
     prices: Mapping[str, ModelPrice],
 ) -> tuple[ModelTarget, ...]:
     """Resolve direct model IDs or profile:<name> references without hard-coded IDs."""
@@ -937,11 +975,6 @@ def resolve_targets(
                         if profile.timeout_seconds is not None
                         else llm_config.timeout_seconds
                     ),
-                    max_tokens=(
-                        profile.max_tokens
-                        if profile.max_tokens is not None
-                        else llm_config.max_tokens
-                    ),
                     price=price,
                 )
             )
@@ -955,7 +988,6 @@ def resolve_targets(
                 provider=_blank_to_none(provider),
                 temperature=temperature,
                 timeout_seconds=timeout_seconds,
-                max_tokens=max_tokens,
                 price=price,
             )
         )
@@ -1071,6 +1103,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="可重复：off、sparse、always；未传时默认 off",
     )
     parser.add_argument(
+        "--output-mode",
+        action="append",
+        choices=OUTPUT_MODES,
+        dest="output_modes",
+        help="可重复：fast 或 deep；未传时默认 fast",
+    )
+    parser.add_argument(
         "--region-sparsity-max",
         type=float,
         default=DEFAULT_REGION_SPARSITY_MAX,
@@ -1078,7 +1117,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--timeout", type=float, default=30.0)
-    parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--local-config", type=Path, default=DEFAULT_LOCAL_CONFIG_PATH)
     parser.add_argument("--yes", action="store_true", help="打印清单后跳过交互输入")
@@ -1102,12 +1140,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise VisionExamError("--temperature 必须在 0–2")
         if arguments.timeout <= 0:
             raise VisionExamError("--timeout 必须大于 0")
-        if arguments.max_tokens <= 0:
-            raise VisionExamError("--max-tokens 必须大于 0")
         manifest = load_manifest(arguments.manifest)
         variants = build_variants(
             send_widths=arguments.send_widths or (),
             region_modes=arguments.region_modes or (),
+            output_modes=arguments.output_modes or (),
             region_sparsity_max=arguments.region_sparsity_max,
         )
         prices = parse_prices(arguments.price)
@@ -1118,7 +1155,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             provider=arguments.provider,
             temperature=arguments.temperature,
             timeout_seconds=arguments.timeout,
-            max_tokens=arguments.max_tokens,
             prices=prices,
         )
         files = upload_files(manifest, variants)
@@ -1144,7 +1180,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "arguments": vars(arguments)
                 | {
                     "manifest": str(arguments.manifest),
-                    "prompt": str(DEFAULT_PROMPT_PATH),
+                    "prompts": {
+                        mode: str(path)
+                        for mode, path in OUTPUT_PROMPT_PATHS.items()
+                    },
                     "config": str(arguments.config),
                     "local_config": str(arguments.local_config),
                 },
@@ -1152,7 +1191,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "ended_at": ended_at.isoformat(),
                 "targets": [asdict(target) for target in targets],
                 "variants": [
-                    asdict(variant) | {"name": variant.name}
+                    asdict(variant)
+                    | {"name": variant.name, "max_tokens": variant.max_tokens}
                     for variant in variants
                 ],
                 "uploaded_files": [str(path) for path in files],

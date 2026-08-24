@@ -593,3 +593,136 @@ PNG 的像素尺寸与字节数。`report.md` 与 `run.json` 另按上传宽度�
 
 - 无已知规格偏差；没有改观察提示词、中性区域模板、题目选帧、截屏或变化检测算法。
 - 本任务未调用模型、未联网、未评分；参考答案仍须产品负责人离线复核，正式跑卷尚未开始。
+
+## M5-T2.8：权威答案与快/深双输出
+
+本节覆盖前文的卷面数量、输出格式与跑卷建议。正式卷现为 11 题：8 道 single、
+3 道 sequence；生产始终免费取得游戏名，因此两道无上下文对照已经删除。
+
+### 变更文件清单
+
+- `data/generic/vision-exam/answer-key.md`：合并产品负责人快/慢答案，增加【核心】、
+  【细节】、【存疑】与两线判卷规则，重排静止题，删除无上下文题。
+- `data/generic/vision-exam/manifest.toml`：静止单帧改名并新增静止双帧题，删除两道
+  无上下文题；其他题目的选帧和区域格子不变。
+- `prompts/generic/observation-fast.md`、`observation-deep.md`：新增跨游戏纯文本提示词；
+  原 `observation.md` 删除。
+- `src/pet/games/generic/eval/vision_exam.py`：新增输出模式轴、固定输出预算、纯文本结果、
+  CSV 字段及按输出模式汇总。
+- `tests/test_vision_exam.py`：覆盖双提示词、固定 token、纯文本、剪枝组合、静止题时间、
+  答案标签和本地录制缺失时跳过。
+- `audit/m5-t2-vision-exam-report.md`：本节。
+
+### 答案合并规则与完整样例
+
+快回答中的内容标为【核心】；慢回答中快回答未覆盖的内容标为【细节】；现实世界型号
+比附统一标为【存疑】。快线只按核心判覆盖率，深线按核心+细节；存疑不计分。
+UI 布局与第一人称持枪视角不加分不扣分，“不得出现的内容”对两线相同。
+
+`gzw-static-single` 的“产品负责人判定”完整内容如下：
+
+```text
+- 【核心】玩家位于一条铺砌道路上，前方远处有一名 NPC 站立。
+- 【核心】右侧为混凝土建筑与植被花坛，左侧有围墙和堆叠的木箱/货箱，背景是阴天下的山林。
+- 【核心】UI 显示距离目标 58 米，罗盘指向南/西南；画面左下角标注“EA Pre-Alpha”。
+- 【细节】场景位于被植被环绕的混凝土建筑群外；右侧近景是种有棕榈植物和红白花卉的花坛及灰色墙体。
+- 【细节】左侧中景可见铁丝网围墙、简易棚屋及大量堆叠的棕色补给箱，远景为雾气笼罩的茂密山林。
+- 【细节】顶部 UI 显示 58 米处有友方单位，罗盘为南偏西（约 210—240 度）；左上角姿态图标显示玩家站立，另有“71米”参数；版本信息为“EA Pre-Alpha | 0.4.7.2”。
+```
+
+现实型号降级的已知命中包括：直升机“类似 UH-60 或 AS332”，以及两处 EOTech
+瞄具品牌判断。它们均只在【存疑】中出现，不进入覆盖率。
+
+### 合并中保留的差异
+
+- `gzw-helicopter-landing`：产品负责人快回答写直升机“停着”，慢回答写“在空中
+  飞行/悬浮”；原离线复核也无法确定即时运动。两种原文均保留，不要求唯一阶段。
+- `gzw-near-black`：产品负责人判定为高对比度夜视效果；原离线复核没有看见绿色
+  夜视成像。判卷采用产品负责人描述，但不据此扩展夜视仪开关状态。
+- `spire-combat-ui`：产品负责人把 6/6 识别为右侧敌人的蓝色能量条，并称中央防御牌
+  “被选中”；原离线复核曾把 6/6 读作左侧单位且无法区分卡牌交互状态。均已移入
+  不确定项并注明以产品负责人为准。
+- `gzw-rain-small-helicopter`：快回答写直升机“停着”，慢回答确认低空作业、旋翼与
+  下洗水雾，并推测刚着陆或即将起飞；不要求模型确定唯一飞行阶段。
+- `disco-task-switch-sequence`：产品负责人用口语写“约3秒”，文件名实算为
+  `2.001330` 秒。请求时间轴采用机械值，判卷不因口语近似扣分。
+
+### 静止题重排与时间计算
+
+`gzw-static-control-a` 改为 `gzw-static-single`，仍只含首帧；原 a、b 两帧组成
+`gzw-static-sequence`，原 b 单帧题删除。文件名 UTC 时间相减：
+
+```text
+2026-08-23T17:53:06.283718Z - 2026-08-23T17:52:06.287712Z
+= 59.996006 秒
+```
+
+产品负责人补充说明：画面左上 UI 显示的是游戏内经过 8 分钟；上述 `59.996006` 秒是
+现实采样时间，两者不冲突。manifest 实际解析结果：
+
+```text
+manifest_ok questions=11 single=8 sequence=3
+gzw-static-single type=single seconds=(0.0,) frames=1
+gzw-static-sequence type=sequence seconds=(0.0, 59.996006) frames=2
+```
+
+### 快/深输出与纯文本
+
+- `fast` 逐字加载 `observation-fast.md`，`max_tokens=60`。
+- `deep` 逐字加载 `observation-deep.md`，`max_tokens=1600`。
+- 两个预算均是“初始值，待考卷实测修订”。
+- 两线都返回纯文本。JSON 外壳实测约占 25—30 输出 token、约 0.7 秒，快线预算
+  无法承担；游戏身份也已由窗口标题查表取代。
+- 静态检索 `game_guess|notable_events|confidence` 在考卷代码和两份提示词中无输出。
+
+`results.csv` 当前表头与一条假客户端实测样例如下：
+
+```text
+题号,题型,变体,输出模式,max_tokens,上传宽度,区域提示模式,本题变化格子占比,本次是否实际注入了提示,本次实际上传的图像像素尺寸,本次实际上传的图像字节数,目标档位,请求模型,实际模型,服务商,回答原文,错误原文,往返毫秒,输入token,实际输出token,配置折算花费美元,上游报告花费美元
+synthetic-single,single,output-fast__region-off__width-1280,fast,60,1280,off,0.020833333,false,1280x960,123229,fake/model,fake/model,fake/actual,fake-provider,合成测试画面的亮区发生了变化。,,125.000,120,30,0.000180000,0.009000000
+```
+
+### 剪枝后的跑卷建议
+
+不跑全笛卡尔积；每个候选档位只跑以下 4 个组合：
+
+| 输出模式 | 上传宽度 | 区域模式 |
+|---|---:|---|
+| fast | 1280 | off |
+| fast | 1280 | sparse |
+| deep | 1280 | off |
+| deep | 原生（0） | off |
+
+正式卷 11 题，因此每个档位 `11 × 4 = 44` 次；建议 3 个不同成本/能力档位，共
+132 次调用。每个档位上传 56 张完整画面附件，3 个档位共 168 张。按 T2.7 同类视觉
+输入预算线性折算，整轮输入约 10 万至 50 万 token 等价值；输出硬上限为
+`3 × (11 × 2 × 60 + 11 × 2 × 1600) = 109,560` token，实际值由跑卷记录，
+不预先编造。模型单价留空，执行当天通过 `--price` 填写。
+
+CLI 的轴本身仍可组合；为避免误跑全积，建议把上述四组分为四次命令执行。假客户端
+测试用同一组四个变体跑两道合成题，实际得到 8 次调用、8 行 CSV，并验证 fast/deep
+各 4 次。无上下文题已经删除，不再有额外分支。
+
+### 可移植性
+
+依赖正式截图的答案格子一致性测试会先检查 manifest 中的录制文件。缺文件时以
+“该测试依赖产品负责人本机的录制数据”明确跳过；合成缺文件测试捕获并断言了
+`pytest.skip.Exception`。其他结构、提示词、CLI 与假客户端测试只依赖提交内 fixture。
+
+### M5-T2.8 测试
+
+```text
+.venv\Scripts\python -m pytest tests/test_vision_exam.py tests/test_vision_exam_region_assets.py tests/test_llm.py tests/test_layering.py -q --basetemp .codex-tmp\pytest-targeted-final -p no:cacheprovider
+53 passed in 5.26s
+
+.venv\Scripts\python -m pytest tests/ -q --basetemp .codex-tmp\pytest-full-final -p no:cacheprovider
+469 passed, 4 failed, 1 warning in 22.64s
+```
+
+4 项失败仍全部是当前机器无法枚举 OneCore 中文语音导致的既有环境项；其余测试，
+包括 `test_layering.py`，全部通过。
+
+### M5-T2.8 偏差与未完成项
+
+- 无已知规格偏差。
+- 本任务没有调用模型、没有联网、没有评分；正式跑卷与人工判卷尚未开始。
