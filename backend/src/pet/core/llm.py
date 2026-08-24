@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import base64
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from io import BytesIO
 import json
 import os
+from pathlib import Path
 import time
 from typing import Any, Protocol
 
 import httpx
+from PIL import Image
 
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -33,6 +37,16 @@ class LlmResult:
     latency_seconds: float
     model: str
     provider: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LlmImage:
+    """One local image attachment and its human-readable position label."""
+
+    path: Path
+    label: str
+    max_edge: int | None = None
+    target_width: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +122,27 @@ class LlmAnalysisClientProtocol(Protocol):
         ...
 
 
+class LlmVisionClientProtocol(Protocol):
+    """The synchronous image-completion boundary used only by offline tools."""
+
+    def complete_with_images(
+        self,
+        *,
+        model: str,
+        provider: str | None = None,
+        system_prompt: str,
+        user_prompt: str,
+        images: Sequence[LlmImage],
+        max_image_edge: int | None,
+        max_tokens: int,
+        temperature: float,
+        seed: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> LlmResult:
+        """Return one completed response after locally encoding the images."""
+        ...
+
+
 class OpenRouterClient:
     """Minimal client for non-streaming and streamed OpenRouter completions."""
 
@@ -164,13 +199,94 @@ class OpenRouterClient:
         reasoning_effort: str | None = None,
     ) -> LlmResult:
         """Send one non-streaming chat completion and never retry failures."""
-        started_at = time.perf_counter()
-        request_body: dict[str, object] = {
-            "model": model,
-            "messages": [
+        return self._complete_messages(
+            model=model,
+            provider=provider,
+            messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            seed=seed,
+            reasoning_effort=reasoning_effort,
+        )
+
+    def complete_with_images(
+        self,
+        *,
+        model: str,
+        provider: str | None = None,
+        system_prompt: str,
+        user_prompt: str,
+        images: Sequence[LlmImage],
+        max_image_edge: int | None,
+        max_tokens: int,
+        temperature: float,
+        seed: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> LlmResult:
+        """Send text and local images as OpenAI-compatible content blocks."""
+        if not images:
+            raise ValueError("at least one image is required")
+        if max_image_edge is not None and max_image_edge <= 0:
+            raise ValueError("maximum image edge must be positive")
+        user_content: list[dict[str, object]] = [
+            {"type": "text", "text": user_prompt}
+        ]
+        for attachment in images:
+            if not attachment.label.strip():
+                raise ValueError("image label must not be blank")
+            if attachment.max_edge is not None and attachment.max_edge <= 0:
+                raise ValueError("image attachment maximum edge must be positive")
+            if attachment.target_width is not None and attachment.target_width <= 0:
+                raise ValueError("image attachment target width must be positive")
+            effective_max_edge = _smallest_limit(
+                max_image_edge,
+                attachment.max_edge,
+            )
+            user_content.append({"type": "text", "text": attachment.label})
+            user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": _image_data_url(
+                            attachment.path,
+                            max_image_edge=effective_max_edge,
+                            target_width=attachment.target_width,
+                        )
+                    },
+                }
+            )
+        return self._complete_messages(
+            model=model,
+            provider=provider,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            seed=seed,
+            reasoning_effort=reasoning_effort,
+        )
+
+    def _complete_messages(
+        self,
+        *,
+        model: str,
+        provider: str | None,
+        messages: list[dict[str, object]],
+        max_tokens: int,
+        temperature: float,
+        seed: int | None,
+        reasoning_effort: str | None,
+    ) -> LlmResult:
+        """Send one prepared non-streaming message list without retrying."""
+        started_at = time.perf_counter()
+        request_body: dict[str, object] = {
+            "model": model,
+            "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": False,
@@ -523,3 +639,39 @@ def _optional_float(value: object) -> float | None:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     return None
+
+
+def _image_data_url(
+    path: Path,
+    *,
+    max_image_edge: int | None,
+    target_width: int | None,
+) -> str:
+    """Load, optionally shrink, and re-encode one image without its metadata."""
+    try:
+        with Image.open(path) as source:
+            source.load()
+            image = source.convert("RGBA" if source.has_transparency_data else "RGB")
+    except (OSError, ValueError) as error:
+        raise LlmError(f"无法读取待上传图像 {path}：{error}") from error
+
+    if target_width is not None and image.width > target_width:
+        target_height = max(1, round(image.height * target_width / image.width))
+        image = image.resize(
+            (target_width, target_height),
+            resample=Image.Resampling.LANCZOS,
+        )
+    if max_image_edge is not None and max(image.size) > max_image_edge:
+        image.thumbnail(
+            (max_image_edge, max_image_edge),
+            resample=Image.Resampling.LANCZOS,
+        )
+    output = BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    encoded = base64.b64encode(output.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _smallest_limit(first: int | None, second: int | None) -> int | None:
+    limits = tuple(value for value in (first, second) if value is not None)
+    return min(limits) if limits else None

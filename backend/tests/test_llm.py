@@ -1,11 +1,14 @@
 """OpenRouter client tests use only httpx's in-memory transport."""
 
 import json
+import base64
+from io import BytesIO
 
 import httpx
+from PIL import Image
 import pytest
 
-from pet.core.llm import LlmError, OpenRouterClient, parse_analysis_text
+from pet.core.llm import LlmError, LlmImage, OpenRouterClient, parse_analysis_text
 
 
 class _StepClock:
@@ -282,6 +285,89 @@ def test_missing_environment_variable_has_clear_error(
 
     with pytest.raises(LlmError, match="未设置环境变量 OPENROUTER_API_KEY"):
         OpenRouterClient.from_env()
+
+
+def test_complete_with_images_builds_content_blocks_and_resizes_locally(
+    tmp_path,
+) -> None:
+    image_path = tmp_path / "wide.png"
+    Image.new("RGB", (20, 10), (10, 20, 30)).save(image_path)
+    request_body: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_body.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "vendor/vision-actual",
+                "choices": [{"message": {"content": '{"scene":"x"}'}}],
+            },
+        )
+
+    client = OpenRouterClient("test-api-key", transport=httpx.MockTransport(handler))
+    try:
+        client.complete_with_images(
+            model="vendor/vision-under-test",
+            system_prompt="system",
+            user_prompt="observe",
+            images=(LlmImage(image_path, "帧1"),),
+            max_image_edge=8,
+            max_tokens=64,
+            temperature=0.0,
+        )
+    finally:
+        client.close()
+
+    messages = request_body["messages"]
+    assert isinstance(messages, list)
+    user_content = messages[1]["content"]
+    assert [block["type"] for block in user_content] == [
+        "text",
+        "text",
+        "image_url",
+    ]
+    assert user_content[1]["text"] == "帧1"
+    data_url = user_content[2]["image_url"]["url"]
+    assert data_url.startswith("data:image/png;base64,")
+    encoded = data_url.partition(",")[2]
+    with Image.open(BytesIO(base64.b64decode(encoded))) as uploaded:
+        assert uploaded.size == (8, 4)
+
+
+def test_complete_with_images_honors_smaller_per_attachment_limit(tmp_path) -> None:
+    image_path = tmp_path / "wide.png"
+    Image.new("RGB", (20, 10), (10, 20, 30)).save(image_path)
+    uploaded_size: tuple[int, int] | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal uploaded_size
+        payload = json.loads(request.content)
+        data_url = payload["messages"][1]["content"][2]["image_url"]["url"]
+        with Image.open(BytesIO(base64.b64decode(data_url.partition(",")[2]))) as uploaded:
+            uploaded_size = uploaded.size
+        return httpx.Response(
+            200,
+            json={
+                "model": "vendor/vision-actual",
+                "choices": [{"message": {"content": "ok"}}],
+            },
+        )
+
+    client = OpenRouterClient("test-api-key", transport=httpx.MockTransport(handler))
+    try:
+        client.complete_with_images(
+            model="vendor/vision-under-test",
+            system_prompt="system",
+            user_prompt="observe",
+            images=(LlmImage(image_path, "帧1", max_edge=6),),
+            max_image_edge=8,
+            max_tokens=64,
+            temperature=0.0,
+        )
+    finally:
+        client.close()
+
+    assert uploaded_size == (6, 3)
 
 
 def test_streamed_analysis_parses_three_fields_usage_and_event_line_latency() -> None:
