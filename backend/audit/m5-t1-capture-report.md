@@ -1,4 +1,4 @@
-# M5-T1 / M5-T1.5 / M5-T3 窗口截屏与帧选取报告
+# M5-T1 / M5-T1.5 / M5-T3 / M5-T3.5 窗口截屏与帧选取报告
 
 最后更新：2026-08-24
 
@@ -142,6 +142,46 @@ M5-T3 验收命令的实际结果：
 4 项失败仍全部是 `tests/test_speech.py` 在本机找不到 OneCore 中文语音的既有环境项；
 M5-T3 新增测试、分层测试和其余回归全部通过。
 
+## M5-T3.5 输入遥测采集方式
+
+按规定顺序先尝试 Windows Raw Input，并停在第一步：用 `ctypes`
+调用 `RegisterRawInputDevices`，在独立线程的隐藏消息窗口中被动接收
+`WM_INPUT`。本机 Windows 初始化烟测已成功完成设备注册、消息循环启动与
+干净退出，因此没有降级为 `GetAsyncKeyState` 轮询，也没有新增依赖。
+
+系统钩子是反作弊重点识别的技术特征，所以实现不安装任何钩子。项目
+永久禁止模拟或注入输入；该模块只声明并调用读取 Raw Input 所需的 API。
+每个原始事件都立即比对目标窗口与当前前台窗口；失去前台后不记录
+设备事件，只在焦点边沿写一行 `focus_lost`。
+
+白名单固定在 `core/input_telemetry.py` 的 `KEYBOARD_INPUT_NAMES` 和
+`MOUSE_INPUT_NAMES`，版本为 `v1`，不从配置读取。鼠标位移只接受相对模式；
+每 100 ms 分别累加 `abs(dx)` 和 `abs(dy)` 后写一行。会话汇总中的鼠标
+“位移量”口径是每个汇总行的
+`hypot(sum(abs(dx)), sum(abs(dy)))`。输入与画面都使用 UTC ISO 8601
+系统墙钟，所以 `input.csv` 可直接与 `metrics.csv` 的时间列对齐。
+
+合成流对齐验证在两份 CSV 中实际读回的时间均为
+`2026-08-25T01:02:03+00:00`。M5-T3.5 验证结果：
+
+```text
+.venv\Scripts\python -m pytest tests\test_input_telemetry.py tests\test_capture.py tests\test_layering.py -q
+45 passed
+
+.venv\Scripts\python -m pytest tests\ -q
+517 passed, 4 failed
+```
+
+4 项失败全部是本机缺少 OneCore 中文语音的既有环境项。静态检索输出：
+
+```text
+rg -n "^\s*(from|import)\s+(httpx|socket|urllib|requests|aiohttp|websockets)(\.|\s|$)" src/pet/core/capture.py src/pet/core/input_telemetry.py
+(无匹配)
+
+rg -n "SendInput|keybd_event|mouse_event|SetWindowsHookEx|WH_KEYBOARD|WH_MOUSE|pynput|RegisterHotKey" src/pet/core/capture.py src/pet/core/input_telemetry.py
+(无匹配)
+```
+
 ## 产品负责人实测指引
 
 ### 怎么运行
@@ -150,7 +190,7 @@ M5-T3 新增测试、分层测试和其余回归全部通过。
 
 ```powershell
 cd backend
-.venv\Scripts\python -m pet.core.capture --watch --title "窗口标题的一部分" --record-all --label "游戏-场景"
+.venv\Scripts\python -m pet.core.capture --watch --title "窗口标题的一部分" --record-all --record-input --label "游戏-场景"
 ```
 
 建议优先使用 `--title`，例如填游戏窗口标题的一小段。若不传 `--title`，探针会给
@@ -230,3 +270,31 @@ cd backend
 - 窗口或屏幕周围是否出现系统自带的黄色捕获边框；只记录，T2 再决定去留。
 - 保存整次会话的 `raw/`、`metrics.csv`、`session.json`；用不同参数重放时每次换
   一个 `--save-dir`，保留原始结果。上述文件可能含窗口标题与私人画面，不要上传。
+
+### 输入遥测实测步骤
+
+`--record-input` 默认关闭，必须显式加上；它可与 `--record-all` 同时
+使用，也可单独使用。开启后横幅会显示：
+
+```text
+【键鼠输入记录已开启】仅在目标游戏窗口位于前台时记录
+键盘白名单 v1：W、A、S、D、……
+鼠标白名单 v1：MouseLeft、MouseRight、……
+输入记录位置：<会话目录>\input.csv
+```
+
+建议按以下顺序实测：
+
+1. 先用不带反作弊的单机游戏。依次测 W/A/S/D，鼠标小幅与大幅移动，
+   左右键、滚轮，再 Alt+Tab 切出与切回。检查白名单键、位移汇总和
+   `focus_lost` 是否与操作时间一致。
+2. 确认单机游戏无异常后，再选一个带反作弊的游戏，先在菜单/训练场
+   做 1–2 分钟最小测试，再决定是否录长会话。
+3. 实测时保留终端可见。若游戏卡顿、失去输入、光标异常、反作弊告警或
+   任何行为变化，立即按 Ctrl+C 停止，不要强行继续；保留完整终端错误和
+   会话目录，转入诊断。
+
+`input.csv` 每行立即 flush，列为时间、事件类型、键名、dx、dy。
+`session.json` 会额外记录是否开启输入、白名单版本、事件总数、各键按下
+次数、鼠标位移中位/P90 和 `focus_lost` 次数。键鼠文件可能暴露
+游玩习惯，与截图一样只保留在已忽略的会话目录，不要提交。

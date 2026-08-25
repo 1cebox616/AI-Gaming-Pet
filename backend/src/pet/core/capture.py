@@ -27,6 +27,16 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
+from pet.core.input_telemetry import (
+    INPUT_WHITELIST_VERSION,
+    KEYBOARD_INPUT_NAMES,
+    MOUSE_INPUT_NAMES,
+    InputTelemetryError,
+    InputTelemetryRecorder,
+    WindowsRawInputBackend,
+    empty_input_summary,
+)
+
 DEFAULT_INTERVAL_SECONDS = 1.0
 DEFAULT_THRESHOLD = 0.02
 DEFAULT_CHANGE_WIDTH = 96
@@ -1174,6 +1184,7 @@ class ProbeOptions:
     label: str | None = None
     capture_cursor: bool = False
     record_all: bool = False
+    record_input: bool = False
     raw_width: int = DEFAULT_RAW_WIDTH
     raw_max_files: int = DEFAULT_RAW_MAX_FILES
     raw_max_bytes: int = DEFAULT_RAW_MAX_BYTES
@@ -1285,6 +1296,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="把每次成功轮询都另存为可重放 JPEG",
     )
     parser.add_argument(
+        "--record-input",
+        action="store_true",
+        help="被动记录固定白名单内的 Raw Input 键鼠事件（默认关闭）",
+    )
+    parser.add_argument(
         "--raw-width",
         type=_positive_int,
         default=DEFAULT_RAW_WIDTH,
@@ -1332,6 +1348,18 @@ def _print_banner(options: ProbeOptions) -> None:
             "【全量录制已开启】每次成功轮询都会保存到 raw/："
             f"宽 {options.raw_width}px、JPEG 质量 {DEFAULT_RAW_JPEG_QUALITY}"
         )
+    if options.record_input:
+        print("【键鼠输入记录已开启】仅在目标游戏窗口位于前台时记录")
+        print(
+            f"键盘白名单 {INPUT_WHITELIST_VERSION}："
+            + "、".join(KEYBOARD_INPUT_NAMES)
+        )
+        print(
+            f"鼠标白名单 {INPUT_WHITELIST_VERSION}："
+            + "、".join(MOUSE_INPUT_NAMES)
+            + "；移动只记相对 dx/dy 绝对值的 100ms 汇总，绝不记录绝对坐标"
+        )
+        print(f"输入记录位置：{options.save_dir / 'input.csv'}")
     print("首帧、持久变化、镜头移动及最长静默强制帧落盘；Ctrl+C 停止")
     print("=" * 72)
 
@@ -1455,13 +1483,32 @@ def _print_summary(summary: dict[str, object]) -> None:
         )
 
 
+def _print_input_summary(summary: dict[str, object]) -> None:
+    print("\n键鼠输入记录汇总")
+    print(
+        f"白名单版本：{summary['白名单版本']}；"
+        f"事件总数：{summary['事件总数']}；"
+        f"focus_lost：{summary['focus_lost次数']} 次"
+    )
+    print(f"按键名分组的按下次数：{summary['按键名分组的按下次数']}")
+    median = summary["鼠标位移量中位"]
+    p90 = summary["鼠标位移量P90"]
+    if isinstance(median, (int, float)) and isinstance(p90, (int, float)):
+        print(f"每 100ms 鼠标位移量：中位 {median:.2f} / P90 {p90:.2f}")
+    else:
+        print("每 100ms 鼠标位移量：无样本")
+
+
 def _write_session(
     options: ProbeOptions,
     started_at: datetime,
     ended_at: datetime | None,
     total_polls: int,
     summary: dict[str, object] | None,
+    input_summary: dict[str, object] | None = None,
 ) -> None:
+    input_payload = dict(input_summary or empty_input_summary())
+    input_payload["已开启"] = options.record_input
     payload = {
         "标签": options.label,
         "启动参数": {
@@ -1481,6 +1528,7 @@ def _write_session(
             "camera_motion_ratio": options.camera_motion_ratio,
             "capture_cursor": options.capture_cursor,
             "record_all": options.record_all,
+            "record_input": options.record_input,
             "raw_width": options.raw_width,
             "raw_max_files": options.raw_max_files,
             "raw_max_bytes": options.raw_max_bytes,
@@ -1490,6 +1538,8 @@ def _write_session(
         "结束时间": None if ended_at is None else ended_at.isoformat(),
         "总轮询数": total_polls,
         "汇总": summary,
+        "输入记录": input_payload,
+        "时间基准": "UTC ISO 8601；画面帧与输入事件共用系统墙钟",
     }
     path = options.save_dir / "session.json"
     with path.open("w", encoding="utf-8") as session_file:
@@ -1536,6 +1586,8 @@ def run_probe(options: ProbeOptions) -> int:
     selector = _make_selector(options)
     probe_statistics = ProbeStatistics()
     backend: WindowsGraphicsCaptureBackend | None = None
+    input_recorder: InputTelemetryRecorder | None = None
+    input_backend: WindowsRawInputBackend | None = None
     csv_writer = MetricsCsvWriter(options.save_dir)
     exit_code = 0
     started_at = datetime.now(timezone.utc)
@@ -1553,6 +1605,13 @@ def run_probe(options: ProbeOptions) -> int:
             options.title,
             capture_cursor=options.capture_cursor,
         )
+        if options.record_input:
+            input_recorder = InputTelemetryRecorder(options.save_dir)
+            input_backend = WindowsRawInputBackend(
+                backend.target.hwnd,
+                input_recorder,
+            )
+            print("Windows Raw Input 已初始化；被动接收、未安装系统钩子")
         print(
             f"目标：{backend.target.title} | {backend.target.process_name} | "
             f"间隔 {options.interval:.2f}s"
@@ -1633,21 +1692,37 @@ def run_probe(options: ProbeOptions) -> int:
             time.sleep(max(0.0, options.interval - elapsed))
     except KeyboardInterrupt:
         print("\n收到 Ctrl+C，正在干净退出……")
-    except CaptureError as error:
-        print(f"\n截屏停止：{error}", file=sys.stderr)
+    except (CaptureError, InputTelemetryError) as error:
+        print(f"\n探针停止：{error}", file=sys.stderr)
         exit_code = 1
     finally:
+        if input_backend is not None:
+            try:
+                input_backend.close()
+            except InputTelemetryError as error:
+                exit_code = 1
+                print(f"输入记录退出异常：{error}", file=sys.stderr)
+        if input_recorder is not None:
+            input_recorder.close()
+        input_summary = (
+            empty_input_summary()
+            if input_recorder is None
+            else input_recorder.summary()
+        )
         if backend is not None:
             backend.close()
         csv_writer.close()
         summary = _build_summary(probe_statistics, archive, raw_archive)
         _print_summary(summary)
+        if options.record_input:
+            _print_input_summary(input_summary)
         _write_session(
             options,
             started_at,
             datetime.now(timezone.utc),
             probe_statistics.poll_count,
             summary,
+            input_summary,
         )
     return exit_code
 
@@ -1719,6 +1794,8 @@ def main() -> None:
     _configure_console_encoding()
     parser = _build_parser()
     arguments = parser.parse_args()
+    if arguments.replay is not None and arguments.record_input:
+        parser.error("--record-input 只适用于 --watch；离线重放不读取实时键鼠")
     options = ProbeOptions(
         interval=arguments.interval,
         title=arguments.title,
@@ -1733,6 +1810,7 @@ def main() -> None:
         label=arguments.label,
         capture_cursor=arguments.capture_cursor,
         record_all=arguments.record_all,
+        record_input=arguments.record_input,
         raw_width=arguments.raw_width,
         raw_max_files=arguments.raw_max_files,
         raw_max_bytes=arguments.raw_max_bytes,

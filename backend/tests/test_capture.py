@@ -399,6 +399,9 @@ def test_session_json_records_new_arguments(tmp_path: Path) -> None:
     assert payload["启动参数"]["noise_window"] == 20
     assert payload["启动参数"]["persistence_polls"] == 2
     assert payload["启动参数"]["record_all"] is False
+    assert payload["启动参数"]["record_input"] is False
+    assert payload["输入记录"]["已开启"] is False
+    assert payload["输入记录"]["白名单版本"] == "v1"
     assert payload["总轮询数"] == 300
 
 
@@ -458,10 +461,32 @@ def test_cli_defaults_and_removed_strategy() -> None:
 
     assert arguments.interval == 1.0
     assert arguments.record_all is False
+    assert arguments.record_input is False
     assert arguments.raw_width == 640
     assert not hasattr(arguments, "strategy")
     with pytest.raises(SystemExit):
         parser.parse_args(["--watch", "--strategy", "mean_amplitude_vs_previous"])
+
+
+def test_record_input_banner_discloses_scope_and_destination(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    options = ProbeOptions(
+        1.0,
+        "Game",
+        tmp_path,
+        record_all=True,
+        record_input=True,
+    )
+
+    capture._print_banner(options)
+
+    output = capsys.readouterr().out
+    assert "【键鼠输入记录已开启】" in output
+    assert "W、A、S、D" in output
+    assert "MouseLeft、MouseRight" in output
+    assert str(tmp_path / "input.csv") in output
 
 
 class _SyntheticCaptureSession:

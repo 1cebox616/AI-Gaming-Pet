@@ -1,0 +1,842 @@
+"""Passive, allowlisted Windows Raw Input telemetry for capture sessions.
+
+The Windows backend uses a message-only window and Raw Input.  It deliberately
+does not install system hooks because hooks are a high-risk anti-cheat signal.
+This project also permanently forbids input-simulation or injection APIs: this
+module only receives device events and never writes input back to the system.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+import csv
+import ctypes
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import math
+from pathlib import Path
+import statistics
+import sys
+import threading
+from typing import Literal, Self
+
+
+INPUT_WHITELIST_VERSION = "v1"
+MOUSE_SUMMARY_WINDOW_SECONDS = 0.100
+
+KEYBOARD_INPUT_NAMES = (
+    "W",
+    "A",
+    "S",
+    "D",
+    "Shift",
+    "Ctrl",
+    "Alt",
+    "Space",
+    "Tab",
+    "E",
+    "Q",
+    "R",
+    "F",
+    "C",
+    "V",
+    "G",
+    "Esc",
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "F5",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+)
+MOUSE_INPUT_NAMES = (
+    "MouseLeft",
+    "MouseRight",
+    "MouseMiddle",
+    "Mouse4",
+    "Mouse5",
+    "WheelUp",
+    "WheelDown",
+)
+INPUT_NAME_WHITELIST = frozenset((*KEYBOARD_INPUT_NAMES, *MOUSE_INPUT_NAMES))
+
+INPUT_CSV_HEADER = ("时间", "事件类型", "键名", "dx", "dy")
+InputEventType = Literal["按下", "抬起", "滚轮", "移动汇总", "焦点丢失"]
+InputSampleKind = Literal["key", "mouse_button", "wheel", "move"]
+
+
+class InputTelemetryError(RuntimeError):
+    """An input-recorder failure phrased for the probe operator."""
+
+
+@dataclass(frozen=True, slots=True)
+class InputSample:
+    """One injectable device sample before privacy filtering and aggregation."""
+
+    timestamp: datetime
+    kind: InputSampleKind
+    foreground: bool
+    name: str = ""
+    pressed: bool | None = None
+    dx: int = 0
+    dy: int = 0
+    relative: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class InputRecord:
+    """One allowlisted row eligible to be written to input.csv."""
+
+    timestamp: datetime
+    event_type: InputEventType
+    name: str = ""
+    dx: int = 0
+    dy: int = 0
+
+
+@dataclass(slots=True)
+class InputStatistics:
+    """Counters derived only from rows that survived the privacy filter."""
+
+    event_count: int = 0
+    press_counts: dict[str, int] = field(default_factory=dict)
+    movement_magnitudes: list[float] = field(default_factory=list)
+    focus_lost_count: int = 0
+
+    def record(self, event: InputRecord) -> None:
+        self.event_count += 1
+        if event.event_type == "按下":
+            self.press_counts[event.name] = self.press_counts.get(event.name, 0) + 1
+        elif event.event_type == "移动汇总":
+            self.movement_magnitudes.append(math.hypot(event.dx, event.dy))
+        elif event.event_type == "焦点丢失":
+            self.focus_lost_count += 1
+
+    def summary(self) -> dict[str, object]:
+        """Return session fields; displacement is per 100 ms aggregate row."""
+        ordered = sorted(self.movement_magnitudes)
+        return {
+            "白名单版本": INPUT_WHITELIST_VERSION,
+            "事件总数": self.event_count,
+            "按键名分组的按下次数": dict(sorted(self.press_counts.items())),
+            "鼠标位移量口径": "每个100毫秒移动汇总行的 hypot(sum(abs(dx)), sum(abs(dy)))",
+            "鼠标位移量中位": None if not ordered else statistics.median(ordered),
+            "鼠标位移量P90": None if not ordered else _percentile(ordered, 0.90),
+            "focus_lost次数": self.focus_lost_count,
+        }
+
+
+class InputCsvWriter:
+    """Write and immediately flush each privacy-filtered input row."""
+
+    def __init__(self, save_dir: Path) -> None:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        self.path = save_dir / "input.csv"
+        self._file = self.path.open("w", encoding="utf-8-sig", newline="")
+        self._writer = csv.writer(self._file)
+        self._writer.writerow(INPUT_CSV_HEADER)
+        self._file.flush()
+
+    def write(self, event: InputRecord) -> None:
+        self._writer.writerow(
+            (
+                event.timestamp.astimezone(timezone.utc).isoformat(),
+                event.event_type,
+                event.name,
+                event.dx if event.event_type == "移动汇总" else "",
+                event.dy if event.event_type == "移动汇总" else "",
+            )
+        )
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+
+class InputEventProcessor:
+    """Pure allowlist, focus gate, and fixed-window movement aggregator."""
+
+    def __init__(
+        self,
+        sink: Callable[[InputRecord], None],
+        *,
+        movement_window_seconds: float = MOUSE_SUMMARY_WINDOW_SECONDS,
+    ) -> None:
+        if movement_window_seconds <= 0:
+            raise ValueError("movement window must be positive")
+        self._sink = sink
+        self._window_seconds = movement_window_seconds
+        self._focused = False
+        self._movement_started_at: datetime | None = None
+        self._movement_dx = 0
+        self._movement_dy = 0
+        self.statistics = InputStatistics()
+
+    def set_foreground(self, foreground: bool, timestamp: datetime) -> None:
+        """Update the exact target-window focus state and emit one loss edge."""
+        normalized = _utc(timestamp)
+        if foreground:
+            self._focused = True
+            return
+        if self._focused:
+            self._flush_movement(normalized, force=True)
+            self._emit(InputRecord(normalized, "焦点丢失"))
+        self._focused = False
+
+    def process(self, sample: InputSample) -> None:
+        """Consume one synthetic or Raw Input sample without retaining rejected data."""
+        timestamp = _utc(sample.timestamp)
+        self.set_foreground(sample.foreground, timestamp)
+        if not self._focused:
+            return
+        self.flush_due(timestamp)
+        if sample.kind in {"key", "mouse_button"}:
+            if sample.name not in INPUT_NAME_WHITELIST or sample.pressed is None:
+                return
+            event_type: InputEventType = "按下" if sample.pressed else "抬起"
+            self._emit(InputRecord(timestamp, event_type, sample.name))
+            return
+        if sample.kind == "wheel":
+            if sample.name not in {"WheelUp", "WheelDown"}:
+                return
+            self._emit(InputRecord(timestamp, "滚轮", sample.name))
+            return
+        if sample.kind == "move" and sample.relative:
+            self._accumulate_movement(timestamp, sample.dx, sample.dy)
+
+    def flush_due(self, timestamp: datetime) -> None:
+        """Flush one complete movement window; timers call this when input is idle."""
+        normalized = _utc(timestamp)
+        started = self._movement_started_at
+        if started is None:
+            return
+        if (normalized - started).total_seconds() >= self._window_seconds:
+            self._flush_movement(normalized, force=True)
+
+    def finish(self, timestamp: datetime) -> None:
+        self._flush_movement(_utc(timestamp), force=True)
+
+    def _accumulate_movement(self, timestamp: datetime, dx: int, dy: int) -> None:
+        if dx == 0 and dy == 0:
+            return
+        if self._movement_started_at is None:
+            self._movement_started_at = timestamp
+        self._movement_dx += abs(dx)
+        self._movement_dy += abs(dy)
+
+    def _flush_movement(self, timestamp: datetime, *, force: bool) -> None:
+        if self._movement_started_at is None:
+            return
+        if force and (self._movement_dx or self._movement_dy):
+            self._emit(
+                InputRecord(
+                    timestamp,
+                    "移动汇总",
+                    dx=self._movement_dx,
+                    dy=self._movement_dy,
+                )
+            )
+        self._movement_started_at = None
+        self._movement_dx = 0
+        self._movement_dy = 0
+
+    def _emit(self, event: InputRecord) -> None:
+        self._sink(event)
+        self.statistics.record(event)
+
+
+class InputTelemetryRecorder:
+    """Own input.csv and the injectable processor for one capture session."""
+
+    def __init__(self, save_dir: Path) -> None:
+        self.writer = InputCsvWriter(save_dir)
+        self.processor = InputEventProcessor(self.writer.write)
+        self._closed = False
+
+    def close(self, ended_at: datetime | None = None) -> None:
+        if self._closed:
+            return
+        self.processor.finish(ended_at or datetime.now(timezone.utc))
+        self.writer.close()
+        self._closed = True
+
+    def summary(self) -> dict[str, object]:
+        return self.processor.statistics.summary()
+
+
+# Raw Input constants and structures. No hook or input-writing API is declared.
+_WM_INPUT = 0x00FF
+_WM_TIMER = 0x0113
+_WM_CLOSE = 0x0010
+_WM_DESTROY = 0x0002
+_RID_INPUT = 0x10000003
+_RIM_TYPEMOUSE = 0
+_RIM_TYPEKEYBOARD = 1
+_RIDEV_INPUTSINK = 0x00000100
+_RIDEV_REMOVE = 0x00000001
+_HID_USAGE_PAGE_GENERIC = 0x01
+_HID_USAGE_GENERIC_MOUSE = 0x02
+_HID_USAGE_GENERIC_KEYBOARD = 0x06
+_RI_KEY_BREAK = 0x0001
+_MOUSE_MOVE_ABSOLUTE = 0x0001
+_RI_MOUSE_LEFT_BUTTON_DOWN = 0x0001
+_RI_MOUSE_LEFT_BUTTON_UP = 0x0002
+_RI_MOUSE_RIGHT_BUTTON_DOWN = 0x0004
+_RI_MOUSE_RIGHT_BUTTON_UP = 0x0008
+_RI_MOUSE_MIDDLE_BUTTON_DOWN = 0x0010
+_RI_MOUSE_MIDDLE_BUTTON_UP = 0x0020
+_RI_MOUSE_BUTTON_4_DOWN = 0x0040
+_RI_MOUSE_BUTTON_4_UP = 0x0080
+_RI_MOUSE_BUTTON_5_DOWN = 0x0100
+_RI_MOUSE_BUTTON_5_UP = 0x0200
+_RI_MOUSE_WHEEL = 0x0400
+
+
+class _RAWINPUTDEVICE(ctypes.Structure):
+    _fields_ = (
+        ("usUsagePage", ctypes.c_uint16),
+        ("usUsage", ctypes.c_uint16),
+        ("dwFlags", ctypes.c_uint32),
+        ("hwndTarget", ctypes.c_void_p),
+    )
+
+
+class _RAWINPUTHEADER(ctypes.Structure):
+    _fields_ = (
+        ("dwType", ctypes.c_uint32),
+        ("dwSize", ctypes.c_uint32),
+        ("hDevice", ctypes.c_void_p),
+        ("wParam", ctypes.c_size_t),
+    )
+
+
+class _RAWKEYBOARD(ctypes.Structure):
+    _fields_ = (
+        ("MakeCode", ctypes.c_uint16),
+        ("Flags", ctypes.c_uint16),
+        ("Reserved", ctypes.c_uint16),
+        ("VKey", ctypes.c_uint16),
+        ("Message", ctypes.c_uint32),
+        ("ExtraInformation", ctypes.c_uint32),
+    )
+
+
+class _BUTTON_FIELDS(ctypes.Structure):
+    _fields_ = (
+        ("usButtonFlags", ctypes.c_uint16),
+        ("usButtonData", ctypes.c_uint16),
+    )
+
+
+class _MOUSE_BUTTONS(ctypes.Union):
+    _anonymous_ = ("fields",)
+    _fields_ = (
+        ("ulButtons", ctypes.c_uint32),
+        ("fields", _BUTTON_FIELDS),
+    )
+
+
+class _RAWMOUSE(ctypes.Structure):
+    _anonymous_ = ("buttons",)
+    _fields_ = (
+        ("usFlags", ctypes.c_uint16),
+        ("buttons", _MOUSE_BUTTONS),
+        ("ulRawButtons", ctypes.c_uint32),
+        ("lLastX", ctypes.c_int32),
+        ("lLastY", ctypes.c_int32),
+        ("ulExtraInformation", ctypes.c_uint32),
+    )
+
+
+class _RAW_PAYLOAD(ctypes.Union):
+    _fields_ = (("mouse", _RAWMOUSE), ("keyboard", _RAWKEYBOARD))
+
+
+class _RAWINPUT(ctypes.Structure):
+    _anonymous_ = ("data",)
+    _fields_ = (("header", _RAWINPUTHEADER), ("data", _RAW_PAYLOAD))
+
+
+class _WNDCLASSW(ctypes.Structure):
+    _fields_ = (
+        ("style", ctypes.c_uint32),
+        ("lpfnWndProc", ctypes.c_void_p),
+        ("cbClsExtra", ctypes.c_int32),
+        ("cbWndExtra", ctypes.c_int32),
+        ("hInstance", ctypes.c_void_p),
+        ("hIcon", ctypes.c_void_p),
+        ("hCursor", ctypes.c_void_p),
+        ("hbrBackground", ctypes.c_void_p),
+        ("lpszMenuName", ctypes.c_wchar_p),
+        ("lpszClassName", ctypes.c_wchar_p),
+    )
+
+
+class _MSG(ctypes.Structure):
+    _fields_ = (
+        ("hwnd", ctypes.c_void_p),
+        ("message", ctypes.c_uint32),
+        ("wParam", ctypes.c_size_t),
+        ("lParam", ctypes.c_ssize_t),
+        ("time", ctypes.c_uint32),
+        ("pt_x", ctypes.c_int32),
+        ("pt_y", ctypes.c_int32),
+        ("lPrivate", ctypes.c_uint32),
+    )
+
+
+_VIRTUAL_KEY_NAMES = {
+    0x09: "Tab",
+    0x10: "Shift",
+    0x11: "Ctrl",
+    0x12: "Alt",
+    0x1B: "Esc",
+    0x20: "Space",
+    0x41: "A",
+    0x43: "C",
+    0x44: "D",
+    0x45: "E",
+    0x46: "F",
+    0x47: "G",
+    0x51: "Q",
+    0x52: "R",
+    0x53: "S",
+    0x56: "V",
+    0x57: "W",
+    0x70: "F1",
+    0x71: "F2",
+    0x72: "F3",
+    0x73: "F4",
+    0x74: "F5",
+    0xA0: "Shift",
+    0xA1: "Shift",
+    0xA2: "Ctrl",
+    0xA3: "Ctrl",
+    0xA4: "Alt",
+    0xA5: "Alt",
+    **{code: chr(code) for code in range(0x31, 0x3A)},
+}
+
+
+class WindowsRawInputBackend:
+    """Receive Raw Input in a message-only window on a dedicated thread."""
+
+    def __init__(
+        self,
+        target_hwnd: int,
+        recorder: InputTelemetryRecorder,
+        *,
+        ready_timeout_seconds: float = 5.0,
+    ) -> None:
+        if sys.platform != "win32":
+            raise InputTelemetryError(
+                "键鼠输入记录只支持 Windows；当前平台无法初始化 Windows Raw Input"
+            )
+        if not target_hwnd:
+            raise InputTelemetryError("目标游戏窗口句柄无效，无法启动输入记录")
+        self._target_hwnd = target_hwnd
+        self._recorder = recorder
+        self._ready = threading.Event()
+        self._thread_error: Exception | None = None
+        self._window_handle = 0
+        self._user32: object | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name="pet-raw-input",
+            daemon=True,
+        )
+        self._thread.start()
+        if not self._ready.wait(ready_timeout_seconds):
+            raise InputTelemetryError(
+                "Windows Raw Input 初始化超时；未安装钩子，也未降级为静默失败"
+            )
+        if self._thread_error is not None:
+            raise InputTelemetryError(
+                f"Windows Raw Input 初始化失败：{self._thread_error}"
+            ) from self._thread_error
+
+    def close(self) -> None:
+        user32 = self._user32
+        if user32 is not None and self._window_handle:
+            user32.PostMessageW(self._window_handle, _WM_CLOSE, 0, 0)
+        self._thread.join(timeout=5.0)
+        if self._thread.is_alive():
+            raise InputTelemetryError("Windows Raw Input 消息线程未能在 5 秒内退出")
+        if self._thread_error is not None:
+            raise InputTelemetryError(
+                f"Windows Raw Input 运行失败：{self._thread_error}"
+            ) from self._thread_error
+
+    def _run(self) -> None:
+        try:
+            self._message_loop()
+        except Exception as error:
+            self._thread_error = error
+            self._ready.set()
+
+    def _message_loop(self) -> None:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._configure_functions(user32, kernel32)
+        self._user32 = user32
+        callback_type = ctypes.WINFUNCTYPE(
+            ctypes.c_ssize_t,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_size_t,
+            ctypes.c_ssize_t,
+        )
+
+        @callback_type
+        def window_proc(
+            hwnd: int | None,
+            message: int,
+            w_param: int,
+            l_param: int,
+        ) -> int:
+            try:
+                if message == _WM_INPUT:
+                    self._receive_raw_input(user32, l_param)
+                    return 0
+                if message == _WM_TIMER:
+                    now = datetime.now(timezone.utc)
+                    self._update_focus(user32, now)
+                    self._recorder.processor.flush_due(now)
+                    return 0
+                if message == _WM_CLOSE:
+                    user32.DestroyWindow(hwnd)
+                    return 0
+                if message == _WM_DESTROY:
+                    user32.PostQuitMessage(0)
+                    return 0
+                return int(user32.DefWindowProcW(hwnd, message, w_param, l_param))
+            except Exception as error:
+                self._thread_error = error
+                user32.PostQuitMessage(1)
+                return 0
+
+        class_name = f"PetRawInputWindow_{threading.get_ident()}"
+        instance = kernel32.GetModuleHandleW(None)
+        window_class = _WNDCLASSW(
+            lpfnWndProc=ctypes.cast(window_proc, ctypes.c_void_p),
+            hInstance=instance,
+            lpszClassName=class_name,
+        )
+        atom = user32.RegisterClassW(ctypes.byref(window_class))
+        if not atom:
+            raise _last_windows_error("注册 Raw Input 消息窗口")
+        created_hwnd = 0
+        devices_registered = False
+        try:
+            hwnd_message = ctypes.c_void_p(-3 & ((1 << (ctypes.sizeof(ctypes.c_void_p) * 8)) - 1))
+            hwnd = user32.CreateWindowExW(
+                0,
+                class_name,
+                class_name,
+                0,
+                0,
+                0,
+                0,
+                0,
+                hwnd_message,
+                None,
+                instance,
+                None,
+            )
+            if not hwnd:
+                raise _last_windows_error("创建 Raw Input 消息窗口")
+            created_hwnd = int(hwnd)
+            self._window_handle = created_hwnd
+            self._register_devices(user32, self._window_handle)
+            devices_registered = True
+            if not user32.SetTimer(self._window_handle, 1, 10, None):
+                raise _last_windows_error("启动 Raw Input 前台状态计时器")
+            self._update_focus(user32, datetime.now(timezone.utc))
+            self._ready.set()
+            message = _MSG()
+            while True:
+                result = user32.GetMessageW(ctypes.byref(message), None, 0, 0)
+                if result == 0:
+                    break
+                if result == -1:
+                    raise _last_windows_error("读取 Raw Input 消息")
+                user32.TranslateMessage(ctypes.byref(message))
+                user32.DispatchMessageW(ctypes.byref(message))
+        finally:
+            if devices_registered:
+                self._unregister_devices(user32)
+            if created_hwnd and user32.IsWindow(created_hwnd):
+                user32.DestroyWindow(created_hwnd)
+            self._window_handle = 0
+            user32.UnregisterClassW(class_name, instance)
+        if self._thread_error is not None:
+            raise self._thread_error
+
+    def _register_devices(self, user32: object, hwnd: int) -> None:
+        devices = (_RAWINPUTDEVICE * 2)(
+            _RAWINPUTDEVICE(
+                _HID_USAGE_PAGE_GENERIC,
+                _HID_USAGE_GENERIC_MOUSE,
+                _RIDEV_INPUTSINK,
+                hwnd,
+            ),
+            _RAWINPUTDEVICE(
+                _HID_USAGE_PAGE_GENERIC,
+                _HID_USAGE_GENERIC_KEYBOARD,
+                _RIDEV_INPUTSINK,
+                hwnd,
+            ),
+        )
+        if not user32.RegisterRawInputDevices(
+            devices,
+            len(devices),
+            ctypes.sizeof(_RAWINPUTDEVICE),
+        ):
+            raise _last_windows_error("注册 Windows Raw Input 设备")
+
+    def _unregister_devices(self, user32: object) -> None:
+        devices = (_RAWINPUTDEVICE * 2)(
+            _RAWINPUTDEVICE(
+                _HID_USAGE_PAGE_GENERIC,
+                _HID_USAGE_GENERIC_MOUSE,
+                _RIDEV_REMOVE,
+                None,
+            ),
+            _RAWINPUTDEVICE(
+                _HID_USAGE_PAGE_GENERIC,
+                _HID_USAGE_GENERIC_KEYBOARD,
+                _RIDEV_REMOVE,
+                None,
+            ),
+        )
+        if not user32.RegisterRawInputDevices(
+            devices,
+            len(devices),
+            ctypes.sizeof(_RAWINPUTDEVICE),
+        ):
+            raise _last_windows_error("注销 Windows Raw Input 设备")
+
+    def _receive_raw_input(self, user32: object, raw_handle: int) -> None:
+        size = ctypes.c_uint32()
+        header_size = ctypes.sizeof(_RAWINPUTHEADER)
+        result = user32.GetRawInputData(
+            raw_handle,
+            _RID_INPUT,
+            None,
+            ctypes.byref(size),
+            header_size,
+        )
+        if result == 0xFFFFFFFF:
+            raise _last_windows_error("读取 Raw Input 大小")
+        buffer = ctypes.create_string_buffer(size.value)
+        result = user32.GetRawInputData(
+            raw_handle,
+            _RID_INPUT,
+            buffer,
+            ctypes.byref(size),
+            header_size,
+        )
+        if result == 0xFFFFFFFF or result != size.value:
+            raise _last_windows_error("读取 Raw Input 数据")
+        raw = ctypes.cast(buffer, ctypes.POINTER(_RAWINPUT)).contents
+        timestamp = datetime.now(timezone.utc)
+        foreground = self._update_focus(user32, timestamp)
+        if raw.header.dwType == _RIM_TYPEKEYBOARD:
+            self._record_keyboard(raw.keyboard, timestamp, foreground)
+        elif raw.header.dwType == _RIM_TYPEMOUSE:
+            self._record_mouse(raw.mouse, timestamp, foreground)
+
+    def _record_keyboard(
+        self,
+        keyboard: _RAWKEYBOARD,
+        timestamp: datetime,
+        foreground: bool,
+    ) -> None:
+        name = _VIRTUAL_KEY_NAMES.get(int(keyboard.VKey))
+        if name is None:
+            return
+        self._recorder.processor.process(
+            InputSample(
+                timestamp,
+                "key",
+                foreground,
+                name=name,
+                pressed=not bool(keyboard.Flags & _RI_KEY_BREAK),
+            )
+        )
+
+    def _record_mouse(
+        self,
+        mouse: _RAWMOUSE,
+        timestamp: datetime,
+        foreground: bool,
+    ) -> None:
+        relative = not bool(mouse.usFlags & _MOUSE_MOVE_ABSOLUTE)
+        self._recorder.processor.process(
+            InputSample(
+                timestamp,
+                "move",
+                foreground,
+                dx=int(mouse.lLastX),
+                dy=int(mouse.lLastY),
+                relative=relative,
+            )
+        )
+        flags = int(mouse.usButtonFlags)
+        button_flags = (
+            (_RI_MOUSE_LEFT_BUTTON_DOWN, "MouseLeft", True),
+            (_RI_MOUSE_LEFT_BUTTON_UP, "MouseLeft", False),
+            (_RI_MOUSE_RIGHT_BUTTON_DOWN, "MouseRight", True),
+            (_RI_MOUSE_RIGHT_BUTTON_UP, "MouseRight", False),
+            (_RI_MOUSE_MIDDLE_BUTTON_DOWN, "MouseMiddle", True),
+            (_RI_MOUSE_MIDDLE_BUTTON_UP, "MouseMiddle", False),
+            (_RI_MOUSE_BUTTON_4_DOWN, "Mouse4", True),
+            (_RI_MOUSE_BUTTON_4_UP, "Mouse4", False),
+            (_RI_MOUSE_BUTTON_5_DOWN, "Mouse5", True),
+            (_RI_MOUSE_BUTTON_5_UP, "Mouse5", False),
+        )
+        for flag, name, pressed in button_flags:
+            if flags & flag:
+                self._recorder.processor.process(
+                    InputSample(
+                        timestamp,
+                        "mouse_button",
+                        foreground,
+                        name=name,
+                        pressed=pressed,
+                    )
+                )
+        if flags & _RI_MOUSE_WHEEL:
+            delta = ctypes.c_int16(mouse.usButtonData).value
+            if delta:
+                self._recorder.processor.process(
+                    InputSample(
+                        timestamp,
+                        "wheel",
+                        foreground,
+                        name="WheelUp" if delta > 0 else "WheelDown",
+                    )
+                )
+
+    def _update_focus(self, user32: object, timestamp: datetime) -> bool:
+        foreground = int(user32.GetForegroundWindow() or 0) == self._target_hwnd
+        self._recorder.processor.set_foreground(foreground, timestamp)
+        return foreground
+
+    @staticmethod
+    def _configure_functions(user32: object, kernel32: object) -> None:
+        user32.GetForegroundWindow.argtypes = []
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        user32.IsWindow.argtypes = [ctypes.c_void_p]
+        user32.IsWindow.restype = ctypes.c_bool
+        user32.RegisterClassW.argtypes = [ctypes.POINTER(_WNDCLASSW)]
+        user32.RegisterClassW.restype = ctypes.c_uint16
+        user32.UnregisterClassW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p]
+        user32.UnregisterClassW.restype = ctypes.c_bool
+        user32.CreateWindowExW.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_wchar_p,
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_int32,
+            ctypes.c_int32,
+            ctypes.c_int32,
+            ctypes.c_int32,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        user32.CreateWindowExW.restype = ctypes.c_void_p
+        user32.DefWindowProcW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_size_t,
+            ctypes.c_ssize_t,
+        ]
+        user32.DefWindowProcW.restype = ctypes.c_ssize_t
+        user32.DestroyWindow.argtypes = [ctypes.c_void_p]
+        user32.DestroyWindow.restype = ctypes.c_bool
+        user32.PostQuitMessage.argtypes = [ctypes.c_int32]
+        user32.PostQuitMessage.restype = None
+        user32.RegisterRawInputDevices.argtypes = [
+            ctypes.POINTER(_RAWINPUTDEVICE),
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+        ]
+        user32.RegisterRawInputDevices.restype = ctypes.c_bool
+        user32.GetRawInputData.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_uint32,
+        ]
+        user32.GetRawInputData.restype = ctypes.c_uint32
+        user32.SetTimer.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        user32.SetTimer.restype = ctypes.c_size_t
+        user32.GetMessageW.argtypes = [
+            ctypes.POINTER(_MSG),
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+        ]
+        user32.GetMessageW.restype = ctypes.c_int32
+        user32.TranslateMessage.argtypes = [ctypes.POINTER(_MSG)]
+        user32.TranslateMessage.restype = ctypes.c_bool
+        user32.DispatchMessageW.argtypes = [ctypes.POINTER(_MSG)]
+        user32.DispatchMessageW.restype = ctypes.c_ssize_t
+        user32.PostMessageW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_size_t,
+            ctypes.c_ssize_t,
+        ]
+        user32.PostMessageW.restype = ctypes.c_bool
+        kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+        kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+
+
+def empty_input_summary() -> dict[str, object]:
+    return InputStatistics().summary()
+
+
+def _utc(timestamp: datetime) -> datetime:
+    if timestamp.tzinfo is None:
+        raise ValueError("input timestamps must include a timezone")
+    return timestamp.astimezone(timezone.utc)
+
+
+def _percentile(ordered: list[float], percentile: float) -> float:
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * percentile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+
+def _last_windows_error(action: str) -> InputTelemetryError:
+    error_code = ctypes.get_last_error()
+    detail = ctypes.WinError(error_code) if error_code else "未知 Windows 错误"
+    return InputTelemetryError(f"{action}失败：{detail}")
