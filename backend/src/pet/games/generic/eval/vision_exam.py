@@ -113,10 +113,15 @@ class ExamVariant:
     region_mode: RegionMode
     region_sparsity_max: float
     output_mode: OutputMode
+    max_tokens_override: int | None = None
 
     @property
     def max_tokens(self) -> int:
-        return OUTPUT_MAX_TOKENS[self.output_mode]
+        return (
+            self.max_tokens_override
+            if self.max_tokens_override is not None
+            else OUTPUT_MAX_TOKENS[self.output_mode]
+        )
 
     @property
     def prompt_path(self) -> Path:
@@ -177,6 +182,8 @@ class ModelTarget:
     reasoning_disabled: bool = False
     provider_lock_status: str = "未请求"
     provider_endpoint: str | None = None
+    provider_display_name: str | None = None
+    provider_region: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,8 +205,10 @@ class ExamRecord:
     requested_model: str
     actual_model: str | None
     provider: str | None
+    provider_region: str | None
     response_text: str
     error: str | None
+    skipped: bool
     latency_ms: float | None
     input_tokens: int | None
     output_tokens: int | None
@@ -839,9 +848,11 @@ def _record_from_result(
         target_label=target.label,
         requested_model=target.model,
         actual_model=result.model,
-        provider=result.provider or target.provider,
+        provider=result.provider or target.provider_display_name or target.provider,
+        provider_region=target.provider_region,
         response_text=result.text,
         error=error,
+        skipped=False,
         latency_ms=result.latency_seconds * 1000,
         input_tokens=result.usage.prompt_tokens,
         output_tokens=result.usage.completion_tokens,
@@ -897,14 +908,13 @@ def _failed_record(
         actual_model=None,
         provider=(
             provider
-            or (
-                SPEED_ROUND_PROVIDER_NAME
-                if target.provider_lock_status == "已锁定"
-                else target.provider
-            )
+            or target.provider_display_name
+            or target.provider
         ),
+        provider_region=target.provider_region,
         response_text="",
         error=error,
+        skipped=False,
         latency_ms=latency_ms,
         input_tokens=None,
         output_tokens=None,
@@ -960,11 +970,13 @@ CSV_COLUMNS = (
     "实际模型",
     "服务商",
     "实际上游",
+    "实际上游地区",
     "TTFT毫秒",
     "是否流式",
     "第几遍",
     "回答原文",
     "错误原文",
+    "是否跳过",
     "往返毫秒",
     "输入token",
     "实际输出token",
@@ -1436,11 +1448,13 @@ def _write_csv(path: Path, records: Sequence[ExamRecord]) -> None:
                     "实际模型": record.actual_model or "",
                     "服务商": record.provider or "",
                     "实际上游": record.provider or "",
+                    "实际上游地区": record.provider_region or "地区未知",
                     "TTFT毫秒": _optional_number(record.ttft_ms, 3),
                     "是否流式": str(record.streamed).lower(),
                     "第几遍": record.repetition,
                     "回答原文": record.response_text,
                     "错误原文": record.error or "",
+                    "是否跳过": str(record.skipped).lower(),
                     "往返毫秒": _optional_number(record.latency_ms, 3),
                     "输入token": record.input_tokens if record.input_tokens is not None else "",
                     "实际输出token": (
@@ -1502,7 +1516,8 @@ def summarize(records: Sequence[ExamRecord]) -> dict[str, object]:
             ),
         },
         "total_actual_cost_usd": sum(_record_actual_cost(record) for record in records),
-        "failures": sum(not record.succeeded for record in records),
+        "failures": sum(not record.succeeded and not record.skipped for record in records),
+        "skipped": sum(record.skipped for record in records),
         "truncated": sum(record.truncated for record in records),
         "ttft_nonempty": sum(record.ttft_ms is not None for record in records),
         "streamed": sum(record.streamed for record in records),
@@ -1523,48 +1538,51 @@ def _group_summary(
 
 
 def _summary_row(records: Sequence[ExamRecord]) -> dict[str, object]:
-    successful = [item for item in records if item.succeeded]
-    latencies = [item.latency_ms for item in records if item.latency_ms is not None]
+    attempted = [item for item in records if not item.skipped]
+    successful = [item for item in attempted if item.succeeded]
+    latencies = [item.latency_ms for item in attempted if item.latency_ms is not None]
     token_totals = [
         item.input_tokens + item.output_tokens
-        for item in records
+        for item in attempted
         if item.input_tokens is not None and item.output_tokens is not None
     ]
     input_tokens = [
-        item.input_tokens for item in records if item.input_tokens is not None
+        item.input_tokens for item in attempted if item.input_tokens is not None
     ]
     costs = [
         item.configured_cost_usd
-        for item in records
+        for item in attempted
         if item.configured_cost_usd is not None
     ]
-    actual_costs = [_record_actual_cost(item) for item in records]
+    actual_costs = [_record_actual_cost(item) for item in attempted]
     visible_tokens = [
         item.visible_output_tokens
-        for item in records
+        for item in attempted
         if item.visible_output_tokens is not None
     ]
     reasoning_tokens = [
         item.reasoning_tokens
-        for item in records
+        for item in attempted
         if item.reasoning_tokens is not None
     ]
-    ttft_values = [item.ttft_ms for item in records if item.ttft_ms is not None]
-    total_frames = sum(len(item.image_dimensions) for item in records)
-    failure_count = len(records) - len(successful)
-    truncated_count = sum(item.truncated for item in records)
+    ttft_values = [item.ttft_ms for item in attempted if item.ttft_ms is not None]
+    total_frames = sum(len(item.image_dimensions) for item in attempted)
+    failure_count = len(attempted) - len(successful)
+    truncated_count = sum(item.truncated for item in attempted)
     return {
         "attempts": len(records),
+        "executed_attempts": len(attempted),
+        "skipped": len(records) - len(attempted),
         "successes": len(successful),
         "failures": failure_count,
-        "failure_rate": failure_count / len(records) if records else None,
+        "failure_rate": failure_count / len(attempted) if attempted else None,
         "latency_median_ms": statistics.median(latencies) if latencies else None,
         "latency_p90_ms": _percentile(latencies, 0.9) if latencies else None,
         "latency_max_ms": max(latencies) if latencies else None,
         "ttft_median_ms": statistics.median(ttft_values) if ttft_values else None,
         "ttft_p90_ms": _percentile(ttft_values, 0.9) if ttft_values else None,
         "ttft_max_ms": max(ttft_values) if ttft_values else None,
-        "ttft_nonempty_rate": len(ttft_values) / len(records) if records else None,
+        "ttft_nonempty_rate": len(ttft_values) / len(attempted) if attempted else None,
         "average_tokens_per_attempt": statistics.fmean(token_totals) if token_totals else None,
         "average_input_tokens_per_attempt": (
             statistics.fmean(input_tokens) if input_tokens else None
@@ -1923,6 +1941,9 @@ def targets_from_resolution(
             ),
             provider_endpoint=(
                 model.selected_provider_endpoint if lock_selected_provider else None
+            ),
+            provider_display_name=(
+                model.selected_provider_name if lock_selected_provider else None
             ),
         )
         for model in resolution.models
