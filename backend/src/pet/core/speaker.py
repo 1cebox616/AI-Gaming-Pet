@@ -9,7 +9,7 @@ import logging
 
 from pet.core.adapter_api import SpeechRequest
 from pet.core.bridge import LlmRuntimeStateMessage, PetBridge
-from pet.core.config import LlmConfig
+from pet.core.config import LlmConfig, resolve_llm_profile
 from pet.core.gate import check_hard_violations
 from pet.core.lines import Utterance
 from pet.core.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
@@ -40,11 +40,7 @@ class OnlineCommentaryRuntime:
     ) -> None:
         self._configuration = configuration
         self._bridge = bridge
-        self._client_factory = client_factory or (
-            lambda timeout_seconds: OpenRouterClient.from_env(
-                timeout_seconds=timeout_seconds
-            )
-        )
+        self._client_factory = client_factory
         self._client: LlmClientProtocol | None = None
         self._profile_clients: dict[str, LlmClientProtocol] = {}
         self._queue: asyncio.Queue[_Request | None] | None = None
@@ -73,7 +69,7 @@ class OnlineCommentaryRuntime:
             logger.info("live LLM disabled; using templates: %s", self._reason)
             return
         try:
-            self._client = self._client_factory(self._configuration.timeout_seconds)
+            self._client = self._create_client("默认", self._configuration)
         except LlmError as error:
             self._reason = "环境变量缺失"
             logger.info("live LLM unavailable; using templates: %s", error)
@@ -186,9 +182,23 @@ class OnlineCommentaryRuntime:
             return self._client
         client = self._profile_clients.get(profile_id)
         if client is None:
-            client = self._client_factory(configuration.timeout_seconds)
+            client = self._create_client(profile_id, configuration)
             self._profile_clients[profile_id] = client
         return client
+
+    def _create_client(
+        self,
+        profile_name: str,
+        configuration: LlmConfig,
+    ) -> LlmClientProtocol:
+        if self._client_factory is not None:
+            return self._client_factory(configuration.timeout_seconds)
+        return OpenRouterClient.from_profile(
+            profile_name=profile_name,
+            base_url=configuration.base_url,
+            api_key_env=configuration.api_key_env,
+            timeout_seconds=configuration.timeout_seconds,
+        )
 
     async def _failed(self, request: _Request, reason: str) -> None:
         self._consecutive_failures += 1
@@ -228,7 +238,7 @@ def _request_configuration(
     if profile is None:
         logger.warning("unknown LLM profile %r; using the default profile", profile_id)
         return configuration
-    return configuration.model_copy(update=profile.model_dump(exclude_none=True))
+    return resolve_llm_profile(configuration, profile_id)
 
 
 def _validated_text(result: LlmResult, request: SpeechRequest) -> str:

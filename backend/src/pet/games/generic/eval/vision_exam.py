@@ -184,6 +184,8 @@ class ModelTarget:
     provider_endpoint: str | None = None
     provider_display_name: str | None = None
     provider_region: str | None = None
+    endpoint_host: str | None = None
+    reasoning_parameter_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +208,7 @@ class ExamRecord:
     actual_model: str | None
     provider: str | None
     provider_region: str | None
+    endpoint_host: str | None
     response_text: str
     error: str | None
     skipped: bool
@@ -763,7 +766,15 @@ def _run_attempt(
             "max_image_edge": None,
             "max_tokens": variant.max_tokens,
             "temperature": target.temperature,
-            "reasoning_enabled": False if target.reasoning_disabled else None,
+            "reasoning_effort": (
+                "none" if target.reasoning_parameter_mode == "effort_none" else None
+            ),
+            "reasoning_enabled": (
+                False
+                if target.reasoning_disabled
+                or target.reasoning_parameter_mode == "enabled_false"
+                else None
+            ),
         }
         if streaming:
             try:
@@ -850,6 +861,7 @@ def _record_from_result(
         actual_model=result.model,
         provider=result.provider or target.provider_display_name or target.provider,
         provider_region=target.provider_region,
+        endpoint_host=target.endpoint_host,
         response_text=result.text,
         error=error,
         skipped=False,
@@ -912,6 +924,7 @@ def _failed_record(
             or target.provider
         ),
         provider_region=target.provider_region,
+        endpoint_host=target.endpoint_host,
         response_text="",
         error=error,
         skipped=False,
@@ -971,6 +984,7 @@ CSV_COLUMNS = (
     "服务商",
     "实际上游",
     "实际上游地区",
+    "端点主机名",
     "TTFT毫秒",
     "是否流式",
     "第几遍",
@@ -1449,6 +1463,7 @@ def _write_csv(path: Path, records: Sequence[ExamRecord]) -> None:
                     "服务商": record.provider or "",
                     "实际上游": record.provider or "",
                     "实际上游地区": record.provider_region or "地区未知",
+                    "端点主机名": record.endpoint_host or "",
                     "TTFT毫秒": _optional_number(record.ttft_ms, 3),
                     "是否流式": str(record.streamed).lower(),
                     "第几遍": record.repetition,

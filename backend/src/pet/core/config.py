@@ -10,6 +10,10 @@ from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+
+DEFAULT_LLM_API_KEY_ENV = "OPENROUTER_API_KEY"
+ENVIRONMENT_VARIABLE_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config.toml"
@@ -98,6 +102,11 @@ class LlmProfileConfig(BaseModel):
     enabled: bool | None = None
     model: str | None = None
     provider: str | None = None
+    base_url: str | None = None
+    api_key_env: str = Field(
+        default=DEFAULT_LLM_API_KEY_ENV,
+        pattern=ENVIRONMENT_VARIABLE_PATTERN,
+    )
     temperature: float | None = Field(default=None, ge=0, le=2)
     timeout_seconds: float | None = Field(default=None, gt=0, le=30)
     max_tokens: int | None = Field(default=None, ge=1, le=2048)
@@ -111,11 +120,29 @@ class LlmConfig(BaseModel):
     enabled: bool = False
     model: str = ""
     provider: str = ""
+    base_url: str | None = None
+    api_key_env: str = Field(
+        default=DEFAULT_LLM_API_KEY_ENV,
+        pattern=ENVIRONMENT_VARIABLE_PATTERN,
+    )
     temperature: float = Field(default=0.9, ge=0, le=2)
     # M3-T10: 3 seconds is over three times the offline 0.8-second event P95.
     timeout_seconds: float = Field(default=3.0, gt=0, le=30)
     max_tokens: int = Field(default=256, ge=1, le=2048)
     profiles: dict[str, LlmProfileConfig] = Field(default_factory=dict)
+
+
+def resolve_llm_profile(
+    configuration: LlmConfig,
+    profile_id: str | None,
+) -> LlmConfig:
+    """Return one effective model profile without mutating shared configuration."""
+    if profile_id is None:
+        return configuration
+    profile = configuration.profiles.get(profile_id)
+    if profile is None:
+        raise ValueError(f"未知模型档位：{profile_id}")
+    return configuration.model_copy(update=profile.model_dump(exclude_none=True))
 
 
 class AdapterConfig(BaseModel):

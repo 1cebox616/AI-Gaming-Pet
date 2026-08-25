@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import base64
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -9,8 +10,10 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import sys
 import time
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, cast
+from urllib.parse import urlparse
 
 import httpx
 from PIL import Image
@@ -74,6 +77,49 @@ class LlmAnalysisResult:
     latency_seconds: float
     model: str
     provider: str | None
+
+
+ReasoningParameterMode = Literal["omitted", "effort_none", "enabled_false"]
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningProbeAttempt:
+    """One measured reasoning-parameter spelling attempted by the probe."""
+
+    mode: ReasoningParameterMode
+    accepted: bool
+    reasoning_tokens: int | None
+    error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LlmProbeResult:
+    """Connectivity evidence required before a custom-endpoint exam."""
+
+    profile_name: str
+    environment_variable: str
+    environment_is_set: bool
+    model_list_status: str
+    model_available: bool
+    text_available: bool
+    image_available: bool
+    streaming_available: bool
+    ttft_ms: float | None
+    latency_ms: float | None
+    reasoning_attempts: tuple[ReasoningProbeAttempt, ...]
+    selected_reasoning_mode: ReasoningParameterMode | None
+    error: str | None
+
+    @property
+    def passed(self) -> bool:
+        return (
+            self.environment_is_set
+            and self.model_available
+            and self.text_available
+            and self.image_available
+            and self.streaming_available
+            and self.error is None
+        )
 
 
 class LlmError(Exception):
@@ -189,15 +235,25 @@ class OpenRouterClient:
         self,
         api_key: str,
         *,
-        base_url: str = OPENROUTER_BASE_URL,
+        base_url: str | None = None,
         timeout_seconds: float = 30.0,
         transport: httpx.BaseTransport | None = None,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         if not api_key.strip():
-            raise LlmError("OpenRouter API 密钥为空")
+            raise LlmError("模型端点 API 密钥为空")
+        selected_base_url = base_url or OPENROUTER_BASE_URL
+        # Provider routing is an extension of the default endpoint, not part of
+        # the OpenAI-compatible contract. The presence of a configured base_url,
+        # rather than any vendor/host name, is the only switch used here.
+        self._allows_provider_routing = base_url is None
+        self._endpoint_label = (
+            "OpenRouter" if self._allows_provider_routing else "自定义模型端点"
+        )
+        parsed_url = urlparse(selected_base_url)
+        self.endpoint_host = parsed_url.hostname or ""
         self._client = httpx.Client(
-            base_url=f"{base_url.rstrip('/')}/",
+            base_url=f"{selected_base_url.rstrip('/')}/",
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=timeout_seconds,
             transport=transport,
@@ -208,7 +264,7 @@ class OpenRouterClient:
     def from_env(
         cls,
         *,
-        base_url: str = OPENROUTER_BASE_URL,
+        base_url: str | None = None,
         timeout_seconds: float = 30.0,
         transport: httpx.BaseTransport | None = None,
     ) -> OpenRouterClient:
@@ -217,6 +273,30 @@ class OpenRouterClient:
         if api_key is None or not api_key.strip():
             raise LlmError(
                 f"未设置环境变量 {OPENROUTER_API_KEY_ENV}；无法调用 OpenRouter"
+            )
+        return cls(
+            api_key,
+            base_url=base_url,
+            timeout_seconds=timeout_seconds,
+            transport=transport,
+        )
+
+    @classmethod
+    def from_profile(
+        cls,
+        *,
+        profile_name: str,
+        base_url: str | None,
+        api_key_env: str,
+        timeout_seconds: float,
+        transport: httpx.BaseTransport | None = None,
+    ) -> OpenRouterClient:
+        """Build one profile client from its exact credential variable."""
+        api_key = os.environ.get(api_key_env)
+        if api_key is None or not api_key.strip():
+            raise LlmError(
+                f"模型档位 {profile_name} 缺少环境变量 {api_key_env}；"
+                "未回退到其他密钥或端点"
             )
         return cls(
             api_key,
@@ -251,6 +331,33 @@ class OpenRouterClient:
             seed=seed,
             reasoning_effort=reasoning_effort,
             reasoning_enabled=reasoning_enabled,
+        )
+
+    def list_model_ids(self) -> tuple[str, ...] | None:
+        """Return advertised model IDs, or None when listing is unsupported."""
+        try:
+            response = self._client.get("models")
+        except httpx.TimeoutException as error:
+            raise LlmError(f"{self._endpoint_label}模型列表请求超时：{error}") from error
+        except httpx.RequestError as error:
+            raise LlmError(f"{self._endpoint_label}模型列表网络失败：{error}") from error
+        if response.status_code in {404, 405, 501}:
+            return None
+        if not response.is_success:
+            raise LlmError(
+                _response_error_message(response, service_label=self._endpoint_label),
+                status_code=response.status_code,
+            )
+        try:
+            payload: object = response.json()
+        except ValueError as error:
+            raise LlmError(f"{self._endpoint_label}模型列表不是合法 JSON") from error
+        if not isinstance(payload, Mapping) or not isinstance(payload.get("data"), list):
+            raise LlmError(f"{self._endpoint_label}模型列表缺少 data 数组")
+        return tuple(
+            item["id"]
+            for item in payload["data"]
+            if isinstance(item, Mapping) and isinstance(item.get("id"), str)
         )
 
     def complete_with_images(
@@ -340,9 +447,10 @@ class OpenRouterClient:
             "temperature": temperature,
             "stream": False,
         }
-        if provider is not None:
+        effective_provider = provider if self._allows_provider_routing else None
+        if effective_provider is not None:
             request_body["provider"] = {
-                "only": [provider],
+                "only": [effective_provider],
                 "allow_fallbacks": False,
             }
         if seed is not None:
@@ -364,18 +472,18 @@ class OpenRouterClient:
         except httpx.TimeoutException as error:
             latency = time.perf_counter() - started_at
             raise LlmError(
-                f"OpenRouter 请求超时：{error}", latency_seconds=latency
+                f"{self._endpoint_label}请求超时：{error}", latency_seconds=latency
             ) from error
         except httpx.RequestError as error:
             latency = time.perf_counter() - started_at
             raise LlmError(
-                f"OpenRouter 网络请求失败：{error}", latency_seconds=latency
+                f"{self._endpoint_label}网络请求失败：{error}", latency_seconds=latency
             ) from error
 
         latency = time.perf_counter() - started_at
         if not response.is_success:
             raise LlmError(
-                _response_error_message(response),
+                _response_error_message(response, service_label=self._endpoint_label),
                 status_code=response.status_code,
                 latency_seconds=latency,
             )
@@ -385,7 +493,7 @@ class OpenRouterClient:
             result = _parse_result(payload, latency_seconds=latency)
         except (TypeError, ValueError, KeyError, IndexError) as error:
             raise LlmError(
-                f"OpenRouter 返回了无法解析的成功响应：{error}",
+                f"{self._endpoint_label}返回了无法解析的成功响应：{error}",
                 status_code=response.status_code,
                 latency_seconds=latency,
             ) from error
@@ -412,9 +520,10 @@ class OpenRouterClient:
             "temperature": temperature,
             "stream": True,
         }
+        effective_provider = provider if self._allows_provider_routing else None
         _apply_provider_and_reasoning(
             request_body,
-            provider=provider,
+            provider=effective_provider,
             seed=seed,
             reasoning_effort=reasoning_effort,
             reasoning_enabled=reasoning_enabled,
@@ -431,7 +540,9 @@ class OpenRouterClient:
             ) as response:
                 if not response.is_success:
                     response.read()
-                    message = _response_error_message(response)
+                    message = _response_error_message(
+                        response, service_label=self._endpoint_label
+                    )
                     error_type = (
                         LlmStreamingUnsupported
                         if _streaming_is_unsupported(response, message)
@@ -441,16 +552,16 @@ class OpenRouterClient:
                         message,
                         status_code=response.status_code,
                         latency_seconds=self._clock() - started_at,
-                        provider=provider,
+                        provider=effective_provider,
                     )
                 media_type = response.headers.get("content-type", "").lower()
                 if media_type and "text/event-stream" not in media_type:
                     response.read()
                     raise LlmStreamingUnsupported(
-                        "OpenRouter 上游未返回流式 SSE；改用非流式请求",
+                        f"{self._endpoint_label}未返回流式 SSE；改用非流式请求",
                         status_code=response.status_code,
                         latency_seconds=self._clock() - started_at,
-                        provider=provider,
+                        provider=effective_provider,
                     )
                 for line in response.iter_lines():
                     if not line or line.startswith(":") or not line.startswith("data:"):
@@ -481,30 +592,30 @@ class OpenRouterClient:
         except httpx.TimeoutException as error:
             latency = self._clock() - started_at
             raise LlmError(
-                f"OpenRouter 流式请求超时：{error}",
+                f"{self._endpoint_label}流式请求超时：{error}",
                 latency_seconds=latency,
-                provider=actual_provider or provider,
+                provider=actual_provider or effective_provider,
             ) from error
         except httpx.RequestError as error:
             latency = self._clock() - started_at
             raise LlmError(
-                f"OpenRouter 流式网络请求失败：{error}",
+                f"{self._endpoint_label}流式网络请求失败：{error}",
                 latency_seconds=latency,
-                provider=actual_provider or provider,
+                provider=actual_provider or effective_provider,
             ) from error
         latency = self._clock() - started_at
         if actual_model is None:
             raise LlmError(
-                "OpenRouter 流式响应缺少实际型号 ID",
+                f"{self._endpoint_label}流式响应缺少实际型号 ID",
                 latency_seconds=latency,
-                provider=actual_provider or provider,
+                provider=actual_provider or effective_provider,
             )
         return LlmResult(
             text="".join(text_parts).strip(),
             usage=usage,
             latency_seconds=latency,
             model=actual_model,
-            provider=actual_provider or provider,
+            provider=actual_provider or effective_provider,
             finish_reason=finish_reason,
             ttft_seconds=ttft_seconds,
             streamed=True,
@@ -544,9 +655,10 @@ class OpenRouterClient:
             "stream": True,
             "reasoning": {"effort": reasoning_effort},
         }
-        if provider is not None:
+        effective_provider = provider if self._allows_provider_routing else None
+        if effective_provider is not None:
             request_body["provider"] = {
-                "only": [provider],
+                "only": [effective_provider],
                 "allow_fallbacks": False,
             }
         if seed is not None:
@@ -567,7 +679,9 @@ class OpenRouterClient:
                 if not response.is_success:
                     response.read()
                     raise LlmError(
-                        _response_error_message(response),
+                        _response_error_message(
+                            response, service_label=self._endpoint_label
+                        ),
                         status_code=response.status_code,
                         latency_seconds=self._clock() - started_at,
                     )
@@ -823,7 +937,11 @@ def _parse_usage(usage: Mapping[str, object]) -> LlmUsage:
     )
 
 
-def _response_error_message(response: httpx.Response) -> str:
+def _response_error_message(
+    response: httpx.Response,
+    *,
+    service_label: str = "OpenRouter",
+) -> str:
     detail: str | None = None
     try:
         payload: Any = response.json()
@@ -836,7 +954,7 @@ def _response_error_message(response: httpx.Response) -> str:
     except ValueError:
         detail = None
     suffix = f"：{detail}" if detail else ""
-    return f"OpenRouter 请求失败（HTTP {response.status_code}）{suffix}"
+    return f"{service_label}请求失败（HTTP {response.status_code}）{suffix}"
 
 
 def _optional_int(value: object) -> int | None:
@@ -931,6 +1049,341 @@ def _image_data_url(
     return f"data:image/png;base64,{encoded}"
 
 
+def probe_llm_profile(
+    configuration: object,
+    profile_name: str,
+    *,
+    image_path: Path,
+    output: Callable[[str], None] = print,
+    injected_client: OpenRouterClient | None = None,
+) -> LlmProbeResult:
+    """Probe one configured profile without exposing its credential value."""
+    from pet.core.config import LlmConfig, resolve_llm_profile
+
+    if not isinstance(configuration, LlmConfig):
+        raise TypeError("configuration must be LlmConfig")
+    try:
+        profile = resolve_llm_profile(configuration, profile_name)
+    except ValueError as error:
+        output(f"档位检查：失败（{error}）")
+        return _probe_failure(profile_name, "", False, str(error))
+
+    environment_is_set = bool(os.environ.get(profile.api_key_env, "").strip())
+    output(
+        f"a. 环境变量 {profile.api_key_env}："
+        f"{'已设置' if environment_is_set else '未设置'}"
+    )
+    if not environment_is_set:
+        error = (
+            f"档位 {profile_name} 缺少环境变量 {profile.api_key_env}；"
+            "未尝试连接，也未回退"
+        )
+        output(f"停止：{error}")
+        return _probe_failure(
+            profile_name, profile.api_key_env, False, error
+        )
+    if not profile.model.strip():
+        error = f"档位 {profile_name} 没有目标模型 ID"
+        output(f"停止：{error}")
+        return _probe_failure(
+            profile_name, profile.api_key_env, True, error
+        )
+
+    owns_client = injected_client is None
+    client = injected_client or OpenRouterClient.from_profile(
+        profile_name=profile_name,
+        base_url=profile.base_url,
+        api_key_env=profile.api_key_env,
+        timeout_seconds=profile.timeout_seconds,
+    )
+    model_list_status = "未执行"
+    attempts: list[ReasoningProbeAttempt] = []
+    try:
+        try:
+            model_ids = client.list_model_ids()
+        except LlmError as error:
+            output(f"b. 模型列表接口：失败（{error}）")
+            return _probe_failure(
+                profile_name,
+                profile.api_key_env,
+                True,
+                str(error),
+                model_list_status="失败",
+            )
+        if model_ids is None:
+            model_list_status = "跳过（端点不支持）"
+            output(f"b. 模型列表接口：{model_list_status}")
+        else:
+            model_list_status = "可达"
+            output("b. 模型列表接口：可达")
+            if profile.model not in model_ids:
+                error = f"模型列表中没有档位 {profile_name} 的目标模型 ID"
+                output(f"停止：{error}")
+                return _probe_failure(
+                    profile_name,
+                    profile.api_key_env,
+                    True,
+                    error,
+                    model_list_status=model_list_status,
+                )
+
+        try:
+            omitted_result = client.complete(
+                model=profile.model,
+                provider=profile.provider or None,
+                system_prompt="只回答：OK",
+                user_prompt="连通性检查。",
+                max_tokens=8,
+                temperature=0.0,
+            )
+        except (LlmError, ValueError) as error:
+            output(f"c. 极小纯文本调用：失败（{error}）")
+            return _probe_failure(
+                profile_name,
+                profile.api_key_env,
+                True,
+                str(error),
+                model_list_status=model_list_status,
+            )
+        output("c. 极小纯文本调用：通过")
+        attempts.append(
+            ReasoningProbeAttempt(
+                "omitted",
+                True,
+                omitted_result.usage.reasoning_tokens,
+                None,
+            )
+        )
+
+        for mode in ("effort_none", "enabled_false"):
+            typed_mode = cast(ReasoningParameterMode, mode)
+            arguments = _reasoning_arguments(typed_mode)
+            try:
+                result = client.complete(
+                    model=profile.model,
+                    provider=profile.provider or None,
+                    system_prompt="只回答：OK",
+                    user_prompt="推理参数兼容性检查。",
+                    max_tokens=8,
+                    temperature=0.0,
+                    **arguments,
+                )
+            except (LlmError, ValueError) as error:
+                attempts.append(
+                    ReasoningProbeAttempt(typed_mode, False, None, str(error))
+                )
+                output(f"推理参数 {typed_mode}：拒绝（{error}）")
+            else:
+                attempts.append(
+                    ReasoningProbeAttempt(
+                        typed_mode,
+                        True,
+                        result.usage.reasoning_tokens,
+                        None,
+                    )
+                )
+                tokens = result.usage.reasoning_tokens
+                output(
+                    f"推理参数 {typed_mode}：接受；推理 token="
+                    f"{tokens if tokens is not None else '未返回'}"
+                )
+        selected_mode = _select_reasoning_mode(attempts)
+        output(f"推理参数实测选择：{selected_mode}")
+        reasoning_arguments = _reasoning_arguments(selected_mode)
+
+        try:
+            client.complete_with_images(
+                model=profile.model,
+                provider=profile.provider or None,
+                system_prompt="只描述画面中可见的颜色或形状。",
+                user_prompt="图像连通性检查。",
+                images=(LlmImage(image_path, "合成测试图", max_edge=64),),
+                max_image_edge=64,
+                max_tokens=16,
+                temperature=0.0,
+                **reasoning_arguments,
+            )
+        except (LlmError, ValueError, OSError) as error:
+            output(f"d. 图像调用：失败（{error}）")
+            return _probe_failure(
+                profile_name,
+                profile.api_key_env,
+                True,
+                str(error),
+                model_list_status=model_list_status,
+                attempts=tuple(attempts),
+                selected_mode=selected_mode,
+                text_available=True,
+                model_available=True,
+            )
+        output("d. 图像调用：通过")
+
+        try:
+            streamed = client.complete_with_images_stream(
+                model=profile.model,
+                provider=profile.provider or None,
+                system_prompt="只描述画面中可见的颜色或形状。",
+                user_prompt="流式图像连通性检查。",
+                images=(LlmImage(image_path, "合成测试图", max_edge=64),),
+                max_image_edge=64,
+                max_tokens=16,
+                temperature=0.0,
+                **reasoning_arguments,
+            )
+        except (LlmError, ValueError, OSError) as error:
+            output(f"e. 流式调用：失败（{error}）")
+            return _probe_failure(
+                profile_name,
+                profile.api_key_env,
+                True,
+                str(error),
+                model_list_status=model_list_status,
+                attempts=tuple(attempts),
+                selected_mode=selected_mode,
+                text_available=True,
+                model_available=True,
+                image_available=True,
+            )
+        ttft_ms = (
+            streamed.ttft_seconds * 1000
+            if streamed.ttft_seconds is not None
+            else None
+        )
+        latency_ms = streamed.latency_seconds * 1000
+        output(
+            "e. 流式调用：通过；TTFT="
+            f"{ttft_ms:.3f} ms；总时延={latency_ms:.3f} ms"
+            if ttft_ms is not None
+            else f"e. 流式调用：失败（响应没有可测 TTFT）；总时延={latency_ms:.3f} ms"
+        )
+        if ttft_ms is None:
+            return _probe_failure(
+                profile_name,
+                profile.api_key_env,
+                True,
+                "流式响应没有可测 TTFT",
+                model_list_status=model_list_status,
+                attempts=tuple(attempts),
+                selected_mode=selected_mode,
+                text_available=True,
+                model_available=True,
+                image_available=True,
+            )
+        return LlmProbeResult(
+            profile_name=profile_name,
+            environment_variable=profile.api_key_env,
+            environment_is_set=True,
+            model_list_status=model_list_status,
+            model_available=True,
+            text_available=True,
+            image_available=True,
+            streaming_available=True,
+            ttft_ms=ttft_ms,
+            latency_ms=latency_ms,
+            reasoning_attempts=tuple(attempts),
+            selected_reasoning_mode=selected_mode,
+            error=None,
+        )
+    finally:
+        if owns_client:
+            client.close()
+
+
+def _probe_failure(
+    profile_name: str,
+    environment_variable: str,
+    environment_is_set: bool,
+    error: str,
+    *,
+    model_list_status: str = "未执行",
+    attempts: tuple[ReasoningProbeAttempt, ...] = (),
+    selected_mode: ReasoningParameterMode | None = None,
+    model_available: bool = False,
+    text_available: bool = False,
+    image_available: bool = False,
+) -> LlmProbeResult:
+    return LlmProbeResult(
+        profile_name=profile_name,
+        environment_variable=environment_variable,
+        environment_is_set=environment_is_set,
+        model_list_status=model_list_status,
+        model_available=model_available,
+        text_available=text_available,
+        image_available=image_available,
+        streaming_available=False,
+        ttft_ms=None,
+        latency_ms=None,
+        reasoning_attempts=attempts,
+        selected_reasoning_mode=selected_mode,
+        error=error,
+    )
+
+
+def _reasoning_arguments(mode: ReasoningParameterMode) -> dict[str, object]:
+    if mode == "effort_none":
+        return {"reasoning_effort": "none"}
+    if mode == "enabled_false":
+        return {"reasoning_enabled": False}
+    return {}
+
+
+def _select_reasoning_mode(
+    attempts: Sequence[ReasoningProbeAttempt],
+) -> ReasoningParameterMode:
+    accepted = [attempt for attempt in attempts if attempt.accepted]
+    if not accepted:
+        raise LlmError("三种推理参数写法均被拒绝")
+    order = {"omitted": 0, "enabled_false": 1, "effort_none": 2}
+    selected = min(
+        accepted,
+        key=lambda attempt: (
+            attempt.reasoning_tokens is None,
+            attempt.reasoning_tokens if attempt.reasoning_tokens is not None else 0,
+            order[attempt.mode],
+        ),
+    )
+    return selected.mode
+
+
+def build_probe_parser() -> argparse.ArgumentParser:
+    """Build the standalone profile connectivity probe CLI."""
+    from pet.core.config import DEFAULT_CONFIG_PATH, LOCAL_CONFIG_PATH
+
+    parser = argparse.ArgumentParser(description="OpenAI 兼容模型档位连通性探针")
+    parser.add_argument("--probe", action="store_true", required=True)
+    parser.add_argument("--profile", required=True)
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument("--local-config", type=Path, default=LOCAL_CONFIG_PATH)
+    parser.add_argument(
+        "--fixture",
+        type=Path,
+        default=Path(__file__).resolve().parents[3]
+        / "tests"
+        / "fixtures"
+        / "vision-exam-frame-a.ppm",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run only the explicit foreground connectivity probe."""
+    from pet.core.config import load_config
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
+    arguments = build_probe_parser().parse_args(argv)
+    configuration = load_config(arguments.config, arguments.local_config)
+    result = probe_llm_profile(
+        configuration.llm,
+        arguments.profile,
+        image_path=arguments.fixture,
+    )
+    print(f"探针结论：{'全部通过' if result.passed else '未通过'}")
+    return 0 if result.passed else 2
+
+
 def image_upload_metadata(
     image: LlmImage,
     *,
@@ -983,3 +1436,7 @@ def _prepare_image_upload(
 def _smallest_limit(first: int | None, second: int | None) -> int | None:
     limits = tuple(value for value in (first, second) if value is not None)
     return min(limits) if limits else None
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
