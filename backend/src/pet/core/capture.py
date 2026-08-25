@@ -59,6 +59,10 @@ DEFAULT_NOISE_MULTIPLIER = 2.5
 DEFAULT_NOISE_MARGIN = 4.0 / 255.0
 DEFAULT_PERSISTENCE_POLLS = 2
 DEFAULT_CAMERA_MOTION_RATIO = 0.35
+# M5-T4 calibration proxies. These initial values are awaiting calibration too;
+# they measure misses and do not alter the production selector's decision.
+DEFAULT_STRONG_BLOCK_DELTA = 40.0 / 255.0
+DEFAULT_INPUT_MOTION_THRESHOLD = 20.0
 DEFAULT_RAW_WIDTH = 640
 DEFAULT_RAW_JPEG_QUALITY = 70
 DEFAULT_RAW_MAX_FILES = 5_000
@@ -930,6 +934,20 @@ class AdaptiveFrameSelector:
             vs_previous=self.detector.compare_prepared(previous, prepared),
             vs_baseline=self.detector.compare_prepared(baseline, prepared),
         )
+        decision = self.observe_prepared(prepared, now)
+        return SelectionObservation(prepared, comparisons, decision, is_first)
+
+    def observe_prepared(
+        self, prepared: PreparedFrame, now: float
+    ) -> SelectionDecision:
+        """Select one already-reduced frame with the exact online state machine.
+
+        Calibration reuses the same decoded frame across hundreds of parameter
+        combinations. Reusing the grayscale reductions changes no selector
+        logic and avoids repeatedly resizing the same read-only recording.
+        """
+        is_first = self._previous is None
+        baseline = self._baseline or prepared
         floors = np.asarray(
             [
                 (statistics.median(history) * self.noise_multiplier)
@@ -1031,7 +1049,7 @@ class AdaptiveFrameSelector:
                     float(np.median(floors)),
                 )
         self._previous = prepared
-        return SelectionObservation(prepared, comparisons, decision, is_first)
+        return decision
 
 
 CSV_HEADER = (
@@ -1225,11 +1243,23 @@ def _default_save_dir() -> Path:
     return backend_root / "recordings" / "capture" / started_at
 
 
+def _default_calibration_dir() -> Path:
+    backend_root = Path(__file__).resolve().parents[3]
+    started_at = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return backend_root / "eval-reports" / f"calibration-{started_at}"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="只抓一个游戏窗口的本地画面变化探针")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--watch", action="store_true", help="持续抓帧，Ctrl+C 停止")
     mode.add_argument("--replay", type=Path, metavar="RAW目录", help="离线重放 raw JPEG 流")
+    mode.add_argument(
+        "--calibrate",
+        nargs="+",
+        metavar="角色=会话目录",
+        help="在一个或多个含 raw/ 的录制会话上离线搜索检测参数",
+    )
     parser.add_argument(
         "--interval",
         type=_positive_float,
@@ -1317,6 +1347,25 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=DEFAULT_RAW_MAX_BYTES,
         help="全量流最大总字节数（默认 1073741824）",
+    )
+    parser.add_argument("--grid", type=Path, help="校准搜索空间 TOML（默认使用内置 432 组）")
+    parser.add_argument(
+        "--sample-stride",
+        type=_positive_int,
+        default=1,
+        help="校准时每隔多少张 raw 帧取一张（默认 1，即不抽样）",
+    )
+    parser.add_argument(
+        "--strong-block-delta",
+        type=_unit_interval,
+        default=DEFAULT_STRONG_BLOCK_DELTA,
+        help="局部剧变块阈值 0..1（默认 40/255，待校准）",
+    )
+    parser.add_argument(
+        "--input-motion-threshold",
+        type=_nonnegative_float,
+        default=DEFAULT_INPUT_MOTION_THRESHOLD,
+        help="轮询窗口鼠标位移阈值（默认 20 像素，待校准）",
     )
     return parser
 
@@ -1796,6 +1845,25 @@ def main() -> None:
     arguments = parser.parse_args()
     if arguments.replay is not None and arguments.record_input:
         parser.error("--record-input 只适用于 --watch；离线重放不读取实时键鼠")
+    if arguments.calibrate is not None:
+        from pet.core.capture_calibration import CalibrationOptions, run_calibration
+
+        output_dir = arguments.save_dir or _default_calibration_dir()
+        try:
+            run_calibration(
+                CalibrationOptions(
+                    session_specs=tuple(arguments.calibrate),
+                    output_dir=output_dir,
+                    grid_path=arguments.grid,
+                    sample_stride=arguments.sample_stride,
+                    strong_block_delta=arguments.strong_block_delta,
+                    input_motion_threshold=arguments.input_motion_threshold,
+                )
+            )
+            raise SystemExit(0)
+        except CaptureError as error:
+            print(f"操作停止：{error}", file=sys.stderr)
+            raise SystemExit(1) from error
     options = ProbeOptions(
         interval=arguments.interval,
         title=arguments.title,
