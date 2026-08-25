@@ -1,6 +1,6 @@
-# M5-T1 / M5-T1.5 窗口截屏与多指标画面变化检测报告
+# M5-T1 / M5-T1.5 / M5-T3 窗口截屏与帧选取报告
 
-统计日期：2026-08-23
+最后更新：2026-08-24
 
 ## 截屏后端选型
 
@@ -98,29 +98,49 @@ rg -n "^\s*(from|import)\s+(httpx|socket|urllib|requests|aiohttp|websockets)(\.|
 依赖一致性检查 `python -m pip check` 的实际输出为
 `No broken requirements found.`。
 
-## M5-T1.5 指标与性能实测
+## M5-T3 自适应块检测与性能实测
 
-`FrameChangeDetector` 本身仍无状态。它对任意一对可注入图像计算
-`mean_amplitude`、`changed_area`、`block_change`；探针外层分别保存上一轮询帧与
-上一次被策略判为变化并落盘的帧，因而每轮产生 `vs_previous`、`vs_baseline`
-两组、合计六个数。最长静默产生的强制帧不重置变化基线。
-默认落盘策略仍是 `mean_amplitude_vs_previous`、阈值仍是 `0.02`。默认 2 秒轮询
-也长于新增的 1 秒最短落盘间隔，因此未触发最长静默时，逐帧落盘时机与 M5-T1
-一致。三个指标及两种基线一共只有六种组合；任务文字中的“九种”与列出的数学
-组合不一致，本实现没有虚构另外三种策略。
+设计原则：**本地帧选取的首要目标是不漏掉应上传的帧，次要目标才是丢弃冗余帧。**
+因此下列值都是偏低的初始值，待新的全量录制用真实游戏重放校准，不是产品定值。
 
-性能测量脚本：`audit/measure_capture_metrics.py`。它先预热 5 次，再对 50 张
-1920x1080 RGB 合成图逐张计时；计时范围包括当前帧的两种灰度缩图，以及相对两种
-基线的六个指标，不包括合成图生成。实际输出：
+`FrameChangeDetector` 仍是无状态纯计算层，保留 M5-T1.5 的六个旧指标用于 CSV
+对照。实际落盘改由 `AdaptiveFrameSelector` 决定：画面缩到宽 320 灰度后分为
+16 行 × 9 列；每块相对“上一次真实变化并落盘的帧”计算平均绝对差。每块用最近
+20 次差值的滚动中位数 × 2.5 + 4/255 建立噪声地板，连续 2 轮超过地板才确认。
+确认块占比达到 0.35 视为镜头移动：照样保存，但不提供无意义的区域格子；其余
+持久变化保存具体格子。最长静默强制帧不重置真实变化基线。
+
+默认轮询间隔已从 2.0 秒改为 1.0 秒。`--strategy` 已删除；最短保存间隔 1.0 秒、
+最长静默 60 秒两条兜底保留。第一帧没有可比较对象，仍保存用于建立基线，并在
+闭集原因中记作 `forced`。每个后续保存帧都会额外保存紧邻的上一次成功轮询帧，
+文件名带 `-prev`；首帧之前没有帧，因此首帧是唯一合理例外。
+
+性能测量脚本为 `audit/measure_capture_metrics.py`：预热 5 次，再对 50 张
+1920×1080 RGB 合成图计时。范围包括六个旧指标、块差、滚动噪声地板、持久性与
+最终决策，不包括合成图生成。M5-T3 的最新实测输出记录在本节末尾；验收时没有
+降低 96 / 320 的默认缩放宽度或 16×9 网格来达标。
 
 ```text
 Input: 1920x1080 synthetic RGB image
 Warm-up runs: 5; measured runs: 50
-Six-metric median: 7.368 ms
-Six-metric maximum: 8.322 ms
+Six legacy metrics + adaptive block statistics median: 9.372 ms
+Six legacy metrics + adaptive block statistics maximum: 11.761 ms
 ```
 
-中位数 7.368 ms，低于 50 ms 约束；没有为了达标降低 96 / 320 的默认宽度。
+中位数 9.372 ms，低于 80 ms 验收上限。
+
+M5-T3 验收命令的实际结果：
+
+```text
+.venv\Scripts\python -m pytest tests\test_capture.py tests\test_layering.py -q
+33 passed
+
+.venv\Scripts\python -m pytest tests\ -q
+490 passed, 4 failed
+```
+
+4 项失败仍全部是 `tests/test_speech.py` 在本机找不到 OneCore 中文语音的既有环境项；
+M5-T3 新增测试、分层测试和其余回归全部通过。
 
 ## 产品负责人实测指引
 
@@ -130,30 +150,41 @@ Six-metric maximum: 8.322 ms
 
 ```powershell
 cd backend
-.venv\Scripts\python -m pet.core.capture --watch --title "窗口标题的一部分"
+.venv\Scripts\python -m pet.core.capture --watch --title "窗口标题的一部分" --record-all --label "游戏-场景"
 ```
 
 建议优先使用 `--title`，例如填游戏窗口标题的一小段。若不传 `--title`，探针会给
-3 秒让你切回游戏，然后锁定当时的前台窗口。启动横幅会显示保存目录和当前策略；
-按 Ctrl+C 停止，终端会打印六项指标的中位数、P90、P99、最大值，落盘与强制
-落盘次数，以及指标计算、抓帧耗时。
+3 秒让你切回游戏，然后锁定当时的前台窗口。默认每 1.0 秒轮询一次。建议本轮
+校准都加 `--record-all`：横幅会显眼提示正在保存每一次成功轮询，Ctrl+C 后会
+打印六项旧指标、判定原因占比、上传率、区域格子平均占比和耗时。
 
-调阈值或间隔：
+探针的新参数如下，全部是待真实重放校准的初始值：
+
+- `--noise-window 20`：每块保留多少次差值。
+- `--noise-multiplier 2.5` 与 `--noise-margin 0.0156862745`：噪声地板公式中的
+  `k` 与 `4/255`。
+- `--persistence-polls 2`：同一块连续几轮越过地板才确认。
+- `--camera-motion-ratio 0.35`：确认块达到 35% 时视为镜头移动。
+- `--min-save-interval 1.0`、`--max-silence 60.0`：连拍抑制和最长静默兜底。
+
+全量流默认写到同一会话目录的 `raw/`，宽 640、JPEG 质量固定为 70，独立保留
+最多 5000 张或 1 GiB。可以只调整容量与宽度：
 
 ```powershell
-.venv\Scripts\python -m pet.core.capture --watch --title "窗口标题" --interval 2.0 --threshold 0.02 --label "3A-全屏-默认策略"
+.venv\Scripts\python -m pet.core.capture --watch --title "窗口标题" --record-all --raw-width 640 --raw-max-files 5000 --raw-max-bytes 1073741824
 ```
 
-选择其他落盘策略时，把三个指标名与两个基线名组合：
+### 离线重放
+
+拿同一份 `raw/` 可以任意重跑检测参数，不必重玩：
 
 ```powershell
-.venv\Scripts\python -m pet.core.capture --watch --title "窗口标题" --strategy changed_area_vs_baseline --threshold 0.05 --min-save-interval 1.0 --max-silence 60.0 --label "策略游戏-变化面积-基线"
+.venv\Scripts\python -m pet.core.capture --replay "recordings\capture\<会话>\raw" --save-dir "recordings\capture\<会话>-replay-k2" --noise-multiplier 2.0
 ```
 
-可用指标名为 `mean_amplitude`、`changed_area`、`block_change`；基线名为
-`vs_previous`、`vs_baseline`，共六种策略。`--min-save-interval` 防止连续落盘；
-`--max-silence` 即使一直没判成变化，也会定时强制保留一帧并标记
-`forced=true`。先用默认值采一轮，不要把初始参数当成已定结论。
+重放只写新的 `metrics.csv` 和 `session.json`，不写 PNG。相同 raw 流与参数的
+两次重放结果逐字节相同。在线开启 `--record-all` 时，检测器直接消费刚写入后
+重新解码的 JPEG，因此重放看到的像素与在线决策一致。
 
 `--capture-cursor` 是定位 WGC 光标兼容性的 A/B 开关，只决定是否请求 WGC 把光标
 合成进捕获画面；默认关闭，普通采样无需使用。Project Zomboid 中开关两种状态都
@@ -162,37 +193,40 @@ cd backend
 
 截图默认保存在 `backend/recordings/capture/<启动时间>/`，已被 Git 忽略。单次目录
 最多保留 500 张或 200MB，先触及哪个上限就从最旧 PNG 开始删除。截图可能含私人
-画面，检查完请按自己的隐私需要处理该目录。
+画面，`raw/` 更是全量画面，检查完请按自己的隐私需要处理，绝对不要提交仓库。
 
 每个保存目录还包含：
 
-- `metrics.csv`：每次轮询（包括 WGC 暂无新帧）立即写一行并 flush。中文字段依次为序号、时间、
-  窗口标题、平均振幅/变化面积/块变化各自对比上一帧和落盘基线的六个值、是否
-  落盘、是否强制落盘、落盘文件名、指标计算耗时毫秒、是否取得画面、本次取出
-  源帧数、本次抓帧耗时毫秒和截屏状态。无新帧行的六指标留空，不伪装成零变化。
+- `metrics.csv`：每次轮询立即写一行并 flush。除六个旧指标外，新增确认块数/
+  占比、镜头移动、变化格子、144 块噪声地板的中位值、判定原因和相邻前帧
+  文件名。原因只会是 `persistent_change`、`camera_motion`、`forced`、
+  `suppressed_min_interval`、`no_change`。WGC 无新帧仍单独记行，指标留空。
 - `session.json`：记录 `--label`、启动参数、开始与结束时间、总轮询数及退出汇总。
   如果进程异常退出，已 flush 的 CSV 行仍在；session.json 至少保留启动信息，
   只有正常退出或 Ctrl+C 才有结束时间与最终汇总。
 
-### 测哪三类游戏
+### 建议重录的游戏类型与时长
 
-每类至少运行 5 分钟，分别覆盖静止菜单、普通游玩和大幅场景切换：
+为了让 20 轮噪声窗口至少经历多次稳定期，每段建议 8–10 分钟，全程开启
+`--record-all`。优先补这三类：
 
-1. 3D 全屏大作：分别试独占全屏（若游戏提供）与无边框窗口。
-2. 策略游戏：观察地图静止、单位小范围移动、打开大型面板三种状态。
-3. 2D 独立游戏：观察像素动画、小范围角色移动、整屏换场三种状态。
+1. 3D 动态环境：雨、浪、植被各至少静止 2 分钟，再插入人物经过、小幅移动与
+   大幅转向，用来同时测噪声地板、局部持久变化和镜头移动。
+2. 文字/策略 UI：静止文本、切换一个任务标签、弹出大面板、整屏切页各重复数次，
+   用来确认小面积变化不会漏掉。
+3. 2D 动画游戏：待机动画、小范围角色移动、背包/菜单与换场，观察固定动画区域
+   是否在窗口热身后被抑制。
 
 ### 每类都记录什么
 
 - 后端是否初始化成功；失败时完整抄下终端的人话错误。
 - 保存目录是否主要是首帧和肉眼可见变化帧；静止时只有每到 `--max-silence`
   才出现一次 `forced=true` 的兜底帧，还是仍有大量非强制落盘。
+- 明显事件是否在第二个连续轮询后出现 `persistent_change`；大幅转向是否记为
+  `camera_motion` 且变化格子为空。漏传比多传优先级更高，发现漏传先记录原始
+  时刻，不要直接抬高门槛。
 - 任务管理器中该 Python 进程的 CPU 百分比（静止时与激烈变化时各记一次）。
 - 游戏开启探针前后的帧率，是否有可感知掉帧或卡顿。
 - 窗口或屏幕周围是否出现系统自带的黄色捕获边框；只记录，T2 再决定去留。
-- 保存整次会话的 `metrics.csv`、`session.json`，并记录六项指标分布、指标计算和
-  抓帧耗时；CSV 或截图可能含窗口标题与私人画面，不要上传到公开仓库。
-- 同一段玩法分别试不同 `--strategy`，每次换一个 `--label`。若误报太多可逐步
-  提高阈值，若明显变化不保存可逐步降低；保留每次值，不要只报最后结论。
-  `0.02`、`24`、`12`、`16x9`、`96`、`320` 与 `2.0` 都是待实测初值，不是
-  已选定的产品标准。本任务不根据合成数据宣布哪个指标更好。
+- 保存整次会话的 `raw/`、`metrics.csv`、`session.json`；用不同参数重放时每次换
+  一个 `--save-dir`，保留原始结果。上述文件可能含窗口标题与私人画面，不要上传。

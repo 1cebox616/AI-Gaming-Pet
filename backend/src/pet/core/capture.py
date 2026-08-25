@@ -8,9 +8,11 @@ Capture through the optional ``zbl`` binding.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import csv
 import ctypes
 import importlib
+import io
 import json
 import statistics
 import sys
@@ -25,7 +27,7 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-DEFAULT_INTERVAL_SECONDS = 2.0
+DEFAULT_INTERVAL_SECONDS = 1.0
 DEFAULT_THRESHOLD = 0.02
 DEFAULT_CHANGE_WIDTH = 96
 # 此数待实测确定。
@@ -33,13 +35,24 @@ DEFAULT_AREA_WIDTH = 320
 # 此数待实测确定。
 DEFAULT_PIXEL_DELTA_THRESHOLD = 24
 # 此数待实测确定。
-DEFAULT_BLOCK_GRID = (16, 9)
+DEFAULT_BLOCK_GRID = (9, 16)  # 9 列 × 16 行。
 # 此数待实测确定。
 DEFAULT_BLOCK_DELTA_THRESHOLD = 12
 DEFAULT_MIN_SAVE_INTERVAL_SECONDS = 1.0
 DEFAULT_MAX_SILENCE_SECONDS = 60.0
 DEFAULT_MAX_FILES = 500
 DEFAULT_MAX_BYTES = 200 * 1024 * 1024
+# 设计原则：本地帧选取的首要目标是不漏掉应上传的帧，次要目标才是丢弃冗余帧。
+# 以下五个检测参数均为初始值，待实测校准，因此有意偏向较低触发门槛。
+DEFAULT_NOISE_WINDOW = 20
+DEFAULT_NOISE_MULTIPLIER = 2.5
+DEFAULT_NOISE_MARGIN = 4.0 / 255.0
+DEFAULT_PERSISTENCE_POLLS = 2
+DEFAULT_CAMERA_MOTION_RATIO = 0.35
+DEFAULT_RAW_WIDTH = 640
+DEFAULT_RAW_JPEG_QUALITY = 70
+DEFAULT_RAW_MAX_FILES = 5_000
+DEFAULT_RAW_MAX_BYTES = 1024 * 1024 * 1024
 FOREGROUND_SELECTION_DELAY_SECONDS = 3
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 # zbl 0.7.1 buffers 32 source frames and drops newly arrived frames when that
@@ -478,17 +491,39 @@ class FrameChangeDetector:
             np.count_nonzero(area_difference > self.pixel_delta_threshold)
             / area_difference.size
         )
-        columns, rows = self.block_grid
-        changed_blocks = sum(
-            float(block.mean()) > self.block_delta_threshold
-            for row in np.array_split(area_difference, rows, axis=0)
-            for block in np.array_split(row, columns, axis=1)
+        block_differences = self.block_mean_differences(reference, current)
+        changed_blocks = int(
+            np.count_nonzero(block_differences * 255.0 > self.block_delta_threshold)
         )
+        columns, rows = self.block_grid
         return FrameMetrics(
             mean_amplitude=float(mean_difference.mean() / 255.0),
             changed_area=changed_area,
             block_change=changed_blocks / (columns * rows),
         )
+
+    def block_mean_differences(
+        self,
+        reference: PreparedFrame,
+        current: PreparedFrame,
+    ) -> npt.NDArray[np.float32]:
+        """Return normalized mean absolute differences for the 16×9 grid.
+
+        This calculation is pure. Rolling noise history and persistence live in
+        ``AdaptiveFrameSelector`` so synthetic images can exercise it without a
+        capture backend.
+        """
+        reference_area, current_area = _align_gray_arrays(
+            reference.area_gray, current.area_gray
+        )
+        difference = np.abs(reference_area - current_area)
+        columns, rows = self.block_grid
+        values = [
+            float(block.mean() / 255.0)
+            for row in np.array_split(difference, rows, axis=0)
+            for block in np.array_split(row, columns, axis=1)
+        ]
+        return np.asarray(values, dtype=np.float32).reshape(rows, columns)
 
 
 def _resize_gray(
@@ -570,11 +605,13 @@ class CaptureArchive:
     def retained_bytes(self) -> int:
         return sum(entry.size_bytes for entry in self._entries)
 
-    def save(self, frame: CapturedFrame, sequence: int) -> Path | None:
+    def save(
+        self, frame: CapturedFrame, sequence: int, *, suffix: str = ""
+    ) -> Path | None:
         timestamp = frame.metadata.captured_at.astimezone(timezone.utc).strftime(
             "%Y%m%dT%H%M%S.%fZ"
         )
-        path = self.save_dir / f"frame-{sequence:06d}-{timestamp}.png"
+        path = self.save_dir / f"frame-{sequence:06d}-{timestamp}{suffix}.png"
         frame.bitmap.save(path, format="PNG")
         stat = path.stat()
         self._entries.append(
@@ -583,6 +620,21 @@ class CaptureArchive:
         self._entries.sort(key=lambda entry: (entry.modified_ns, entry.path.name))
         self._enforce_limits()
         return path if path.exists() else None
+
+    def save_pair(
+        self,
+        current: CapturedFrame,
+        previous: CapturedFrame | None,
+        sequence: int,
+    ) -> tuple[Path | None, Path | None]:
+        """Save the selected frame and its immediately preceding poll."""
+        previous_path = (
+            None
+            if previous is None
+            else self.save(previous, sequence, suffix="-prev")
+        )
+        current_path = self.save(current, sequence)
+        return current_path, previous_path
 
     def _existing_pngs(self) -> list[ArchivedFrame]:
         entries: list[ArchivedFrame] = []
@@ -598,6 +650,82 @@ class CaptureArchive:
                     modified_ns=stat.st_mtime_ns,
                 )
             )
+        entries.sort(key=lambda entry: (entry.modified_ns, entry.path.name))
+        return entries
+
+    def _enforce_limits(self) -> None:
+        while (
+            len(self._entries) > self.max_files
+            or self.retained_bytes > self.max_bytes
+        ):
+            oldest = self._entries.pop(0)
+            oldest.path.unlink(missing_ok=True)
+
+
+class RawFrameArchive:
+    """Retain a replayable, bounded stream of downscaled JPEG polling frames."""
+
+    def __init__(
+        self,
+        raw_dir: Path,
+        *,
+        width: int = DEFAULT_RAW_WIDTH,
+        jpeg_quality: int = DEFAULT_RAW_JPEG_QUALITY,
+        max_files: int = DEFAULT_RAW_MAX_FILES,
+        max_bytes: int = DEFAULT_RAW_MAX_BYTES,
+    ) -> None:
+        if width <= 0:
+            raise ValueError("raw width must be positive")
+        if not 1 <= jpeg_quality <= 95:
+            raise ValueError("JPEG quality must be between 1 and 95")
+        if max_files <= 0 or max_bytes <= 0:
+            raise ValueError("raw archive limits must be positive")
+        self.raw_dir = raw_dir
+        self.width = width
+        self.jpeg_quality = jpeg_quality
+        self.max_files = max_files
+        self.max_bytes = max_bytes
+        self.raw_dir.mkdir(parents=True, exist_ok=True)
+        self._entries = self._existing_jpegs()
+        self._enforce_limits()
+
+    @property
+    def retained_count(self) -> int:
+        return len(self._entries)
+
+    @property
+    def retained_bytes(self) -> int:
+        return sum(entry.size_bytes for entry in self._entries)
+
+    def save(self, frame: CapturedFrame, sequence: int) -> tuple[Path | None, Image.Image]:
+        """Save one poll and return the exact decoded bitmap replay will consume."""
+        image = frame.bitmap.convert("RGB")
+        target_height = max(1, round(image.height * self.width / image.width))
+        image = image.resize((self.width, target_height), Image.Resampling.LANCZOS)
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=self.jpeg_quality)
+        payload = buffer.getvalue()
+        timestamp = frame.metadata.captured_at.astimezone(timezone.utc).strftime(
+            "%Y%m%dT%H%M%S.%fZ"
+        )
+        path = self.raw_dir / f"raw-{sequence:06d}-{timestamp}.jpg"
+        path.write_bytes(payload)
+        with Image.open(io.BytesIO(payload)) as decoded:
+            replay_bitmap = decoded.convert("RGB")
+        stat = path.stat()
+        self._entries.append(ArchivedFrame(path, stat.st_size, stat.st_mtime_ns))
+        self._entries.sort(key=lambda entry: (entry.modified_ns, entry.path.name))
+        self._enforce_limits()
+        return (path if path.exists() else None), replay_bitmap
+
+    def _existing_jpegs(self) -> list[ArchivedFrame]:
+        entries: list[ArchivedFrame] = []
+        for path in self.raw_dir.glob("*.jpg"):
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue
+            entries.append(ArchivedFrame(path, stat.st_size, stat.st_mtime_ns))
         entries.sort(key=lambda entry: (entry.modified_ns, entry.path.name))
         return entries
 
@@ -629,11 +757,24 @@ class ProbeStatistics:
     mean_amplitude_vs_baseline: list[float] = field(default_factory=list)
     changed_area_vs_baseline: list[float] = field(default_factory=list)
     block_change_vs_baseline: list[float] = field(default_factory=list)
+    decision_reason_counts: dict[DecisionReason, int] = field(
+        default_factory=lambda: {reason: 0 for reason in DECISION_REASONS}
+    )
+    nonempty_region_ratios: list[float] = field(default_factory=list)
 
-    def record(self, comparisons: FrameComparisons, duration_ms: float) -> None:
+    def record(self, observation: SelectionObservation, duration_ms: float) -> None:
         self.metric_durations_ms.append(duration_ms)
         for strategy in STRATEGY_NAMES:
-            getattr(self, strategy).append(comparisons.strategy_value(strategy))
+            getattr(self, strategy).append(
+                observation.comparisons.strategy_value(strategy)
+            )
+        decision = observation.decision
+        self.decision_reason_counts[decision.reason] += 1
+        if decision.should_save:
+            self.saved_count += 1
+            self.forced_saved_count += int(decision.forced)
+        if decision.region_grid:
+            self.nonempty_region_ratios.append(decision.changed_block_ratio)
 
     def metric_series(self) -> tuple[tuple[StrategyName, list[float]], ...]:
         return tuple((strategy, getattr(self, strategy)) for strategy in STRATEGY_NAMES)
@@ -675,55 +816,212 @@ class FrameComparisonTracker:
         self._baseline = prepared
 
 
+DecisionReason = Literal[
+    "persistent_change",
+    "camera_motion",
+    "forced",
+    "suppressed_min_interval",
+    "no_change",
+]
+DECISION_REASONS: tuple[DecisionReason, ...] = (
+    "persistent_change",
+    "camera_motion",
+    "forced",
+    "suppressed_min_interval",
+    "no_change",
+)
+
+
 @dataclass(frozen=True, slots=True)
-class SaveDecision:
-    """Whether this poll should be archived and whether silence forced it."""
+class SelectionDecision:
+    """Adaptive block decision after persistence and timing safeguards."""
 
     should_save: bool
-    forced: bool = False
+    forced: bool
+    reason: DecisionReason
+    changed_block_count: int
+    changed_block_ratio: float
+    camera_motion: bool
+    region_grid: tuple[str, ...]
+    floor_median: float
 
 
-class SavePolicy:
-    """Apply a selectable metric plus algorithm-independent timing safeguards."""
+@dataclass(frozen=True, slots=True)
+class SelectionObservation:
+    """One prepared frame, six legacy metrics, and the adaptive decision."""
+
+    prepared: PreparedFrame
+    comparisons: FrameComparisons
+    decision: SelectionDecision
+    is_first: bool
+
+
+class AdaptiveFrameSelector:
+    """Stateful policy around the stateless ``FrameChangeDetector``.
+
+    The last selected change frame is the comparison baseline. Persistent rain,
+    waves, and foliage raise each block's rolling noise floor independently.
+    Selection prioritizes not missing upload-worthy frames over eliminating every
+    redundant frame.
+    """
 
     def __init__(
         self,
-        strategy: StrategyName,
-        threshold: float,
-        min_save_interval: float,
-        max_silence: float,
+        detector: FrameChangeDetector | None = None,
+        *,
+        noise_window: int = DEFAULT_NOISE_WINDOW,
+        noise_multiplier: float = DEFAULT_NOISE_MULTIPLIER,
+        noise_margin: float = DEFAULT_NOISE_MARGIN,
+        persistence_polls: int = DEFAULT_PERSISTENCE_POLLS,
+        camera_motion_ratio: float = DEFAULT_CAMERA_MOTION_RATIO,
+        min_save_interval: float = DEFAULT_MIN_SAVE_INTERVAL_SECONDS,
+        max_silence: float = DEFAULT_MAX_SILENCE_SECONDS,
     ) -> None:
-        if strategy not in STRATEGY_NAMES:
-            raise ValueError(f"unknown strategy: {strategy}")
-        if not 0.0 <= threshold <= 1.0:
-            raise ValueError("threshold must be between 0 and 1")
-        if min_save_interval < 0:
+        self.detector = detector or FrameChangeDetector()
+        if noise_window <= 0:
+            raise ValueError("noise_window must be positive")
+        if noise_multiplier < 0.0:
+            raise ValueError("noise_multiplier must not be negative")
+        if not 0.0 <= noise_margin <= 1.0:
+            raise ValueError("noise_margin must be between 0 and 1")
+        if persistence_polls <= 0:
+            raise ValueError("persistence_polls must be positive")
+        if not 0.0 <= camera_motion_ratio <= 1.0:
+            raise ValueError("camera_motion_ratio must be between 0 and 1")
+        if min_save_interval < 0.0:
             raise ValueError("min_save_interval must not be negative")
-        if max_silence <= 0:
+        if max_silence <= 0.0:
             raise ValueError("max_silence must be positive")
-        self.strategy = strategy
-        self.threshold = threshold
+        columns, rows = self.detector.block_grid
+        self.noise_window = noise_window
+        self.noise_multiplier = noise_multiplier
+        self.noise_margin = noise_margin
+        self.persistence_polls = persistence_polls
+        self.camera_motion_ratio = camera_motion_ratio
         self.min_save_interval = min_save_interval
         self.max_silence = max_silence
+        self._histories = [
+            deque(maxlen=noise_window) for _ in range(columns * rows)
+        ]
+        self._consecutive = np.zeros((rows, columns), dtype=np.int32)
+        self._streak_floors = np.full(
+            (rows, columns), noise_margin, dtype=np.float32
+        )
+        self._previous: PreparedFrame | None = None
+        self._baseline: PreparedFrame | None = None
         self._last_saved_at: float | None = None
 
-    def decide(
-        self,
-        comparisons: FrameComparisons,
-        now: float,
-        *,
-        is_first: bool = False,
-    ) -> SaveDecision:
-        if is_first or self._last_saved_at is None:
-            return SaveDecision(True)
-        since_saved = now - self._last_saved_at
-        if since_saved >= self.max_silence:
-            return SaveDecision(True, forced=True)
-        changed = comparisons.strategy_value(self.strategy) > self.threshold
-        return SaveDecision(changed and since_saved >= self.min_save_interval)
+    def observe(self, frame: FrameLike, now: float) -> SelectionObservation:
+        prepared = self.detector.prepare(frame)
+        is_first = self._previous is None
+        previous = self._previous or prepared
+        baseline = self._baseline or prepared
+        comparisons = FrameComparisons(
+            vs_previous=self.detector.compare_prepared(previous, prepared),
+            vs_baseline=self.detector.compare_prepared(baseline, prepared),
+        )
+        floors = np.asarray(
+            [
+                (statistics.median(history) * self.noise_multiplier)
+                + self.noise_margin
+                if history
+                else self.noise_margin
+                for history in self._histories
+            ],
+            dtype=np.float32,
+        ).reshape(self._consecutive.shape)
+        differences = self.detector.block_mean_differences(baseline, prepared)
+        # Freeze a block's floor for the duration of one over-floor streak. An
+        # event's first high sample may enter rolling history, but cannot raise
+        # its own threshold before persistence has a chance to confirm it.
+        active_streak = self._consecutive > 0
+        thresholds = np.where(active_streak, self._streak_floors, floors)
+        above_floor = differences > thresholds
+        starting_streak = above_floor & ~active_streak
+        self._streak_floors[starting_streak] = floors[starting_streak]
+        self._streak_floors[~above_floor] = floors[~above_floor]
+        self._consecutive = np.where(above_floor, self._consecutive + 1, 0)
+        confirmed = self._consecutive >= self.persistence_polls
+        for history, value in zip(self._histories, differences.flat, strict=True):
+            history.append(float(value))
 
-    def mark_saved(self, now: float) -> None:
-        self._last_saved_at = now
+        changed_count = int(np.count_nonzero(confirmed))
+        changed_ratio = changed_count / confirmed.size
+        camera_motion = changed_ratio >= self.camera_motion_ratio
+        if camera_motion:
+            candidate_reason: DecisionReason = "camera_motion"
+            region_grid: tuple[str, ...] = ()
+        elif changed_count:
+            candidate_reason = "persistent_change"
+            region_grid = tuple(
+                f"r{row + 1}c{column + 1}"
+                for row, column in np.argwhere(confirmed)
+            )
+        else:
+            candidate_reason = "no_change"
+            region_grid = ()
+
+        if is_first or self._last_saved_at is None:
+            # The first frame establishes a baseline. ``forced`` is the closest
+            # closed-set reason because no comparison can exist yet.
+            decision = SelectionDecision(
+                True, True, "forced", 0, 0.0, False, (), float(np.median(floors))
+            )
+            self._baseline = prepared
+            self._last_saved_at = now
+            self._consecutive.fill(0)
+        else:
+            since_saved = now - self._last_saved_at
+            if since_saved >= self.max_silence:
+                decision = SelectionDecision(
+                    True,
+                    True,
+                    "forced",
+                    changed_count,
+                    changed_ratio,
+                    camera_motion,
+                    region_grid,
+                    float(np.median(floors)),
+                )
+                self._last_saved_at = now
+            elif candidate_reason != "no_change" and since_saved < self.min_save_interval:
+                decision = SelectionDecision(
+                    False,
+                    False,
+                    "suppressed_min_interval",
+                    changed_count,
+                    changed_ratio,
+                    camera_motion,
+                    region_grid,
+                    float(np.median(floors)),
+                )
+            elif candidate_reason != "no_change":
+                decision = SelectionDecision(
+                    True,
+                    False,
+                    candidate_reason,
+                    changed_count,
+                    changed_ratio,
+                    camera_motion,
+                    region_grid,
+                    float(np.median(floors)),
+                )
+                self._baseline = prepared
+                self._last_saved_at = now
+                self._consecutive.fill(0)
+            else:
+                decision = SelectionDecision(
+                    False,
+                    False,
+                    "no_change",
+                    0,
+                    0.0,
+                    False,
+                    (),
+                    float(np.median(floors)),
+                )
+        self._previous = prepared
+        return SelectionObservation(prepared, comparisons, decision, is_first)
 
 
 CSV_HEADER = (
@@ -739,6 +1037,13 @@ CSV_HEADER = (
     "是否落盘",
     "是否强制落盘",
     "本次落盘文件名",
+    "本次前一帧文件名",
+    "确实变了的块数",
+    "确实变了的块占比",
+    "是否判定为镜头移动",
+    "变化格子",
+    "每块噪声地板中位值",
+    "判定原因",
     "本次指标计算耗时毫秒",
     "是否取得画面",
     "本次取出源帧数",
@@ -763,17 +1068,17 @@ class MetricsCsvWriter:
         sequence: int,
         captured_at: datetime,
         window_title: str,
-        comparisons: FrameComparisons,
-        saved: bool,
-        forced: bool,
+        observation: SelectionObservation,
         saved_filename: str,
+        previous_filename: str,
         duration_ms: float,
         *,
         source_frames_drained: int = 1,
         capture_duration_ms: float = 0.0,
     ) -> None:
-        previous = comparisons.vs_previous
-        baseline = comparisons.vs_baseline
+        previous = observation.comparisons.vs_previous
+        baseline = observation.comparisons.vs_baseline
+        decision = observation.decision
         self._writer.writerow(
             (
                 sequence,
@@ -785,9 +1090,16 @@ class MetricsCsvWriter:
                 f"{baseline.mean_amplitude:.9f}",
                 f"{baseline.changed_area:.9f}",
                 f"{baseline.block_change:.9f}",
-                "是" if saved else "否",
-                "是" if forced else "否",
+                "是" if decision.should_save else "否",
+                "是" if decision.forced else "否",
                 saved_filename,
+                previous_filename,
+                decision.changed_block_count,
+                f"{decision.changed_block_ratio:.9f}",
+                "是" if decision.camera_motion else "否",
+                "、".join(decision.region_grid),
+                f"{decision.floor_median:.9f}",
+                decision.reason,
                 f"{duration_ms:.3f}",
                 "是",
                 source_frames_drained,
@@ -820,6 +1132,13 @@ class MetricsCsvWriter:
                 "否",
                 "",
                 "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
                 "否",
                 0,
                 f"{capture_duration_ms:.3f}",
@@ -840,17 +1159,25 @@ class MetricsCsvWriter:
 
 @dataclass(frozen=True, slots=True)
 class ProbeOptions:
-    """Validated command-line options for the foreground watch loop."""
+    """Validated command-line options shared by watch and offline replay."""
 
     interval: float
-    threshold: float
     title: str | None
     save_dir: Path
-    strategy: StrategyName = "mean_amplitude_vs_previous"
     min_save_interval: float = DEFAULT_MIN_SAVE_INTERVAL_SECONDS
     max_silence: float = DEFAULT_MAX_SILENCE_SECONDS
+    noise_window: int = DEFAULT_NOISE_WINDOW
+    noise_multiplier: float = DEFAULT_NOISE_MULTIPLIER
+    noise_margin: float = DEFAULT_NOISE_MARGIN
+    persistence_polls: int = DEFAULT_PERSISTENCE_POLLS
+    camera_motion_ratio: float = DEFAULT_CAMERA_MOTION_RATIO
     label: str | None = None
     capture_cursor: bool = False
+    record_all: bool = False
+    raw_width: int = DEFAULT_RAW_WIDTH
+    raw_max_files: int = DEFAULT_RAW_MAX_FILES
+    raw_max_bytes: int = DEFAULT_RAW_MAX_BYTES
+    replay_dir: Path | None = None
 
 
 def _positive_float(value: str) -> float:
@@ -867,10 +1194,17 @@ def _nonnegative_float(value: str) -> float:
     return parsed
 
 
-def _threshold(value: str) -> float:
+def _unit_interval(value: str) -> float:
     parsed = float(value)
     if not 0.0 <= parsed <= 1.0:
         raise argparse.ArgumentTypeError("必须在 0 到 1 之间")
+    return parsed
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("必须大于 0")
     return parsed
 
 
@@ -882,24 +1216,14 @@ def _default_save_dir() -> Path:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="只抓一个游戏窗口的本地画面变化探针")
-    parser.add_argument("--watch", action="store_true", help="持续抓帧，Ctrl+C 停止")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--watch", action="store_true", help="持续抓帧，Ctrl+C 停止")
+    mode.add_argument("--replay", type=Path, metavar="RAW目录", help="离线重放 raw JPEG 流")
     parser.add_argument(
         "--interval",
         type=_positive_float,
         default=DEFAULT_INTERVAL_SECONDS,
-        help="相邻采样间隔秒数（默认 2.0，待实测）",
-    )
-    parser.add_argument(
-        "--threshold",
-        type=_threshold,
-        default=DEFAULT_THRESHOLD,
-        help="变化阈值 0..1（默认 0.02，待实测）",
-    )
-    parser.add_argument(
-        "--strategy",
-        choices=STRATEGY_NAMES,
-        default="mean_amplitude_vs_previous",
-        help="选择用于落盘判定的指标和基线",
+        help="相邻采样间隔秒数（默认 1.0）",
     )
     parser.add_argument(
         "--min-save-interval",
@@ -913,6 +1237,36 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_SILENCE_SECONDS,
         help="最长无落盘时间，超时强制保存（默认 60.0 秒）",
     )
+    parser.add_argument(
+        "--noise-window",
+        type=_positive_int,
+        default=DEFAULT_NOISE_WINDOW,
+        help="每块噪声地板的滚动窗口（默认 20，待实测）",
+    )
+    parser.add_argument(
+        "--noise-multiplier",
+        type=_nonnegative_float,
+        default=DEFAULT_NOISE_MULTIPLIER,
+        help="滚动中位数乘数 k（默认 2.5，待实测）",
+    )
+    parser.add_argument(
+        "--noise-margin",
+        type=_unit_interval,
+        default=DEFAULT_NOISE_MARGIN,
+        help="噪声地板固定余量 0..1（默认 4/255，待实测）",
+    )
+    parser.add_argument(
+        "--persistence-polls",
+        type=_positive_int,
+        default=DEFAULT_PERSISTENCE_POLLS,
+        help="连续超地板的轮询次数（默认 2，待实测）",
+    )
+    parser.add_argument(
+        "--camera-motion-ratio",
+        type=_unit_interval,
+        default=DEFAULT_CAMERA_MOTION_RATIO,
+        help="镜头移动块占比阈值（默认 0.35，待实测）",
+    )
     parser.add_argument("--label", help="本次采集会话的可选标签")
     parser.add_argument("--title", help="目标窗口标题中的一段文字")
     parser.add_argument(
@@ -923,7 +1277,30 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--save-dir",
         type=Path,
-        help="PNG 保存目录（默认 backend/recordings/capture/<启动时间>/）",
+        help="输出目录（默认 backend/recordings/capture/<启动时间>/）",
+    )
+    parser.add_argument(
+        "--record-all",
+        action="store_true",
+        help="把每次成功轮询都另存为可重放 JPEG",
+    )
+    parser.add_argument(
+        "--raw-width",
+        type=_positive_int,
+        default=DEFAULT_RAW_WIDTH,
+        help="全量流 JPEG 宽度（默认 640）",
+    )
+    parser.add_argument(
+        "--raw-max-files",
+        type=_positive_int,
+        default=DEFAULT_RAW_MAX_FILES,
+        help="全量流最多保留文件数（默认 5000）",
+    )
+    parser.add_argument(
+        "--raw-max-bytes",
+        type=_positive_int,
+        default=DEFAULT_RAW_MAX_BYTES,
+        help="全量流最大总字节数（默认 1073741824）",
     )
     return parser
 
@@ -939,13 +1316,23 @@ def _print_banner(options: ProbeOptions) -> None:
     print("=" * 72)
     print("【正在截屏】只抓一个目标窗口；不会抓全桌面或拼接显示器")
     print(f"保存目录：{options.save_dir}")
+    print(f"自适应块检测：16 行 × 9 列；持久性 {options.persistence_polls} 轮")
     print(
-        f"策略：{options.strategy}；阈值：{options.threshold:.5f}；"
+        f"噪声地板：最近 {options.noise_window} 轮中位数 × "
+        f"{options.noise_multiplier:g} + {options.noise_margin:.6f}；"
+        f"镜头移动阈值：{options.camera_motion_ratio:.3f}"
+    )
+    print(
         f"最短落盘间隔：{options.min_save_interval:.1f}s；"
         f"最长静默：{options.max_silence:.1f}s"
     )
     print(f"WGC 光标合成：{'开启' if options.capture_cursor else '关闭'}")
-    print("首帧、策略判定变化帧及最长静默强制帧落盘；Ctrl+C 停止")
+    if options.record_all:
+        print(
+            "【全量录制已开启】每次成功轮询都会保存到 raw/："
+            f"宽 {options.raw_width}px、JPEG 质量 {DEFAULT_RAW_JPEG_QUALITY}"
+        )
+    print("首帧、持久变化、镜头移动及最长静默强制帧落盘；Ctrl+C 停止")
     print("=" * 72)
 
 
@@ -962,13 +1349,23 @@ def _distribution(values: list[float]) -> dict[str, float] | None:
 
 
 def _build_summary(
-    statistics_: ProbeStatistics, archive: CaptureArchive
+    statistics_: ProbeStatistics,
+    archive: CaptureArchive | None,
+    raw_archive: RawFrameArchive | None = None,
 ) -> dict[str, object]:
     metrics = {
         strategy: _distribution(values)
         for strategy, values in statistics_.metric_series()
     }
     metric_timing = _distribution(statistics_.metric_durations_ms)
+    captured = statistics_.captured_count
+    reason_summary = {
+        reason: {
+            "次数": count,
+            "占比": 0.0 if captured == 0 else count / captured,
+        }
+        for reason, count in statistics_.decision_reason_counts.items()
+    }
     return {
         "总轮询数": statistics_.poll_count,
         "成功抓帧数": statistics_.captured_count,
@@ -977,8 +1374,15 @@ def _build_summary(
         "单次最多取出源帧数": statistics_.max_source_frames_drained,
         "落盘次数": statistics_.saved_count,
         "强制落盘次数": statistics_.forced_saved_count,
-        "当前保留张数": archive.retained_count,
-        "当前保留字节数": archive.retained_bytes,
+        "当前保留张数": 0 if archive is None else archive.retained_count,
+        "当前保留字节数": 0 if archive is None else archive.retained_bytes,
+        "raw保留张数": 0 if raw_archive is None else raw_archive.retained_count,
+        "raw保留字节数": 0 if raw_archive is None else raw_archive.retained_bytes,
+        "上传率": 0.0 if captured == 0 else statistics_.saved_count / captured,
+        "判定原因": reason_summary,
+        "区域格子非空时平均占比": None
+        if not statistics_.nonempty_region_ratios
+        else statistics.mean(statistics_.nonempty_region_ratios),
         "六指标分布": metrics,
         "指标计算耗时毫秒": None
         if metric_timing is None
@@ -1010,6 +1414,21 @@ def _print_summary(summary: dict[str, object]) -> None:
         f"当前保留 {summary['当前保留张数']} 张，"
         f"{int(summary['当前保留字节数']) / (1024 * 1024):.2f} MB）"
     )
+    print(f"上传率：{float(summary['上传率']):.2%}")
+    reason_summaries = summary["判定原因"]
+    assert isinstance(reason_summaries, dict)
+    for reason in DECISION_REASONS:
+        values = reason_summaries[reason]
+        assert isinstance(values, dict)
+        print(f"{reason}：{values['次数']} 次 / {float(values['占比']):.2%}")
+    average_region_ratio = summary["区域格子非空时平均占比"]
+    if isinstance(average_region_ratio, float):
+        print(f"region_grid 非空时平均格子占比：{average_region_ratio:.2%}")
+    if int(summary["raw保留张数"]):
+        print(
+            f"raw 全量流：{summary['raw保留张数']} 张 / "
+            f"{int(summary['raw保留字节数']) / (1024 * 1024):.2f} MB"
+        )
     metric_summaries = summary["六指标分布"]
     assert isinstance(metric_summaries, dict)
     for strategy in STRATEGY_NAMES:
@@ -1046,14 +1465,26 @@ def _write_session(
     payload = {
         "标签": options.label,
         "启动参数": {
+            "mode": "replay" if options.replay_dir is not None else "watch",
             "interval": options.interval,
-            "threshold": options.threshold,
             "title": options.title,
             "save_dir": str(options.save_dir),
-            "strategy": options.strategy,
+            "replay_dir": None
+            if options.replay_dir is None
+            else str(options.replay_dir),
             "min_save_interval": options.min_save_interval,
             "max_silence": options.max_silence,
+            "noise_window": options.noise_window,
+            "noise_multiplier": options.noise_multiplier,
+            "noise_margin": options.noise_margin,
+            "persistence_polls": options.persistence_polls,
+            "camera_motion_ratio": options.camera_motion_ratio,
             "capture_cursor": options.capture_cursor,
+            "record_all": options.record_all,
+            "raw_width": options.raw_width,
+            "raw_max_files": options.raw_max_files,
+            "raw_max_bytes": options.raw_max_bytes,
+            "raw_jpeg_quality": DEFAULT_RAW_JPEG_QUALITY,
         },
         "开始时间": started_at.isoformat(),
         "结束时间": None if ended_at is None else ended_at.isoformat(),
@@ -1077,22 +1508,38 @@ def _percentile(ordered: list[float], percentile: float) -> float:
     return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
 
 
+def _make_selector(options: ProbeOptions) -> AdaptiveFrameSelector:
+    return AdaptiveFrameSelector(
+        noise_window=options.noise_window,
+        noise_multiplier=options.noise_multiplier,
+        noise_margin=options.noise_margin,
+        persistence_polls=options.persistence_polls,
+        camera_motion_ratio=options.camera_motion_ratio,
+        min_save_interval=options.min_save_interval,
+        max_silence=options.max_silence,
+    )
+
+
 def run_probe(options: ProbeOptions) -> int:
     """Run the foreground-only probe until Ctrl+C or a human-readable failure."""
     archive = CaptureArchive(options.save_dir)
-    detector = FrameChangeDetector(threshold=options.threshold)
-    tracker = FrameComparisonTracker(detector)
-    policy = SavePolicy(
-        options.strategy,
-        options.threshold,
-        options.min_save_interval,
-        options.max_silence,
+    raw_archive = (
+        RawFrameArchive(
+            options.save_dir / "raw",
+            width=options.raw_width,
+            max_files=options.raw_max_files,
+            max_bytes=options.raw_max_bytes,
+        )
+        if options.record_all
+        else None
     )
+    selector = _make_selector(options)
     probe_statistics = ProbeStatistics()
     backend: WindowsGraphicsCaptureBackend | None = None
     csv_writer = MetricsCsvWriter(options.save_dir)
     exit_code = 0
     started_at = datetime.now(timezone.utc)
+    previous_frame: CapturedFrame | None = None
     _write_session(options, started_at, None, 0, None)
     _print_banner(options)
     try:
@@ -1108,7 +1555,7 @@ def run_probe(options: ProbeOptions) -> int:
         )
         print(
             f"目标：{backend.target.title} | {backend.target.process_name} | "
-            f"阈值 {options.threshold:.5f} | 间隔 {options.interval:.2f}s"
+            f"间隔 {options.interval:.2f}s"
         )
         consecutive_unavailable = 0
         while True:
@@ -1144,47 +1591,44 @@ def run_probe(options: ProbeOptions) -> int:
                 frame.metadata.source_frames_drained,
             )
 
+            detection_bitmap = frame.bitmap
+            if raw_archive is not None:
+                _, detection_bitmap = raw_archive.save(
+                    frame, probe_statistics.poll_count
+                )
             metrics_started = time.perf_counter()
-            observation = tracker.observe(frame.bitmap)
+            decision_time = frame.metadata.captured_at.timestamp()
+            observation = selector.observe(detection_bitmap, decision_time)
             metrics_duration_ms = (time.perf_counter() - metrics_started) * 1000
-            probe_statistics.record(observation.comparisons, metrics_duration_ms)
-            decision_time = time.monotonic()
-            decision = policy.decide(
-                observation.comparisons,
-                decision_time,
-                is_first=observation.is_first,
-            )
+            probe_statistics.record(observation, metrics_duration_ms)
+            decision = observation.decision
             saved_filename = ""
+            previous_filename = ""
             if decision.should_save:
-                saved_path = archive.save(frame, probe_statistics.poll_count)
-                probe_statistics.saved_count += 1
-                probe_statistics.forced_saved_count += int(decision.forced)
-                policy.mark_saved(decision_time)
-                if not decision.forced:
-                    # A silence safeguard is archived, but it was not judged "changed".
-                    tracker.mark_saved(observation.prepared)
+                saved_path, previous_path = archive.save_pair(
+                    frame, previous_frame, probe_statistics.poll_count
+                )
                 local_time = frame.metadata.captured_at.astimezone().strftime("%H:%M:%S")
-                value = observation.comparisons.strategy_value(options.strategy)
-                difference_text = "首帧" if observation.is_first else f"{value:.5f}"
                 retained = saved_path.name if saved_path is not None else "已因容量上限淘汰"
                 saved_filename = "" if saved_path is None else saved_path.name
+                previous_filename = "" if previous_path is None else previous_path.name
                 print(
                     f"{local_time} | {frame.metadata.window_title} | "
-                    f"{options.strategy}={difference_text} | forced="
-                    f"{'true' if decision.forced else 'false'} | {retained}"
+                    f"reason={decision.reason} | blocks={decision.changed_block_count}/144 | "
+                    f"forced={'true' if decision.forced else 'false'} | {retained}"
                 )
             csv_writer.write(
                 probe_statistics.poll_count,
                 frame.metadata.captured_at,
                 frame.metadata.window_title,
-                observation.comparisons,
-                decision.should_save,
-                decision.forced,
+                observation,
                 saved_filename,
+                previous_filename,
                 metrics_duration_ms,
                 source_frames_drained=frame.metadata.source_frames_drained,
                 capture_duration_ms=capture_duration * 1000,
             )
+            previous_frame = frame
             elapsed = time.perf_counter() - iteration_started
             time.sleep(max(0.0, options.interval - elapsed))
     except KeyboardInterrupt:
@@ -1196,7 +1640,7 @@ def run_probe(options: ProbeOptions) -> int:
         if backend is not None:
             backend.close()
         csv_writer.close()
-        summary = _build_summary(probe_statistics, archive)
+        summary = _build_summary(probe_statistics, archive, raw_archive)
         _print_summary(summary)
         _write_session(
             options,
@@ -1208,24 +1652,100 @@ def run_probe(options: ProbeOptions) -> int:
     return exit_code
 
 
+def _raw_frame_timestamp(path: Path) -> datetime:
+    parts = path.stem.split("-", maxsplit=2)
+    if len(parts) != 3 or parts[0] != "raw":
+        raise ValueError(f"无法从 raw 文件名读取时间：{path.name}")
+    try:
+        return datetime.strptime(parts[2], "%Y%m%dT%H%M%S.%fZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as error:
+        raise ValueError(f"raw 文件名时间格式无效：{path.name}") from error
+
+
+def run_replay(options: ProbeOptions) -> tuple[SelectionDecision, ...]:
+    """Replay one retained raw stream deterministically without writing images."""
+    if options.replay_dir is None:
+        raise ValueError("replay_dir is required")
+    paths = sorted(options.replay_dir.glob("raw-*.jpg"))
+    if not paths:
+        raise CaptureError(f"重放目录中没有 raw JPEG：{options.replay_dir}")
+    options.save_dir.mkdir(parents=True, exist_ok=True)
+    selector = _make_selector(options)
+    probe_statistics = ProbeStatistics()
+    decisions: list[SelectionDecision] = []
+    started_at = datetime.now(timezone.utc)
+    _write_session(options, started_at, None, 0, None)
+    print("=" * 72)
+    print(f"【离线重放】读取：{options.replay_dir}")
+    print(f"输出：{options.save_dir}（只写 metrics.csv 与 session.json，不写图片）")
+    print("=" * 72)
+    with MetricsCsvWriter(options.save_dir) as csv_writer:
+        for sequence, path in enumerate(paths, start=1):
+            captured_at = _raw_frame_timestamp(path)
+            with Image.open(path) as source:
+                bitmap = source.convert("RGB")
+            observation = selector.observe(bitmap, captured_at.timestamp())
+            decision = observation.decision
+            decisions.append(decision)
+            probe_statistics.poll_count += 1
+            probe_statistics.captured_count += 1
+            probe_statistics.record(observation, 0.0)
+            csv_writer.write(
+                sequence,
+                captured_at,
+                "离线重放",
+                observation,
+                "",
+                "",
+                0.0,
+                source_frames_drained=1,
+                capture_duration_ms=0.0,
+            )
+    summary = _build_summary(probe_statistics, None)
+    _print_summary(summary)
+    _write_session(
+        options,
+        started_at,
+        datetime.now(timezone.utc),
+        probe_statistics.poll_count,
+        summary,
+    )
+    return tuple(decisions)
+
+
 def main() -> None:
     _configure_console_encoding()
     parser = _build_parser()
     arguments = parser.parse_args()
-    if not arguments.watch:
-        parser.error("请使用 --watch 启动前台探针")
     options = ProbeOptions(
         interval=arguments.interval,
-        threshold=arguments.threshold,
         title=arguments.title,
         save_dir=arguments.save_dir or _default_save_dir(),
-        strategy=arguments.strategy,
         min_save_interval=arguments.min_save_interval,
         max_silence=arguments.max_silence,
+        noise_window=arguments.noise_window,
+        noise_multiplier=arguments.noise_multiplier,
+        noise_margin=arguments.noise_margin,
+        persistence_polls=arguments.persistence_polls,
+        camera_motion_ratio=arguments.camera_motion_ratio,
         label=arguments.label,
         capture_cursor=arguments.capture_cursor,
+        record_all=arguments.record_all,
+        raw_width=arguments.raw_width,
+        raw_max_files=arguments.raw_max_files,
+        raw_max_bytes=arguments.raw_max_bytes,
+        replay_dir=arguments.replay,
     )
-    raise SystemExit(run_probe(options))
+    try:
+        if arguments.replay is not None:
+            run_replay(options)
+            raise SystemExit(0)
+        raise SystemExit(run_probe(options))
+    except CaptureError as error:
+        print(f"操作停止：{error}", file=sys.stderr)
+        raise SystemExit(1) from error
 
 
 if __name__ == "__main__":
