@@ -35,6 +35,7 @@ from pet.core.capture import (
     DecisionReason,
     FrameChangeDetector,
     PreparedFrame,
+    _load_replay_frame_times,
     _raw_frame_timestamp,
 )
 
@@ -118,6 +119,7 @@ class InputEvent:
     event_type: str
     dx: int
     dy: int
+    monotonic_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +131,8 @@ class PreparedCalibrationSession:
     recorded_label: str
     paths: tuple[Path, ...]
     timestamps: tuple[datetime, ...]
+    monotonic_seconds: tuple[float, ...]
+    timeline_source: str
     frames: tuple[PreparedFrame, ...]
     strong_adjacent_changes: tuple[bool, ...]
     input_available: bool
@@ -143,7 +147,7 @@ class PreparedCalibrationSession:
     def duration_seconds(self) -> float:
         if len(self.timestamps) < 2:
             return 0.0
-        return (self.timestamps[-1] - self.timestamps[0]).total_seconds()
+        return self.monotonic_seconds[-1] - self.monotonic_seconds[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +273,7 @@ def prepare_session(
     if not all_paths:
         raise CaptureError(f"会话没有可校准的 raw JPEG：{raw_dir}")
     sampled_paths = tuple(all_paths[::sample_stride])
+    frame_times = _load_replay_frame_times(raw_dir, sampled_paths)
     detector = FrameChangeDetector()
     timestamps: list[datetime] = []
     frames: list[PreparedFrame] = []
@@ -286,17 +291,32 @@ def prepare_session(
 
     input_path = session_dir / "input.csv"
     if input_path.is_file():
-        events = _load_input_events(input_path)
+        events, input_has_monotonic = _load_input_events(input_path)
+        frame_has_monotonic = all(item.recorded_monotonic for item in frame_times)
+        use_monotonic = input_has_monotonic and frame_has_monotonic
+        if frame_has_monotonic and not input_has_monotonic:
+            print(
+                f"旧会话 {session_dir.name} 的 input.csv 缺少单调秒；"
+                "跨流对齐整段回退 UTC 墙钟（仅标注一次）"
+            )
         input_activity, input_motion = _align_input_events(
             events,
             tuple(timestamps),
+            tuple(item.monotonic_seconds for item in frame_times),
+            use_monotonic=use_monotonic,
             input_motion_threshold=input_motion_threshold,
         )
         input_available = True
+        timeline_source = "monotonic" if use_monotonic else "wall-clock-fallback"
     else:
         input_activity = None
         input_motion = None
         input_available = False
+        timeline_source = (
+            "monotonic"
+            if all(item.recorded_monotonic for item in frame_times)
+            else "wall-clock-fallback"
+        )
 
     recorded_label = _recorded_label(session_dir)
     return PreparedCalibrationSession(
@@ -305,6 +325,12 @@ def prepare_session(
         recorded_label=recorded_label,
         paths=sampled_paths,
         timestamps=tuple(timestamps),
+        monotonic_seconds=(
+            tuple(item.monotonic_seconds for item in frame_times)
+            if timeline_source == "monotonic"
+            else tuple(timestamp.timestamp() for timestamp in timestamps)
+        ),
+        timeline_source=timeline_source,
         frames=tuple(frames),
         strong_adjacent_changes=tuple(strong_changes),
         input_available=input_available,
@@ -329,13 +355,23 @@ def _recorded_label(session_dir: Path) -> str:
     return label if isinstance(label, str) and label else "（未标注）"
 
 
-def _load_input_events(path: Path) -> tuple[InputEvent, ...]:
+def _load_input_events(path: Path) -> tuple[tuple[InputEvent, ...], bool]:
     events: list[InputEvent] = []
+    has_monotonic = False
     try:
         with path.open(encoding="utf-8-sig", newline="") as source:
-            for row_number, row in enumerate(csv.DictReader(source), start=2):
+            reader = csv.DictReader(source)
+            has_monotonic = bool(
+                reader.fieldnames and "单调秒" in reader.fieldnames
+            )
+            for row_number, row in enumerate(reader, start=2):
                 try:
                     timestamp = datetime.fromisoformat(row["时间"])
+                    monotonic_text = row.get("单调秒", "")
+                    monotonic_seconds = (
+                        float(monotonic_text) if monotonic_text else None
+                    )
+                    has_monotonic = has_monotonic and monotonic_seconds is not None
                     event_type = row["事件类型"]
                     dx = int(row["dx"] or 0)
                     dy = int(row["dy"] or 0)
@@ -343,28 +379,56 @@ def _load_input_events(path: Path) -> tuple[InputEvent, ...]:
                     raise CaptureError(
                         f"输入遥测格式无效：{path}:{row_number}"
                     ) from error
-                events.append(InputEvent(timestamp, event_type, dx, dy))
+                events.append(
+                    InputEvent(
+                        timestamp,
+                        event_type,
+                        dx,
+                        dy,
+                        monotonic_seconds,
+                    )
+                )
     except OSError as error:
         raise CaptureError(f"无法读取输入遥测 {path}：{error}") from error
-    events.sort(key=lambda event: event.timestamp)
-    return tuple(events)
+    events.sort(
+        key=lambda event: (
+            event.monotonic_seconds
+            if has_monotonic and event.monotonic_seconds is not None
+            else event.timestamp.timestamp()
+        )
+    )
+    return tuple(events), has_monotonic
 
 
 def _align_input_events(
     events: Sequence[InputEvent],
     timestamps: tuple[datetime, ...],
+    monotonic_seconds: tuple[float, ...],
     *,
+    use_monotonic: bool,
     input_motion_threshold: float,
 ) -> tuple[tuple[bool, ...], tuple[float, ...]]:
     """Aggregate input rows into the same half-open polling windows as frames."""
     activity: list[bool] = []
     motion: list[float] = []
     event_index = 0
-    for timestamp in timestamps:
+    if len(timestamps) != len(monotonic_seconds):
+        raise ValueError("frame wall and monotonic timelines must have equal lengths")
+    for timestamp, frame_monotonic in zip(
+        timestamps, monotonic_seconds, strict=True
+    ):
         key_event = False
         motion_total = 0.0
-        while event_index < len(events) and events[event_index].timestamp <= timestamp:
+        frame_time = frame_monotonic if use_monotonic else timestamp.timestamp()
+        while event_index < len(events):
             event = events[event_index]
+            event_time = (
+                event.monotonic_seconds
+                if use_monotonic
+                else event.timestamp.timestamp()
+            )
+            if event_time is None or event_time > frame_time:
+                break
             if event.event_type in {"按下", "抬起"}:
                 key_event = True
             elif event.event_type == "移动汇总":
@@ -400,11 +464,11 @@ def evaluate_session(
     current_silence = 0.0
     longest_silence = 0.0
     region_ratios: list[float] = []
-    previous_timestamp: datetime | None = None
-    for index, (frame, timestamp) in enumerate(
-        zip(session.frames, session.timestamps, strict=True)
+    previous_monotonic: float | None = None
+    for index, (frame, monotonic_seconds) in enumerate(
+        zip(session.frames, session.monotonic_seconds, strict=True)
     ):
-        decision = selector.observe_prepared(frame, timestamp.timestamp())
+        decision = selector.observe_prepared(frame, monotonic_seconds)
         reason_counts[decision.reason] += 1
         saved_count += int(decision.should_save)
         if decision.region_grid:
@@ -418,12 +482,12 @@ def evaluate_session(
                 and session.input_activity[index]
             ):
                 input_activity_misses += 1
-            if previous_timestamp is not None:
-                current_silence += (timestamp - previous_timestamp).total_seconds()
+            if previous_monotonic is not None:
+                current_silence += monotonic_seconds - previous_monotonic
                 longest_silence = max(longest_silence, current_silence)
         else:
             current_silence = 0.0
-        previous_timestamp = timestamp
+        previous_monotonic = monotonic_seconds
     frame_count = len(session.frames)
     return CalibrationResult(
         combination_index=combination_index,

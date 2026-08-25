@@ -45,6 +45,8 @@ def _session(
         recorded_label="synthetic",
         paths=tuple(Path(f"raw-{index}.jpg") for index in range(len(images))),
         timestamps=timestamps,
+        monotonic_seconds=tuple(float(index) for index in range(len(images))),
+        timeline_source="monotonic",
         frames=tuple(detector.prepare(image) for image in images),
         strong_adjacent_changes=strong or tuple(False for _ in images),
         input_available=input_activity is not None,
@@ -133,11 +135,40 @@ def test_input_rows_align_to_poll_windows_with_motion_sum() -> None:
     )
 
     activity, motion = _align_input_events(
-        events, timestamps, input_motion_threshold=20.0
+        events,
+        timestamps,
+        tuple(timestamp.timestamp() for timestamp in timestamps),
+        use_monotonic=False,
+        input_motion_threshold=20.0,
     )
 
     assert activity == (False, True, True)
     assert motion == pytest.approx((0.0, 24.0, 0.0))
+
+
+def test_input_rows_use_monotonic_timeline_when_available() -> None:
+    started = datetime(2026, 8, 25, tzinfo=timezone.utc)
+    timestamps = (started, started + timedelta(seconds=100))
+    monotonic = (10.0, 11.0)
+    events = (
+        InputEvent(
+            started + timedelta(seconds=50),
+            "按下",
+            0,
+            0,
+            monotonic_seconds=10.5,
+        ),
+    )
+
+    activity, _ = _align_input_events(
+        events,
+        timestamps,
+        monotonic,
+        use_monotonic=True,
+        input_motion_threshold=20.0,
+    )
+
+    assert activity == (False, True)
 
 
 def test_default_grid_has_all_108_combinations_without_removed_dimension() -> None:

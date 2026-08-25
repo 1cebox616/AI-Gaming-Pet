@@ -51,6 +51,8 @@ def _captured_frame(
             captured_at=captured_at,
             width=bitmap.width,
             height=bitmap.height,
+            monotonic_seconds=captured_at.timestamp(),
+            time_source="capture",
         ),
     )
 
@@ -371,6 +373,19 @@ def test_replay_is_byte_deterministic(tmp_path: Path) -> None:
     ).read_bytes()
 
 
+def test_replay_old_timeline_falls_back_with_one_clear_notice(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_raw_stream(raw_dir, (0, 20))
+
+    capture.run_replay(_replay_options(raw_dir, tmp_path / "replayed"))
+
+    output = capsys.readouterr().out
+    assert output.count("整条时间轴回退 UTC 墙钟") == 1
+
+
 def test_replay_normalizes_legacy_camera_reason_without_failing(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -423,8 +438,8 @@ def test_metrics_csv_header_rows_and_immediate_flush(tmp_path: Path) -> None:
     assert "是否因超过稀疏上限而清空region_grid" in rows[0]
     assert len(rows) == 2
     assert rows[1][0] == "1"
-    assert rows[1][9:13] == ["是", "是", "frame.png", ""]
-    assert rows[1][18] == "forced"
+    assert rows[1][11:15] == ["是", "是", "frame.png", ""]
+    assert rows[1][20] == "forced"
     assert rows[1][-4:] == ["是", "1", "0.000", "正常"]
 
 
@@ -439,7 +454,13 @@ def test_metrics_csv_records_unavailable_poll_and_flushes(tmp_path: Path) -> Non
     writer.close()
 
     assert len(rows[0]) == len(rows[1]) == len(CSV_HEADER)
-    assert rows[1][0:3] == ["2", attempted_at.isoformat(), "Synthetic Game"]
+    assert rows[1][0:5] == [
+        "2",
+        attempted_at.isoformat(),
+        f"{attempted_at.timestamp():.9f}",
+        "capture",
+        "Synthetic Game",
+    ]
     assert rows[1][-4:] == ["否", "0", "0.250", "WGC 暂无新帧"]
 
 
@@ -457,9 +478,29 @@ def test_session_json_records_new_arguments(tmp_path: Path) -> None:
     assert payload["启动参数"]["region_sparsity_max"] == 0.25
     assert payload["启动参数"]["record_all"] is False
     assert payload["启动参数"]["record_input"] is False
+    assert payload["启动参数"]["input_full_keyboard"] is False
     assert payload["输入记录"]["已开启"] is False
     assert payload["输入记录"]["白名单版本"] == "v1"
     assert payload["总轮询数"] == 300
+
+
+def test_full_keyboard_banner_has_explicit_privacy_warning(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = ProbeOptions(
+        1.0,
+        "Game",
+        tmp_path,
+        record_input=True,
+        input_full_keyboard=True,
+    )
+
+    capture._print_banner(options)
+
+    output = capsys.readouterr().out
+    assert "全键盘记录已开启" in output
+    assert "会包含聊天与输入框内容" in output
+    assert "只存本地会话目录" in output
 
 
 def test_archive_removes_oldest_png_at_file_limit(tmp_path: Path) -> None:

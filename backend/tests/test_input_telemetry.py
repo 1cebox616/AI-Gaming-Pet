@@ -13,6 +13,7 @@ import pytest
 from pet.core.capture import AdaptiveFrameSelector, MetricsCsvWriter, ProbeOptions
 from pet.core import capture, input_telemetry
 from pet.core.input_telemetry import (
+    ClockAnchor,
     INPUT_CSV_HEADER,
     INPUT_NAME_WHITELIST,
     InputEventProcessor,
@@ -158,19 +159,42 @@ def test_input_csv_header_and_row_are_immediately_flushed(tmp_path: Path) -> Non
     recorder.close(STARTED + timedelta(seconds=1))
 
     assert tuple(rows[0]) == INPUT_CSV_HEADER
-    assert rows[1] == [STARTED.isoformat(), "按下", "MouseLeft", "", ""]
+    assert rows[1] == [
+        STARTED.isoformat(),
+        f"{STARTED.timestamp():.9f}",
+        "按下",
+        "MouseLeft",
+        "",
+        "",
+    ]
 
 
-def test_input_and_frame_metrics_share_utc_wall_clock(tmp_path: Path) -> None:
+def test_input_and_frame_metrics_share_monotonic_clock(tmp_path: Path) -> None:
     input_recorder = InputTelemetryRecorder(tmp_path)
     metrics_writer = MetricsCsvWriter(tmp_path)
     selector = AdaptiveFrameSelector(min_save_interval=0.0)
     observation = selector.observe(np.zeros((54, 96, 3), dtype=np.uint8), STARTED.timestamp())
 
     input_recorder.processor.process(
-        InputSample(STARTED, "key", True, name="W", pressed=True)
+        InputSample(
+            STARTED,
+            "key",
+            True,
+            name="W",
+            pressed=True,
+            monotonic_seconds=123.456,
+        )
     )
-    metrics_writer.write(1, STARTED, "Synthetic Game", observation, "", "", 0.0)
+    metrics_writer.write(
+        1,
+        STARTED,
+        "Synthetic Game",
+        observation,
+        "",
+        "",
+        0.0,
+        monotonic_seconds=123.456,
+    )
 
     with (tmp_path / "input.csv").open(encoding="utf-8-sig", newline="") as handle:
         input_rows = list(csv.reader(handle))
@@ -179,7 +203,49 @@ def test_input_and_frame_metrics_share_utc_wall_clock(tmp_path: Path) -> None:
     input_recorder.close(STARTED)
     metrics_writer.close()
 
-    assert input_rows[1][0] == metric_rows[1][1] == STARTED.isoformat()
+    assert input_rows[1][1] == metric_rows[1][2] == "123.456000000"
+
+
+def test_clock_anchor_round_trip_is_consistent() -> None:
+    anchor = ClockAnchor(STARTED, 50.0)
+    later_wall = STARTED + timedelta(seconds=2.25)
+
+    monotonic = anchor.monotonic_from_wall(later_wall)
+
+    assert monotonic == pytest.approx(52.25)
+    assert anchor.wall_from_monotonic(monotonic) == later_wall
+
+
+def test_full_keyboard_is_explicit_and_report_stats_are_privacy_safe() -> None:
+    records: list[input_telemetry.InputRecord] = []
+    processor = InputEventProcessor(records.append, full_keyboard=True)
+    processor.process(InputSample(STARTED, "key", True, name="B", pressed=True))
+
+    assert records[0].name == "B"
+    assert processor.statistics.summary()["按键名分组的按下次数"] == {"B": 1}
+    assert processor.statistics.report_safe_press_counts() == {"其他键合计": 1}
+
+
+def test_full_keyboard_writes_non_allowlisted_key_to_local_csv(tmp_path: Path) -> None:
+    recorder = InputTelemetryRecorder(tmp_path, full_keyboard=True)
+    recorder.processor.process(
+        InputSample(
+            STARTED,
+            "key",
+            True,
+            name="B",
+            pressed=True,
+            monotonic_seconds=20.0,
+        )
+    )
+    with (tmp_path / "input.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as handle:
+        rows = list(csv.DictReader(handle))
+    recorder.close(STARTED)
+
+    assert rows[0]["键名"] == "B"
+    assert rows[0]["单调秒"] == "20.000000000"
 
 
 def test_session_json_receives_input_statistics(tmp_path: Path) -> None:
@@ -210,6 +276,8 @@ def test_session_json_receives_input_statistics(tmp_path: Path) -> None:
     assert payload["输入记录"]["已开启"] is True
     assert payload["输入记录"]["事件总数"] == 1
     assert payload["输入记录"]["按键名分组的按下次数"] == {"W": 1}
+    assert "perf_counter秒" in payload["时钟锚点"]
+    assert "对应UTC墙钟" in payload["时钟锚点"]
 
 
 def test_non_windows_backend_has_human_readable_error(

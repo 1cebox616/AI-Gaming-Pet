@@ -12,12 +12,13 @@ from collections.abc import Callable
 import csv
 import ctypes
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 from pathlib import Path
 import statistics
 import sys
 import threading
+import time
 from typing import Literal, Self
 
 
@@ -68,13 +69,34 @@ MOUSE_INPUT_NAMES = (
 )
 INPUT_NAME_WHITELIST = frozenset((*KEYBOARD_INPUT_NAMES, *MOUSE_INPUT_NAMES))
 
-INPUT_CSV_HEADER = ("时间", "事件类型", "键名", "dx", "dy")
+INPUT_CSV_HEADER = ("时间", "单调秒", "事件类型", "键名", "dx", "dy")
 InputEventType = Literal["按下", "抬起", "滚轮", "移动汇总", "焦点丢失"]
 InputSampleKind = Literal["key", "mouse_button", "wheel", "move"]
 
 
 class InputTelemetryError(RuntimeError):
     """An input-recorder failure phrased for the probe operator."""
+
+
+@dataclass(frozen=True, slots=True)
+class ClockAnchor:
+    """A near-simultaneous wall-clock/perf-counter pair for one session."""
+
+    utc: datetime
+    monotonic_seconds: float
+
+    @classmethod
+    def sample(cls) -> ClockAnchor:
+        before = time.perf_counter()
+        utc = datetime.now(timezone.utc)
+        after = time.perf_counter()
+        return cls(utc, (before + after) / 2.0)
+
+    def wall_from_monotonic(self, value: float) -> datetime:
+        return self.utc + timedelta(seconds=value - self.monotonic_seconds)
+
+    def monotonic_from_wall(self, value: datetime) -> float:
+        return self.monotonic_seconds + (_utc(value) - self.utc).total_seconds()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +111,7 @@ class InputSample:
     dx: int = 0
     dy: int = 0
     relative: bool = True
+    monotonic_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +123,7 @@ class InputRecord:
     name: str = ""
     dx: int = 0
     dy: int = 0
+    monotonic_seconds: float = 0.0
 
 
 @dataclass(slots=True)
@@ -133,6 +157,27 @@ class InputStatistics:
             "focus_lost次数": self.focus_lost_count,
         }
 
+    def report_safe_press_counts(self) -> dict[str, int]:
+        """Aggregate non-action keys before any statistics enter tracked reports.
+
+        ``session.json`` is local and deliberately retains per-key development
+        data.  A committed report must use this projection so typing content is
+        represented only as one ``其他键合计`` count.
+        """
+        safe = {
+            name: count
+            for name, count in self.press_counts.items()
+            if name in INPUT_NAME_WHITELIST
+        }
+        other_count = sum(
+            count
+            for name, count in self.press_counts.items()
+            if name not in INPUT_NAME_WHITELIST
+        )
+        if other_count:
+            safe["其他键合计"] = other_count
+        return dict(sorted(safe.items()))
+
 
 class InputCsvWriter:
     """Write and immediately flush each privacy-filtered input row."""
@@ -149,6 +194,7 @@ class InputCsvWriter:
         self._writer.writerow(
             (
                 event.timestamp.astimezone(timezone.utc).isoformat(),
+                f"{event.monotonic_seconds:.9f}",
                 event.event_type,
                 event.name,
                 event.dx if event.event_type == "移动汇总" else "",
@@ -175,71 +221,127 @@ class InputEventProcessor:
         sink: Callable[[InputRecord], None],
         *,
         movement_window_seconds: float = MOUSE_SUMMARY_WINDOW_SECONDS,
+        full_keyboard: bool = False,
     ) -> None:
         if movement_window_seconds <= 0:
             raise ValueError("movement window must be positive")
         self._sink = sink
         self._window_seconds = movement_window_seconds
+        self._full_keyboard = full_keyboard
         self._focused = False
-        self._movement_started_at: datetime | None = None
+        self._movement_started_at_monotonic: float | None = None
         self._movement_dx = 0
         self._movement_dy = 0
         self.statistics = InputStatistics()
 
-    def set_foreground(self, foreground: bool, timestamp: datetime) -> None:
+    @property
+    def full_keyboard(self) -> bool:
+        return self._full_keyboard
+
+    def set_foreground(
+        self,
+        foreground: bool,
+        timestamp: datetime,
+        monotonic_seconds: float | None = None,
+    ) -> None:
         """Update the exact target-window focus state and emit one loss edge."""
         normalized = _utc(timestamp)
+        monotonic = _event_monotonic(normalized, monotonic_seconds)
         if foreground:
             self._focused = True
             return
         if self._focused:
-            self._flush_movement(normalized, force=True)
-            self._emit(InputRecord(normalized, "焦点丢失"))
+            self._flush_movement(normalized, monotonic, force=True)
+            self._emit(
+                InputRecord(
+                    normalized,
+                    "焦点丢失",
+                    monotonic_seconds=monotonic,
+                )
+            )
         self._focused = False
 
     def process(self, sample: InputSample) -> None:
         """Consume one synthetic or Raw Input sample without retaining rejected data."""
         timestamp = _utc(sample.timestamp)
-        self.set_foreground(sample.foreground, timestamp)
+        monotonic = _event_monotonic(timestamp, sample.monotonic_seconds)
+        self.set_foreground(sample.foreground, timestamp, monotonic)
         if not self._focused:
             return
-        self.flush_due(timestamp)
+        self.flush_due(timestamp, monotonic)
         if sample.kind in {"key", "mouse_button"}:
-            if sample.name not in INPUT_NAME_WHITELIST or sample.pressed is None:
+            allowed = sample.name in INPUT_NAME_WHITELIST or (
+                self._full_keyboard and sample.kind == "key" and bool(sample.name)
+            )
+            if not allowed or sample.pressed is None:
                 return
             event_type: InputEventType = "按下" if sample.pressed else "抬起"
-            self._emit(InputRecord(timestamp, event_type, sample.name))
+            self._emit(
+                InputRecord(
+                    timestamp,
+                    event_type,
+                    sample.name,
+                    monotonic_seconds=monotonic,
+                )
+            )
             return
         if sample.kind == "wheel":
             if sample.name not in {"WheelUp", "WheelDown"}:
                 return
-            self._emit(InputRecord(timestamp, "滚轮", sample.name))
+            self._emit(
+                InputRecord(
+                    timestamp,
+                    "滚轮",
+                    sample.name,
+                    monotonic_seconds=monotonic,
+                )
+            )
             return
         if sample.kind == "move" and sample.relative:
-            self._accumulate_movement(timestamp, sample.dx, sample.dy)
+            self._accumulate_movement(monotonic, sample.dx, sample.dy)
 
-    def flush_due(self, timestamp: datetime) -> None:
+    def flush_due(
+        self,
+        timestamp: datetime,
+        monotonic_seconds: float | None = None,
+    ) -> None:
         """Flush one complete movement window; timers call this when input is idle."""
         normalized = _utc(timestamp)
-        started = self._movement_started_at
+        monotonic = _event_monotonic(normalized, monotonic_seconds)
+        started = self._movement_started_at_monotonic
         if started is None:
             return
-        if (normalized - started).total_seconds() >= self._window_seconds:
-            self._flush_movement(normalized, force=True)
+        if monotonic - started + 1e-6 >= self._window_seconds:
+            self._flush_movement(normalized, monotonic, force=True)
 
-    def finish(self, timestamp: datetime) -> None:
-        self._flush_movement(_utc(timestamp), force=True)
+    def finish(
+        self,
+        timestamp: datetime,
+        monotonic_seconds: float | None = None,
+    ) -> None:
+        normalized = _utc(timestamp)
+        self._flush_movement(
+            normalized,
+            _event_monotonic(normalized, monotonic_seconds),
+            force=True,
+        )
 
-    def _accumulate_movement(self, timestamp: datetime, dx: int, dy: int) -> None:
+    def _accumulate_movement(self, monotonic_seconds: float, dx: int, dy: int) -> None:
         if dx == 0 and dy == 0:
             return
-        if self._movement_started_at is None:
-            self._movement_started_at = timestamp
+        if self._movement_started_at_monotonic is None:
+            self._movement_started_at_monotonic = monotonic_seconds
         self._movement_dx += abs(dx)
         self._movement_dy += abs(dy)
 
-    def _flush_movement(self, timestamp: datetime, *, force: bool) -> None:
-        if self._movement_started_at is None:
+    def _flush_movement(
+        self,
+        timestamp: datetime,
+        monotonic_seconds: float,
+        *,
+        force: bool,
+    ) -> None:
+        if self._movement_started_at_monotonic is None:
             return
         if force and (self._movement_dx or self._movement_dy):
             self._emit(
@@ -248,9 +350,10 @@ class InputEventProcessor:
                     "移动汇总",
                     dx=self._movement_dx,
                     dy=self._movement_dy,
+                    monotonic_seconds=monotonic_seconds,
                 )
             )
-        self._movement_started_at = None
+        self._movement_started_at_monotonic = None
         self._movement_dx = 0
         self._movement_dy = 0
 
@@ -262,15 +365,23 @@ class InputEventProcessor:
 class InputTelemetryRecorder:
     """Own input.csv and the injectable processor for one capture session."""
 
-    def __init__(self, save_dir: Path) -> None:
+    def __init__(self, save_dir: Path, *, full_keyboard: bool = False) -> None:
         self.writer = InputCsvWriter(save_dir)
-        self.processor = InputEventProcessor(self.writer.write)
+        self.processor = InputEventProcessor(
+            self.writer.write,
+            full_keyboard=full_keyboard,
+        )
         self._closed = False
 
     def close(self, ended_at: datetime | None = None) -> None:
         if self._closed:
             return
-        self.processor.finish(ended_at or datetime.now(timezone.utc))
+        anchor = ClockAnchor.sample()
+        ended = ended_at or anchor.utc
+        self.processor.finish(
+            ended,
+            anchor.monotonic_from_wall(ended),
+        )
         self.writer.close()
         self._closed = True
 
@@ -292,6 +403,7 @@ _HID_USAGE_PAGE_GENERIC = 0x01
 _HID_USAGE_GENERIC_MOUSE = 0x02
 _HID_USAGE_GENERIC_KEYBOARD = 0x06
 _RI_KEY_BREAK = 0x0001
+_RI_KEY_E0 = 0x0002
 _MOUSE_MOVE_ABSOLUTE = 0x0001
 _RI_MOUSE_LEFT_BUTTON_DOWN = 0x0001
 _RI_MOUSE_LEFT_BUTTON_UP = 0x0002
@@ -432,6 +544,24 @@ _VIRTUAL_KEY_NAMES = {
 }
 
 
+def _full_keyboard_name(user32: object, keyboard: _RAWKEYBOARD) -> str | None:
+    """Resolve one Raw Input key without installing a keyboard hook."""
+    virtual_key = int(keyboard.VKey)
+    if virtual_key in {0, 0xFF}:
+        return None
+    if 0x30 <= virtual_key <= 0x39 or 0x41 <= virtual_key <= 0x5A:
+        return chr(virtual_key)
+    scan_code = int(keyboard.MakeCode)
+    l_param = scan_code << 16
+    if keyboard.Flags & _RI_KEY_E0:
+        l_param |= 1 << 24
+    buffer = ctypes.create_unicode_buffer(128)
+    copied = int(user32.GetKeyNameTextW(l_param, buffer, len(buffer)))
+    if copied > 0 and buffer.value:
+        return buffer.value
+    return f"VK_0x{virtual_key:02X}"
+
+
 class WindowsRawInputBackend:
     """Receive Raw Input in a message-only window on a dedicated thread."""
 
@@ -514,8 +644,9 @@ class WindowsRawInputBackend:
                     return 0
                 if message == _WM_TIMER:
                     now = datetime.now(timezone.utc)
-                    self._update_focus(user32, now)
-                    self._recorder.processor.flush_due(now)
+                    monotonic = time.perf_counter()
+                    self._update_focus(user32, now, monotonic)
+                    self._recorder.processor.flush_due(now, monotonic)
                     return 0
                 if message == _WM_CLOSE:
                     user32.DestroyWindow(hwnd)
@@ -565,7 +696,8 @@ class WindowsRawInputBackend:
             devices_registered = True
             if not user32.SetTimer(self._window_handle, 1, 10, None):
                 raise _last_windows_error("启动 Raw Input 前台状态计时器")
-            self._update_focus(user32, datetime.now(timezone.utc))
+            now = datetime.now(timezone.utc)
+            self._update_focus(user32, now, time.perf_counter())
             self._ready.set()
             message = _MSG()
             while True:
@@ -654,19 +786,31 @@ class WindowsRawInputBackend:
             raise _last_windows_error("读取 Raw Input 数据")
         raw = ctypes.cast(buffer, ctypes.POINTER(_RAWINPUT)).contents
         timestamp = datetime.now(timezone.utc)
-        foreground = self._update_focus(user32, timestamp)
+        monotonic = time.perf_counter()
+        foreground = self._update_focus(user32, timestamp, monotonic)
         if raw.header.dwType == _RIM_TYPEKEYBOARD:
-            self._record_keyboard(raw.keyboard, timestamp, foreground)
+            self._record_keyboard(
+                user32,
+                raw.keyboard,
+                timestamp,
+                monotonic,
+                foreground,
+            )
         elif raw.header.dwType == _RIM_TYPEMOUSE:
-            self._record_mouse(raw.mouse, timestamp, foreground)
+            self._record_mouse(raw.mouse, timestamp, monotonic, foreground)
 
     def _record_keyboard(
         self,
+        user32: object,
         keyboard: _RAWKEYBOARD,
         timestamp: datetime,
+        monotonic_seconds: float,
         foreground: bool,
     ) -> None:
-        name = _VIRTUAL_KEY_NAMES.get(int(keyboard.VKey))
+        if self._recorder.processor.full_keyboard:
+            name = _full_keyboard_name(user32, keyboard)
+        else:
+            name = _VIRTUAL_KEY_NAMES.get(int(keyboard.VKey))
         if name is None:
             return
         self._recorder.processor.process(
@@ -676,6 +820,7 @@ class WindowsRawInputBackend:
                 foreground,
                 name=name,
                 pressed=not bool(keyboard.Flags & _RI_KEY_BREAK),
+                monotonic_seconds=monotonic_seconds,
             )
         )
 
@@ -683,6 +828,7 @@ class WindowsRawInputBackend:
         self,
         mouse: _RAWMOUSE,
         timestamp: datetime,
+        monotonic_seconds: float,
         foreground: bool,
     ) -> None:
         relative = not bool(mouse.usFlags & _MOUSE_MOVE_ABSOLUTE)
@@ -694,6 +840,7 @@ class WindowsRawInputBackend:
                 dx=int(mouse.lLastX),
                 dy=int(mouse.lLastY),
                 relative=relative,
+                monotonic_seconds=monotonic_seconds,
             )
         )
         flags = int(mouse.usButtonFlags)
@@ -718,6 +865,7 @@ class WindowsRawInputBackend:
                         foreground,
                         name=name,
                         pressed=pressed,
+                        monotonic_seconds=monotonic_seconds,
                     )
                 )
         if flags & _RI_MOUSE_WHEEL:
@@ -729,18 +877,34 @@ class WindowsRawInputBackend:
                         "wheel",
                         foreground,
                         name="WheelUp" if delta > 0 else "WheelDown",
+                        monotonic_seconds=monotonic_seconds,
                     )
                 )
 
-    def _update_focus(self, user32: object, timestamp: datetime) -> bool:
+    def _update_focus(
+        self,
+        user32: object,
+        timestamp: datetime,
+        monotonic_seconds: float,
+    ) -> bool:
         foreground = int(user32.GetForegroundWindow() or 0) == self._target_hwnd
-        self._recorder.processor.set_foreground(foreground, timestamp)
+        self._recorder.processor.set_foreground(
+            foreground,
+            timestamp,
+            monotonic_seconds,
+        )
         return foreground
 
     @staticmethod
     def _configure_functions(user32: object, kernel32: object) -> None:
         user32.GetForegroundWindow.argtypes = []
         user32.GetForegroundWindow.restype = ctypes.c_void_p
+        user32.GetKeyNameTextW.argtypes = [
+            ctypes.c_int32,
+            ctypes.c_wchar_p,
+            ctypes.c_int32,
+        ]
+        user32.GetKeyNameTextW.restype = ctypes.c_int32
         user32.IsWindow.argtypes = [ctypes.c_void_p]
         user32.IsWindow.restype = ctypes.c_bool
         user32.RegisterClassW.argtypes = [ctypes.POINTER(_WNDCLASSW)]
@@ -824,6 +988,11 @@ def _utc(timestamp: datetime) -> datetime:
     if timestamp.tzinfo is None:
         raise ValueError("input timestamps must include a timezone")
     return timestamp.astimezone(timezone.utc)
+
+
+def _event_monotonic(timestamp: datetime, value: float | None) -> float:
+    """Keep old injectable call sites deterministic while production passes QPC."""
+    return timestamp.timestamp() if value is None else value
 
 
 def _percentile(ordered: list[float], percentile: float) -> float:

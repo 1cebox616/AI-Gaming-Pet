@@ -1,4 +1,4 @@
-# M5-T1 / M5-T1.5 / M5-T3 / M5-T3.5 窗口截屏与帧选取报告
+# M5-T1 / M5-T1.5 / M5-T3 / M5-T3.5 / M5-T3.6 窗口截屏与帧选取报告
 
 最后更新：2026-08-24
 
@@ -158,8 +158,9 @@ M5-T3 新增测试、分层测试和其余回归全部通过。
 `MOUSE_INPUT_NAMES`，版本为 `v1`，不从配置读取。鼠标位移只接受相对模式；
 每 100 ms 分别累加 `abs(dx)` 和 `abs(dy)` 后写一行。会话汇总中的鼠标
 “位移量”口径是每个汇总行的
-`hypot(sum(abs(dx)), sum(abs(dy)))`。输入与画面都使用 UTC ISO 8601
-系统墙钟，所以 `input.csv` 可直接与 `metrics.csv` 的时间列对齐。
+`hypot(sum(abs(dx)), sum(abs(dy)))`。M5-T3.6 起，输入与画面对齐统一使用同一
+进程的 `time.perf_counter()` 单调秒；UTC ISO 8601 墙钟列仅供人读与旧工具兼容。
+`session.json` 记录会话起点的单调秒与对应 UTC 锚点，可在两种表示间换算。
 
 合成流对齐验证在两份 CSV 中实际读回的时间均为
 `2026-08-25T01:02:03+00:00`。M5-T3.5 验证结果：
@@ -203,8 +204,8 @@ cd backend
 - `--noise-window 20`：每块保留多少次差值。
 - `--noise-multiplier 2.5` 与 `--noise-margin 0.0156862745`：噪声地板公式中的
   `k` 与 `4/255`。
-- `--persistence-polls 2`：同一块连续几轮越过地板才确认。
-- `--camera-motion-ratio 0.35`：确认块达到 35% 时视为镜头移动。
+- `--persistence-polls 1`：M5-T4 实测定案，单轮越过地板即确认。
+- `--region-sparsity-max 0.25`：确认块占比超过该值仍上传，但清空无意义的区域提示。
 - `--min-save-interval 1.0`、`--max-silence 60.0`：连拍抑制和最长静默兜底。
 
 全量流默认写到同一会话目录的 `raw/`，宽 640、JPEG 质量固定为 70，独立保留
@@ -238,8 +239,8 @@ cd backend
 每个保存目录还包含：
 
 - `metrics.csv`：每次轮询立即写一行并 flush。除六个旧指标外，新增确认块数/
-  占比、镜头移动、变化格子、144 块噪声地板的中位值、判定原因和相邻前帧
-  文件名。原因只会是 `persistent_change`、`camera_motion`、`forced`、
+  占比、稀疏提示抑制、变化格子、144 块噪声地板的中位值、判定原因和相邻前帧
+  文件名。原因只会是 `persistent_change`、`forced`、
   `suppressed_min_interval`、`no_change`。WGC 无新帧仍单独记行，指标留空。
 - `session.json`：记录 `--label`、启动参数、开始与结束时间、总轮询数及退出汇总。
   如果进程异常退出，已 flush 的 CSV 行仍在；session.json 至少保留启动信息，
@@ -251,7 +252,7 @@ cd backend
 `--record-all`。优先补这三类：
 
 1. 3D 动态环境：雨、浪、植被各至少静止 2 分钟，再插入人物经过、小幅移动与
-   大幅转向，用来同时测噪声地板、局部持久变化和镜头移动。
+   大幅转向，用来同时测噪声地板、局部持久变化和稀疏提示抑制。
 2. 文字/策略 UI：静止文本、切换一个任务标签、弹出大面板、整屏切页各重复数次，
    用来确认小面积变化不会漏掉。
 3. 2D 动画游戏：待机动画、小范围角色移动、背包/菜单与换场，观察固定动画区域
@@ -262,8 +263,8 @@ cd backend
 - 后端是否初始化成功；失败时完整抄下终端的人话错误。
 - 保存目录是否主要是首帧和肉眼可见变化帧；静止时只有每到 `--max-silence`
   才出现一次 `forced=true` 的兜底帧，还是仍有大量非强制落盘。
-- 明显事件是否在第二个连续轮询后出现 `persistent_change`；大幅转向是否记为
-  `camera_motion` 且变化格子为空。漏传比多传优先级更高，发现漏传先记录原始
+- 明显事件是否在当前轮询出现 `persistent_change`；大幅变化时是否仍上传、且在
+  confirmed 块占比超过上限时变化格子为空。漏传比多传优先级更高，发现漏传先记录原始
   时刻，不要直接抬高门槛。
 - 任务管理器中该 Python 进程的 CPU 百分比（静止时与激烈变化时各记一次）。
 - 游戏开启探针前后的帧率，是否有可感知掉帧或卡顿。
@@ -294,7 +295,85 @@ cd backend
    任何行为变化，立即按 Ctrl+C 停止，不要强行继续；保留完整终端错误和
    会话目录，转入诊断。
 
-`input.csv` 每行立即 flush，列为时间、事件类型、键名、dx、dy。
+`input.csv` 每行立即 flush，列为时间、单调秒、事件类型、键名、dx、dy。
 `session.json` 会额外记录是否开启输入、白名单版本、事件总数、各键按下
 次数、鼠标位移中位/P90 和 `focus_lost` 次数。键鼠文件可能暴露
 游玩习惯，与截图一样只保留在已忽略的会话目录，不要提交。
+
+## M5-T3.6 时间线与开发期全键盘
+
+### zbl 帧呈现时间戳查证
+
+查证版本为本地已安装的 zbl 0.7.1，依次检查了包内 README/METADATA、
+`zbl/__init__.py` 包装层、原生 `Frame` 类型反射，并实际对系统画图窗口抓取一帧。
+实际帧为 2560×1351，原生对象仅暴露：
+
+```text
+height, ptr, row_pitch, width
+```
+
+文档与包装层也没有 `SystemRelativeTime` 或其他呈现时间字段。因此本版本无法取得
+WGC 帧的 QPC 呈现时间戳；未进行也未编造 n≥50 的偏移换算实验。偏移表如下：
+
+| 项目 | 结果 |
+|---|---:|
+| 样本数 n | 不适用 |
+| 偏移中位 | 不适用 |
+| 抖动 | 不适用 |
+| 原因 | zbl 0.7.1 未暴露呈现时间戳 |
+
+帧的“单调秒”现取位图复制完成后的 `perf_counter()`，`metrics.csv` 的“时间来源”
+写为 `capture`。它仍可能比屏幕内容本身晚，最坏约一个轮询周期；技术债 22 因此是
+必做项。没有更换截屏后端，也没有升级依赖。
+
+### 统一时钟与旧数据
+
+`metrics.csv` 与 `input.csv` 均保留墙钟列并新增“单调秒”。鼠标 100 ms 聚合窗口、
+检测器时间间隔以及校准时跨流归并只使用单调秒，不混用墙钟。`--replay` 与
+`--calibrate` 读取旧 CSV 时，如果任一相关数据流缺少单调列，会将整段对齐统一
+回退到 UTC 墙钟，并只在终端标注一次。
+
+### 全键盘开发模式
+
+默认行为不变，仍只记录 v1 固定动作白名单。开发期确需建键位表时，必须同时显式加：
+
+```powershell
+.venv\Scripts\python -m pet.core.capture --watch --title "窗口标题" --record-all --record-input --input-full-keyboard --label "开发校准"
+```
+
+横幅会额外显示：
+
+```text
+【警告：全键盘记录已开启】会包含聊天与输入框内容
+全键盘数据只存本地会话目录；请勿提交 input.csv 或 session.json
+```
+
+前台限制、`focus_lost`、鼠标相对位移和禁止绝对坐标等约束均不变。全键盘模式的
+逐键统计只允许留在本地 `session.json`；任何提交到 `backend/audit/` 的报告只可
+保留动作白名单内统计，并把其他键统一写成“其他键合计 N 次”，不得列出逐键内容。
+
+### M5-T3.6 验证记录
+
+```text
+.venv\Scripts\python -m pytest tests/test_input_telemetry.py tests/test_capture.py tests/test_capture_calibration.py tests/test_layering.py -q
+63 passed
+
+.venv\Scripts\python -m pytest tests\ -q
+540 passed, 4 failed
+```
+
+完整回归的 4 项失败均为本机缺少 OneCore 中文语音的既有环境项。静态检索结果：
+
+```text
+rg -n "^\s*(from|import)\s+(httpx|socket|urllib|requests|aiohttp|websockets)(\.|\s|$)" backend/src/pet/core/capture.py backend/src/pet/core/input_telemetry.py backend/src/pet/core/capture_calibration.py
+(无匹配)
+
+rg -n "SendInput|keybd_event|mouse_event|SetWindowsHookEx|WH_KEYBOARD|WH_MOUSE|pynput|keyboard\.hook" backend/src/pet/core/capture.py backend/src/pet/core/input_telemetry.py
+(无匹配)
+
+rg -n '"[^"]+"\s*:\s*[0-9]+' backend/audit -g '*.md'
+(无逐键计数匹配)
+```
+
+随提交带入的根目录 `AGENTS.md` 与产品负责人附件正文一致；第二行为
+“最后更新：M5-T3.6 下发前（T3.5 / T4 / T5a / T5b 已验收）”，总计 542 行。

@@ -28,6 +28,7 @@ import numpy.typing as npt
 from PIL import Image
 
 from pet.core.input_telemetry import (
+    ClockAnchor,
     INPUT_WHITELIST_VERSION,
     KEYBOARD_INPUT_NAMES,
     MOUSE_INPUT_NAMES,
@@ -99,6 +100,8 @@ class FrameMetadata:
     captured_at: datetime
     width: int
     height: int
+    monotonic_seconds: float
+    time_source: Literal["presentation", "capture"]
     source_frames_drained: int = 1
 
 
@@ -339,6 +342,11 @@ class WindowsGraphicsCaptureBackend:
         # WGC's D3D11 frame is BGRA8.  Copy and reorder before the next native grab.
         rgba = np.ascontiguousarray(raw[..., [2, 1, 0, 3]])
         bitmap = Image.fromarray(rgba, mode="RGBA")
+        # zbl 0.7.1 does not expose WGC's SystemRelativeTime on its Python
+        # Frame object.  This near-simultaneous pair therefore timestamps the
+        # owned bitmap at capture completion; presentation-time calibration is
+        # intentionally not fabricated.
+        captured_anchor = ClockAnchor.sample()
         user32 = _configured_user32()
         current_target = _target_from_hwnd(self._target.hwnd, user32)
         self._target = current_target
@@ -347,7 +355,9 @@ class WindowsGraphicsCaptureBackend:
             metadata=FrameMetadata(
                 window_title=current_target.title,
                 process_name=current_target.process_name,
-                captured_at=datetime.now(timezone.utc),
+                captured_at=captured_anchor.utc,
+                monotonic_seconds=captured_anchor.monotonic_seconds,
+                time_source="capture",
                 width=bitmap.width,
                 height=bitmap.height,
                 source_frames_drained=source_frames_drained,
@@ -1060,6 +1070,8 @@ class AdaptiveFrameSelector:
 CSV_HEADER = (
     "序号",
     "时间",
+    "单调秒",
+    "时间来源",
     "窗口标题",
     "平均振幅_对比上一帧",
     "变化面积_对比上一帧",
@@ -1106,6 +1118,8 @@ class MetricsCsvWriter:
         previous_filename: str,
         duration_ms: float,
         *,
+        monotonic_seconds: float | None = None,
+        time_source: Literal["presentation", "capture"] = "capture",
         source_frames_drained: int = 1,
         capture_duration_ms: float = 0.0,
     ) -> None:
@@ -1116,6 +1130,8 @@ class MetricsCsvWriter:
             (
                 sequence,
                 captured_at.isoformat(),
+                f"{(captured_at.timestamp() if monotonic_seconds is None else monotonic_seconds):.9f}",
+                time_source,
                 window_title,
                 f"{previous.mean_amplitude:.9f}",
                 f"{previous.changed_area:.9f}",
@@ -1148,12 +1164,16 @@ class MetricsCsvWriter:
         attempted_at: datetime,
         window_title: str,
         capture_duration_ms: float,
+        *,
+        monotonic_seconds: float | None = None,
     ) -> None:
         """Record and flush a poll where WGC had no frame ready."""
         self._writer.writerow(
             (
                 sequence,
                 attempted_at.isoformat(),
+                f"{(attempted_at.timestamp() if monotonic_seconds is None else monotonic_seconds):.9f}",
+                "capture",
                 window_title,
                 "",
                 "",
@@ -1208,6 +1228,7 @@ class ProbeOptions:
     capture_cursor: bool = False
     record_all: bool = False
     record_input: bool = False
+    input_full_keyboard: bool = False
     raw_width: int = DEFAULT_RAW_WIDTH
     raw_max_files: int = DEFAULT_RAW_MAX_FILES
     raw_max_bytes: int = DEFAULT_RAW_MAX_BYTES
@@ -1336,6 +1357,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="被动记录固定白名单内的 Raw Input 键鼠事件（默认关闭）",
     )
     parser.add_argument(
+        "--input-full-keyboard",
+        action="store_true",
+        help="开发期记录全键盘真实键名；可能包含聊天与输入框内容（默认关闭）",
+    )
+    parser.add_argument(
         "--raw-width",
         type=_positive_int,
         default=DEFAULT_RAW_WIDTH,
@@ -1404,10 +1430,14 @@ def _print_banner(options: ProbeOptions) -> None:
         )
     if options.record_input:
         print("【键鼠输入记录已开启】仅在目标游戏窗口位于前台时记录")
-        print(
-            f"键盘白名单 {INPUT_WHITELIST_VERSION}："
-            + "、".join(KEYBOARD_INPUT_NAMES)
-        )
+        if options.input_full_keyboard:
+            print("【警告：全键盘记录已开启】会包含聊天与输入框内容")
+            print("全键盘数据只存本地会话目录；请勿提交 input.csv 或 session.json")
+        else:
+            print(
+                f"键盘白名单 {INPUT_WHITELIST_VERSION}："
+                + "、".join(KEYBOARD_INPUT_NAMES)
+            )
         print(
             f"鼠标白名单 {INPUT_WHITELIST_VERSION}："
             + "、".join(MOUSE_INPUT_NAMES)
@@ -1566,9 +1596,13 @@ def _write_session(
     total_polls: int,
     summary: dict[str, object] | None,
     input_summary: dict[str, object] | None = None,
+    *,
+    clock_anchor: ClockAnchor | None = None,
 ) -> None:
+    anchor = clock_anchor or ClockAnchor(started_at, started_at.timestamp())
     input_payload = dict(input_summary or empty_input_summary())
     input_payload["已开启"] = options.record_input
+    input_payload["全键盘模式"] = options.input_full_keyboard
     payload = {
         "标签": options.label,
         "启动参数": {
@@ -1589,6 +1623,7 @@ def _write_session(
             "capture_cursor": options.capture_cursor,
             "record_all": options.record_all,
             "record_input": options.record_input,
+            "input_full_keyboard": options.input_full_keyboard,
             "raw_width": options.raw_width,
             "raw_max_files": options.raw_max_files,
             "raw_max_bytes": options.raw_max_bytes,
@@ -1599,7 +1634,16 @@ def _write_session(
         "总轮询数": total_polls,
         "汇总": summary,
         "输入记录": input_payload,
-        "时间基准": "UTC ISO 8601；画面帧与输入事件共用系统墙钟",
+        "时间基准": "同一进程 time.perf_counter 单调秒；UTC 墙钟仅供人读",
+        "时钟锚点": {
+            "perf_counter秒": anchor.monotonic_seconds,
+            "对应UTC墙钟": anchor.utc.isoformat(),
+        },
+        "帧时间戳": {
+            "来源": "capture",
+            "呈现时间换算常数": None,
+            "说明": "zbl 0.7.1 未向 Python 暴露 WGC SystemRelativeTime；使用抓取完成时刻",
+        },
     }
     path = options.save_dir / "session.json"
     with path.open("w", encoding="utf-8") as session_file:
@@ -1650,9 +1694,17 @@ def run_probe(options: ProbeOptions) -> int:
     input_backend: WindowsRawInputBackend | None = None
     csv_writer = MetricsCsvWriter(options.save_dir)
     exit_code = 0
-    started_at = datetime.now(timezone.utc)
+    session_anchor = ClockAnchor.sample()
+    started_at = session_anchor.utc
     previous_frame: CapturedFrame | None = None
-    _write_session(options, started_at, None, 0, None)
+    _write_session(
+        options,
+        started_at,
+        None,
+        0,
+        None,
+        clock_anchor=session_anchor,
+    )
     _print_banner(options)
     try:
         if options.title is None:
@@ -1666,7 +1718,10 @@ def run_probe(options: ProbeOptions) -> int:
             capture_cursor=options.capture_cursor,
         )
         if options.record_input:
-            input_recorder = InputTelemetryRecorder(options.save_dir)
+            input_recorder = InputTelemetryRecorder(
+                options.save_dir,
+                full_keyboard=options.input_full_keyboard,
+            )
             input_backend = WindowsRawInputBackend(
                 backend.target.hwnd,
                 input_recorder,
@@ -1687,11 +1742,13 @@ def run_probe(options: ProbeOptions) -> int:
             if frame is None:
                 probe_statistics.unavailable_count += 1
                 consecutive_unavailable += 1
+                unavailable_anchor = ClockAnchor.sample()
                 csv_writer.write_unavailable(
                     probe_statistics.poll_count,
-                    datetime.now(timezone.utc),
+                    unavailable_anchor.utc,
                     backend.target.title,
                     capture_duration * 1000,
+                    monotonic_seconds=unavailable_anchor.monotonic_seconds,
                 )
                 if consecutive_unavailable == 1:
                     print("WGC 暂无新帧；本次已记录并继续轮询，不会阻塞等待")
@@ -1716,7 +1773,7 @@ def run_probe(options: ProbeOptions) -> int:
                     frame, probe_statistics.poll_count
                 )
             metrics_started = time.perf_counter()
-            decision_time = frame.metadata.captured_at.timestamp()
+            decision_time = frame.metadata.monotonic_seconds
             observation = selector.observe(detection_bitmap, decision_time)
             metrics_duration_ms = (time.perf_counter() - metrics_started) * 1000
             probe_statistics.record(observation, metrics_duration_ms)
@@ -1744,6 +1801,8 @@ def run_probe(options: ProbeOptions) -> int:
                 saved_filename,
                 previous_filename,
                 metrics_duration_ms,
+                monotonic_seconds=frame.metadata.monotonic_seconds,
+                time_source=frame.metadata.time_source,
                 source_frames_drained=frame.metadata.source_frames_drained,
                 capture_duration_ms=capture_duration * 1000,
             )
@@ -1783,6 +1842,7 @@ def run_probe(options: ProbeOptions) -> int:
             probe_statistics.poll_count,
             summary,
             input_summary,
+            clock_anchor=session_anchor,
         )
     return exit_code
 
@@ -1797,6 +1857,69 @@ def _raw_frame_timestamp(path: Path) -> datetime:
         )
     except ValueError as error:
         raise ValueError(f"raw 文件名时间格式无效：{path.name}") from error
+
+
+def _raw_frame_sequence(path: Path) -> int:
+    parts = path.stem.split("-", maxsplit=2)
+    if len(parts) != 3 or parts[0] != "raw":
+        raise ValueError(f"无法从 raw 文件名读取序号：{path.name}")
+    try:
+        return int(parts[1])
+    except ValueError as error:
+        raise ValueError(f"raw 文件名序号格式无效：{path.name}") from error
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayFrameTime:
+    wall_time: datetime
+    monotonic_seconds: float
+    source: Literal["presentation", "capture"]
+    recorded_monotonic: bool
+
+
+def _load_replay_frame_times(
+    raw_dir: Path,
+    paths: list[Path] | tuple[Path, ...],
+) -> tuple[ReplayFrameTime, ...]:
+    """Use the recorded monotonic timeline, or fall back wholly to wall time."""
+    metrics_path = raw_dir.parent / "metrics.csv"
+    by_sequence: dict[int, ReplayFrameTime] = {}
+    if metrics_path.is_file():
+        try:
+            with metrics_path.open(encoding="utf-8-sig", newline="") as source:
+                reader = csv.DictReader(source)
+                if reader.fieldnames and "单调秒" in reader.fieldnames:
+                    for row in reader:
+                        if not row.get("单调秒"):
+                            continue
+                        sequence = int(row["序号"])
+                        source_name = row.get("时间来源", "capture")
+                        time_source: Literal["presentation", "capture"] = (
+                            "presentation"
+                            if source_name == "presentation"
+                            else "capture"
+                        )
+                        by_sequence[sequence] = ReplayFrameTime(
+                            datetime.fromisoformat(row["时间"]),
+                            float(row["单调秒"]),
+                            time_source,
+                            True,
+                        )
+        except (OSError, csv.Error, KeyError, TypeError, ValueError) as error:
+            raise CaptureError(f"无法读取重放时间轴 {metrics_path}：{error}") from error
+    sequences = [_raw_frame_sequence(path) for path in paths]
+    if by_sequence and all(sequence in by_sequence for sequence in sequences):
+        return tuple(by_sequence[sequence] for sequence in sequences)
+    print("旧录制缺少单调秒；本次整条时间轴回退 UTC 墙钟（仅标注一次）")
+    return tuple(
+        ReplayFrameTime(
+            wall_time=_raw_frame_timestamp(path),
+            monotonic_seconds=_raw_frame_timestamp(path).timestamp(),
+            source="capture",
+            recorded_monotonic=False,
+        )
+        for path in paths
+    )
 
 
 _LEGACY_GLOBAL_CHANGE_REASON = "camera" "_motion"
@@ -1842,21 +1965,33 @@ def run_replay(options: ProbeOptions) -> tuple[SelectionDecision, ...]:
         raise CaptureError(f"重放目录中没有 raw JPEG：{options.replay_dir}")
     options.save_dir.mkdir(parents=True, exist_ok=True)
     _read_existing_metrics_reason_counts(options.replay_dir)
+    frame_times = _load_replay_frame_times(options.replay_dir, paths)
     selector = _make_selector(options)
     probe_statistics = ProbeStatistics()
     decisions: list[SelectionDecision] = []
-    started_at = datetime.now(timezone.utc)
-    _write_session(options, started_at, None, 0, None)
+    first_time = frame_times[0]
+    session_anchor = ClockAnchor(first_time.wall_time, first_time.monotonic_seconds)
+    started_at = first_time.wall_time
+    _write_session(
+        options,
+        started_at,
+        None,
+        0,
+        None,
+        clock_anchor=session_anchor,
+    )
     print("=" * 72)
     print(f"【离线重放】读取：{options.replay_dir}")
     print(f"输出：{options.save_dir}（只写 metrics.csv 与 session.json，不写图片）")
     print("=" * 72)
     with MetricsCsvWriter(options.save_dir) as csv_writer:
-        for sequence, path in enumerate(paths, start=1):
-            captured_at = _raw_frame_timestamp(path)
+        for sequence, (path, frame_time) in enumerate(
+            zip(paths, frame_times, strict=True), start=1
+        ):
+            captured_at = frame_time.wall_time
             with Image.open(path) as source:
                 bitmap = source.convert("RGB")
-            observation = selector.observe(bitmap, captured_at.timestamp())
+            observation = selector.observe(bitmap, frame_time.monotonic_seconds)
             decision = observation.decision
             decisions.append(decision)
             probe_statistics.poll_count += 1
@@ -1870,6 +2005,8 @@ def run_replay(options: ProbeOptions) -> tuple[SelectionDecision, ...]:
                 "",
                 "",
                 0.0,
+                monotonic_seconds=frame_time.monotonic_seconds,
+                time_source=frame_time.source,
                 source_frames_drained=1,
                 capture_duration_ms=0.0,
             )
@@ -1881,6 +2018,7 @@ def run_replay(options: ProbeOptions) -> tuple[SelectionDecision, ...]:
         datetime.now(timezone.utc),
         probe_statistics.poll_count,
         summary,
+        clock_anchor=session_anchor,
     )
     return tuple(decisions)
 
@@ -1889,6 +2027,8 @@ def main() -> None:
     _configure_console_encoding()
     parser = _build_parser()
     arguments = parser.parse_args()
+    if arguments.input_full_keyboard and not arguments.record_input:
+        parser.error("--input-full-keyboard 必须与 --record-input 一起使用")
     if arguments.replay is not None and arguments.record_input:
         parser.error("--record-input 只适用于 --watch；离线重放不读取实时键鼠")
     if arguments.calibrate is not None:
@@ -1925,6 +2065,7 @@ def main() -> None:
         capture_cursor=arguments.capture_cursor,
         record_all=arguments.record_all,
         record_input=arguments.record_input,
+        input_full_keyboard=arguments.input_full_keyboard,
         raw_width=arguments.raw_width,
         raw_max_files=arguments.raw_max_files,
         raw_max_bytes=arguments.raw_max_bytes,
