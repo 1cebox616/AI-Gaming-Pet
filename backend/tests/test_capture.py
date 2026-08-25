@@ -60,8 +60,8 @@ def _selector(**overrides: object) -> AdaptiveFrameSelector:
         "noise_window": 20,
         "noise_multiplier": 2.5,
         "noise_margin": 4.0 / 255.0,
-        "persistence_polls": 2,
-        "camera_motion_ratio": 0.35,
+        "persistence_polls": 1,
+        "region_sparsity_max": 0.25,
         "min_save_interval": 0.0,
         "max_silence": 10_000.0,
     }
@@ -214,7 +214,7 @@ def test_environment_motion_raises_floor_and_eventually_stops_selecting() -> Non
 
 
 def test_persistent_high_contrast_change_wins_over_prior_noise() -> None:
-    selector = _selector()
+    selector = _selector(persistence_polls=2)
     base = np.full((180, 320), 100, dtype=np.uint8)
     selector.observe(base, 0.0)
     rng = np.random.default_rng(17)
@@ -236,7 +236,7 @@ def test_persistent_high_contrast_change_wins_over_prior_noise() -> None:
 
 
 def test_alternating_flicker_never_satisfies_persistence() -> None:
-    selector = _selector()
+    selector = _selector(persistence_polls=2)
     base = np.full((180, 320), 100, dtype=np.uint8)
     flash = base.copy()
     flash[:60, :80] = 240
@@ -251,20 +251,51 @@ def test_alternating_flicker_never_satisfies_persistence() -> None:
     assert {item.decision.reason for item in observations} == {"no_change"}
 
 
-def test_whole_frame_motion_is_camera_motion_without_region_grid() -> None:
+def test_default_persistence_one_confirms_single_poll_change() -> None:
+    selector = AdaptiveFrameSelector(
+        min_save_interval=0.0,
+        max_silence=10_000.0,
+    )
+    base = np.full((180, 320), 100, dtype=np.uint8)
+    changed = base.copy()
+    changed[0:11, 0:35] = 240
+    selector.observe(base, 0.0)
+
+    decision = selector.observe(changed, 1.0).decision
+
+    assert selector.persistence_polls == 1
+    assert decision.changed_block_count == 1
+    assert decision.reason == "persistent_change"
+
+
+def test_sparse_confirmed_blocks_keep_exact_region_grid() -> None:
+    selector = _selector()
+    base = np.full((180, 320), 100, dtype=np.uint8)
+    changed = base.copy()
+    changed[0:11, 0:35] = 240
+    selector.observe(base, 0.0)
+
+    decision = selector.observe(changed, 1.0).decision
+
+    assert decision.changed_block_ratio <= 0.25
+    assert decision.region_grid == ("r1c1",)
+    assert decision.region_sparsity_suppressed is False
+
+
+def test_large_change_uploads_as_persistent_without_region_grid() -> None:
     selector = _selector()
     rng = np.random.default_rng(99)
     base = rng.integers(0, 256, (180, 320), dtype=np.uint8)
     moved = np.roll(base, shift=24, axis=1)
     selector.observe(base, 0.0)
-    selector.observe(moved, 1.0)
 
-    decision = selector.observe(moved, 2.0).decision
+    decision = selector.observe(moved, 1.0).decision
 
     assert decision.should_save is True
-    assert decision.reason == "camera_motion"
-    assert decision.changed_block_ratio >= 0.35
+    assert decision.reason == "persistent_change"
+    assert decision.changed_block_ratio >= 0.60
     assert decision.region_grid == ()
+    assert decision.region_sparsity_suppressed is True
 
 
 def test_min_save_interval_suppresses_persistent_change() -> None:
@@ -340,6 +371,29 @@ def test_replay_is_byte_deterministic(tmp_path: Path) -> None:
     ).read_bytes()
 
 
+def test_replay_normalizes_legacy_camera_reason_without_failing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_raw_stream(raw_dir, (0, 0, 80))
+    with (tmp_path / "metrics.csv").open(
+        "w", encoding="utf-8-sig", newline=""
+    ) as destination:
+        writer = csv.DictWriter(destination, fieldnames=("判定原因",))
+        writer.writeheader()
+        writer.writerow({"判定原因": "camera_motion"})
+        writer.writerow({"判定原因": "no_change"})
+
+    decisions = capture.run_replay(
+        _replay_options(raw_dir, tmp_path / "replayed")
+    )
+
+    assert len(decisions) == 3
+    output = capsys.readouterr().out
+    assert "已将 1 行归入 persistent_change" in output
+
+
 def test_online_decisions_match_replay_for_same_raw_stream(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
     decoded = _write_raw_stream(raw_dir, (0, 0, 80, 80, 80, 20))
@@ -365,6 +419,8 @@ def test_metrics_csv_header_rows_and_immediate_flush(tmp_path: Path) -> None:
     writer.close()
 
     assert tuple(rows[0]) == CSV_HEADER
+    assert "confirmed块占比" in rows[0]
+    assert "是否因超过稀疏上限而清空region_grid" in rows[0]
     assert len(rows) == 2
     assert rows[1][0] == "1"
     assert rows[1][9:13] == ["是", "是", "frame.png", ""]
@@ -397,7 +453,8 @@ def test_session_json_records_new_arguments(tmp_path: Path) -> None:
     payload = json.loads((tmp_path / "session.json").read_text(encoding="utf-8"))
     assert payload["标签"] == "adaptive"
     assert payload["启动参数"]["noise_window"] == 20
-    assert payload["启动参数"]["persistence_polls"] == 2
+    assert payload["启动参数"]["persistence_polls"] == 1
+    assert payload["启动参数"]["region_sparsity_max"] == 0.25
     assert payload["启动参数"]["record_all"] is False
     assert payload["启动参数"]["record_input"] is False
     assert payload["输入记录"]["已开启"] is False
@@ -463,9 +520,14 @@ def test_cli_defaults_and_removed_strategy() -> None:
     assert arguments.record_all is False
     assert arguments.record_input is False
     assert arguments.raw_width == 640
+    assert arguments.persistence_polls == 1
+    assert arguments.region_sparsity_max == 0.25
     assert not hasattr(arguments, "strategy")
+    assert not hasattr(arguments, "camera_motion_ratio")
     with pytest.raises(SystemExit):
         parser.parse_args(["--watch", "--strategy", "mean_amplitude_vs_previous"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--watch", "--camera-motion-ratio", "0.35"])
 
 
 def test_record_input_banner_discloses_scope_and_destination(

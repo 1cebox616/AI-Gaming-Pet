@@ -67,7 +67,6 @@ def _parameters() -> CalibrationParameters:
         noise_multiplier=2.5,
         noise_margin=4.0 / 255.0,
         persistence_polls=2,
-        camera_motion_ratio=0.35,
     )
 
 
@@ -141,8 +140,14 @@ def test_input_rows_align_to_poll_windows_with_motion_sum() -> None:
     assert motion == pytest.approx((0.0, 24.0, 0.0))
 
 
-def test_default_grid_has_all_432_combinations() -> None:
-    assert len(default_grid().combinations()) == 3 * 4 * 3 * 3 * 4 == 432
+def test_default_grid_has_all_108_combinations_without_removed_dimension() -> None:
+    combinations = default_grid().combinations()
+
+    assert len(combinations) == 3 * 4 * 3 * 3 == 108
+    assert all(
+        not hasattr(parameters, "camera_motion_ratio")
+        for parameters in combinations
+    )
 
 
 def test_calibration_result_is_byte_deterministic() -> None:

@@ -53,12 +53,14 @@ DEFAULT_MAX_SILENCE_SECONDS = 60.0
 DEFAULT_MAX_FILES = 500
 DEFAULT_MAX_BYTES = 200 * 1024 * 1024
 # 设计原则：本地帧选取的首要目标是不漏掉应上传的帧，次要目标才是丢弃冗余帧。
-# 以下五个检测参数均为初始值，待实测校准，因此有意偏向较低触发门槛。
 DEFAULT_NOISE_WINDOW = 20
 DEFAULT_NOISE_MULTIPLIER = 2.5
 DEFAULT_NOISE_MARGIN = 4.0 / 255.0
-DEFAULT_PERSISTENCE_POLLS = 2
-DEFAULT_CAMERA_MOTION_RATIO = 0.35
+# M5-T4 的 1403 帧实测中，P=2 相比 P=1 将局部剧变漏检从
+# 11.6 提高到 115.9、输入活动漏检从 49.0 提高到 153.3，因此默认取 1。
+DEFAULT_PERSISTENCE_POLLS = 1
+# 与视觉评测工具中的稀疏抑制同源；此数待与 M5-A 的扫描结果统一。
+DEFAULT_REGION_SPARSITY_MAX = 0.25
 # M5-T4 calibration proxies. These initial values are awaiting calibration too;
 # they measure misses and do not alter the production selector's decision.
 DEFAULT_STRONG_BLOCK_DELTA = 40.0 / 255.0
@@ -775,6 +777,7 @@ class ProbeStatistics:
         default_factory=lambda: {reason: 0 for reason in DECISION_REASONS}
     )
     nonempty_region_ratios: list[float] = field(default_factory=list)
+    region_sparsity_cleared_count: int = 0
 
     def record(self, observation: SelectionObservation, duration_ms: float) -> None:
         self.metric_durations_ms.append(duration_ms)
@@ -787,8 +790,10 @@ class ProbeStatistics:
         if decision.should_save:
             self.saved_count += 1
             self.forced_saved_count += int(decision.forced)
-        if decision.region_grid:
-            self.nonempty_region_ratios.append(decision.changed_block_ratio)
+            if decision.region_grid:
+                self.nonempty_region_ratios.append(decision.changed_block_ratio)
+            if decision.region_sparsity_suppressed:
+                self.region_sparsity_cleared_count += 1
 
     def metric_series(self) -> tuple[tuple[StrategyName, list[float]], ...]:
         return tuple((strategy, getattr(self, strategy)) for strategy in STRATEGY_NAMES)
@@ -832,14 +837,12 @@ class FrameComparisonTracker:
 
 DecisionReason = Literal[
     "persistent_change",
-    "camera_motion",
     "forced",
     "suppressed_min_interval",
     "no_change",
 ]
 DECISION_REASONS: tuple[DecisionReason, ...] = (
     "persistent_change",
-    "camera_motion",
     "forced",
     "suppressed_min_interval",
     "no_change",
@@ -855,8 +858,8 @@ class SelectionDecision:
     reason: DecisionReason
     changed_block_count: int
     changed_block_ratio: float
-    camera_motion: bool
     region_grid: tuple[str, ...]
+    region_sparsity_suppressed: bool
     floor_median: float
 
 
@@ -887,7 +890,7 @@ class AdaptiveFrameSelector:
         noise_multiplier: float = DEFAULT_NOISE_MULTIPLIER,
         noise_margin: float = DEFAULT_NOISE_MARGIN,
         persistence_polls: int = DEFAULT_PERSISTENCE_POLLS,
-        camera_motion_ratio: float = DEFAULT_CAMERA_MOTION_RATIO,
+        region_sparsity_max: float = DEFAULT_REGION_SPARSITY_MAX,
         min_save_interval: float = DEFAULT_MIN_SAVE_INTERVAL_SECONDS,
         max_silence: float = DEFAULT_MAX_SILENCE_SECONDS,
     ) -> None:
@@ -900,8 +903,8 @@ class AdaptiveFrameSelector:
             raise ValueError("noise_margin must be between 0 and 1")
         if persistence_polls <= 0:
             raise ValueError("persistence_polls must be positive")
-        if not 0.0 <= camera_motion_ratio <= 1.0:
-            raise ValueError("camera_motion_ratio must be between 0 and 1")
+        if not 0.0 <= region_sparsity_max <= 1.0:
+            raise ValueError("region_sparsity_max must be between 0 and 1")
         if min_save_interval < 0.0:
             raise ValueError("min_save_interval must not be negative")
         if max_silence <= 0.0:
@@ -911,7 +914,7 @@ class AdaptiveFrameSelector:
         self.noise_multiplier = noise_multiplier
         self.noise_margin = noise_margin
         self.persistence_polls = persistence_polls
-        self.camera_motion_ratio = camera_motion_ratio
+        self.region_sparsity_max = region_sparsity_max
         self.min_save_interval = min_save_interval
         self.max_silence = max_silence
         self._histories = [
@@ -975,25 +978,27 @@ class AdaptiveFrameSelector:
 
         changed_count = int(np.count_nonzero(confirmed))
         changed_ratio = changed_count / confirmed.size
-        camera_motion = changed_ratio >= self.camera_motion_ratio
-        if camera_motion:
-            candidate_reason: DecisionReason = "camera_motion"
-            region_grid: tuple[str, ...] = ()
-        elif changed_count:
-            candidate_reason = "persistent_change"
-            region_grid = tuple(
-                f"r{row + 1}c{column + 1}"
-                for row, column in np.argwhere(confirmed)
+        if changed_count:
+            candidate_reason: DecisionReason = "persistent_change"
+            region_sparsity_suppressed = changed_ratio > self.region_sparsity_max
+            region_grid = (
+                ()
+                if region_sparsity_suppressed
+                else tuple(
+                    f"r{row + 1}c{column + 1}"
+                    for row, column in np.argwhere(confirmed)
+                )
             )
         else:
             candidate_reason = "no_change"
             region_grid = ()
+            region_sparsity_suppressed = False
 
         if is_first or self._last_saved_at is None:
             # The first frame establishes a baseline. ``forced`` is the closest
             # closed-set reason because no comparison can exist yet.
             decision = SelectionDecision(
-                True, True, "forced", 0, 0.0, False, (), float(np.median(floors))
+                True, True, "forced", 0, 0.0, (), False, float(np.median(floors))
             )
             self._baseline = prepared
             self._last_saved_at = now
@@ -1007,8 +1012,8 @@ class AdaptiveFrameSelector:
                     "forced",
                     changed_count,
                     changed_ratio,
-                    camera_motion,
                     region_grid,
+                    region_sparsity_suppressed,
                     float(np.median(floors)),
                 )
                 self._last_saved_at = now
@@ -1019,8 +1024,8 @@ class AdaptiveFrameSelector:
                     "suppressed_min_interval",
                     changed_count,
                     changed_ratio,
-                    camera_motion,
                     region_grid,
+                    region_sparsity_suppressed,
                     float(np.median(floors)),
                 )
             elif candidate_reason != "no_change":
@@ -1030,8 +1035,8 @@ class AdaptiveFrameSelector:
                     candidate_reason,
                     changed_count,
                     changed_ratio,
-                    camera_motion,
                     region_grid,
+                    region_sparsity_suppressed,
                     float(np.median(floors)),
                 )
                 self._baseline = prepared
@@ -1044,8 +1049,8 @@ class AdaptiveFrameSelector:
                     "no_change",
                     0,
                     0.0,
-                    False,
                     (),
+                    False,
                     float(np.median(floors)),
                 )
         self._previous = prepared
@@ -1067,8 +1072,8 @@ CSV_HEADER = (
     "本次落盘文件名",
     "本次前一帧文件名",
     "确实变了的块数",
-    "确实变了的块占比",
-    "是否判定为镜头移动",
+    "confirmed块占比",
+    "是否因超过稀疏上限而清空region_grid",
     "变化格子",
     "每块噪声地板中位值",
     "判定原因",
@@ -1124,7 +1129,7 @@ class MetricsCsvWriter:
                 previous_filename,
                 decision.changed_block_count,
                 f"{decision.changed_block_ratio:.9f}",
-                "是" if decision.camera_motion else "否",
+                "是" if decision.region_sparsity_suppressed else "否",
                 "、".join(decision.region_grid),
                 f"{decision.floor_median:.9f}",
                 decision.reason,
@@ -1198,7 +1203,7 @@ class ProbeOptions:
     noise_multiplier: float = DEFAULT_NOISE_MULTIPLIER
     noise_margin: float = DEFAULT_NOISE_MARGIN
     persistence_polls: int = DEFAULT_PERSISTENCE_POLLS
-    camera_motion_ratio: float = DEFAULT_CAMERA_MOTION_RATIO
+    region_sparsity_max: float = DEFAULT_REGION_SPARSITY_MAX
     label: str | None = None
     capture_cursor: bool = False
     record_all: bool = False
@@ -1300,13 +1305,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--persistence-polls",
         type=_positive_int,
         default=DEFAULT_PERSISTENCE_POLLS,
-        help="连续超地板的轮询次数（默认 2，待实测）",
+        help="连续超地板的轮询次数（默认 1，M5-T4 实测定案）",
     )
     parser.add_argument(
-        "--camera-motion-ratio",
+        "--region-sparsity-max",
         type=_unit_interval,
-        default=DEFAULT_CAMERA_MOTION_RATIO,
-        help="镜头移动块占比阈值（默认 0.35，待实测）",
+        default=DEFAULT_REGION_SPARSITY_MAX,
+        help="保留 region_grid 的最大 confirmed 块占比（默认 0.25，待与 M5-A 扫描统一）",
     )
     parser.add_argument("--label", help="本次采集会话的可选标签")
     parser.add_argument("--title", help="目标窗口标题中的一段文字")
@@ -1348,7 +1353,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_RAW_MAX_BYTES,
         help="全量流最大总字节数（默认 1073741824）",
     )
-    parser.add_argument("--grid", type=Path, help="校准搜索空间 TOML（默认使用内置 432 组）")
+    parser.add_argument("--grid", type=Path, help="校准搜索空间 TOML（默认使用内置 108 组）")
     parser.add_argument(
         "--sample-stride",
         type=_positive_int,
@@ -1385,7 +1390,7 @@ def _print_banner(options: ProbeOptions) -> None:
     print(
         f"噪声地板：最近 {options.noise_window} 轮中位数 × "
         f"{options.noise_multiplier:g} + {options.noise_margin:.6f}；"
-        f"镜头移动阈值：{options.camera_motion_ratio:.3f}"
+        f"区域稀疏上限：{options.region_sparsity_max:.3f}"
     )
     print(
         f"最短落盘间隔：{options.min_save_interval:.1f}s；"
@@ -1409,7 +1414,7 @@ def _print_banner(options: ProbeOptions) -> None:
             + "；移动只记相对 dx/dy 绝对值的 100ms 汇总，绝不记录绝对坐标"
         )
         print(f"输入记录位置：{options.save_dir / 'input.csv'}")
-    print("首帧、持久变化、镜头移动及最长静默强制帧落盘；Ctrl+C 停止")
+    print("首帧、持久变化及最长静默强制帧落盘；Ctrl+C 停止")
     print("=" * 72)
 
 
@@ -1457,6 +1462,10 @@ def _build_summary(
         "raw保留字节数": 0 if raw_archive is None else raw_archive.retained_bytes,
         "上传率": 0.0 if captured == 0 else statistics_.saved_count / captured,
         "判定原因": reason_summary,
+        "region_grid非空比例": 0.0
+        if statistics_.saved_count == 0
+        else len(statistics_.nonempty_region_ratios) / statistics_.saved_count,
+        "因稀疏上限清空region_grid次数": statistics_.region_sparsity_cleared_count,
         "区域格子非空时平均占比": None
         if not statistics_.nonempty_region_ratios
         else statistics.mean(statistics_.nonempty_region_ratios),
@@ -1499,6 +1508,8 @@ def _print_summary(summary: dict[str, object]) -> None:
         assert isinstance(values, dict)
         print(f"{reason}：{values['次数']} 次 / {float(values['占比']):.2%}")
     average_region_ratio = summary["区域格子非空时平均占比"]
+    print(f"region_grid 非空比例：{float(summary['region_grid非空比例']):.2%}")
+    print(f"因稀疏上限清空 region_grid：{summary['因稀疏上限清空region_grid次数']} 次")
     if isinstance(average_region_ratio, float):
         print(f"region_grid 非空时平均格子占比：{average_region_ratio:.2%}")
     if int(summary["raw保留张数"]):
@@ -1574,7 +1585,7 @@ def _write_session(
             "noise_multiplier": options.noise_multiplier,
             "noise_margin": options.noise_margin,
             "persistence_polls": options.persistence_polls,
-            "camera_motion_ratio": options.camera_motion_ratio,
+            "region_sparsity_max": options.region_sparsity_max,
             "capture_cursor": options.capture_cursor,
             "record_all": options.record_all,
             "record_input": options.record_input,
@@ -1613,7 +1624,7 @@ def _make_selector(options: ProbeOptions) -> AdaptiveFrameSelector:
         noise_multiplier=options.noise_multiplier,
         noise_margin=options.noise_margin,
         persistence_polls=options.persistence_polls,
-        camera_motion_ratio=options.camera_motion_ratio,
+        region_sparsity_max=options.region_sparsity_max,
         min_save_interval=options.min_save_interval,
         max_silence=options.max_silence,
     )
@@ -1788,6 +1799,40 @@ def _raw_frame_timestamp(path: Path) -> datetime:
         raise ValueError(f"raw 文件名时间格式无效：{path.name}") from error
 
 
+_LEGACY_GLOBAL_CHANGE_REASON = "camera" "_motion"
+
+
+def _read_existing_metrics_reason_counts(raw_dir: Path) -> dict[str, int]:
+    """Read an older session summary without reviving its removed classifier.
+
+    M5-T5b deleted the global-change category. Historical metrics remain
+    read-only evidence, so replay folds that old reason into
+    ``persistent_change`` and reports the normalization once.
+    """
+    metrics_path = raw_dir.parent / "metrics.csv"
+    if not metrics_path.is_file():
+        return {}
+    counts: dict[str, int] = {}
+    normalized_count = 0
+    try:
+        with metrics_path.open(encoding="utf-8-sig", newline="") as source:
+            for row in csv.DictReader(source):
+                reason = row.get("判定原因", "")
+                if reason == _LEGACY_GLOBAL_CHANGE_REASON:
+                    reason = "persistent_change"
+                    normalized_count += 1
+                if reason:
+                    counts[reason] = counts.get(reason, 0) + 1
+    except (OSError, csv.Error) as error:
+        raise CaptureError(f"无法读取既有指标文件 {metrics_path}：{error}") from error
+    if normalized_count:
+        print(
+            "既有 metrics.csv 含已删除的全屏变化原因；"
+            f"本次读取已将 {normalized_count} 行归入 persistent_change"
+        )
+    return counts
+
+
 def run_replay(options: ProbeOptions) -> tuple[SelectionDecision, ...]:
     """Replay one retained raw stream deterministically without writing images."""
     if options.replay_dir is None:
@@ -1796,6 +1841,7 @@ def run_replay(options: ProbeOptions) -> tuple[SelectionDecision, ...]:
     if not paths:
         raise CaptureError(f"重放目录中没有 raw JPEG：{options.replay_dir}")
     options.save_dir.mkdir(parents=True, exist_ok=True)
+    _read_existing_metrics_reason_counts(options.replay_dir)
     selector = _make_selector(options)
     probe_statistics = ProbeStatistics()
     decisions: list[SelectionDecision] = []
@@ -1874,7 +1920,7 @@ def main() -> None:
         noise_multiplier=arguments.noise_multiplier,
         noise_margin=arguments.noise_margin,
         persistence_polls=arguments.persistence_polls,
-        camera_motion_ratio=arguments.camera_motion_ratio,
+        region_sparsity_max=arguments.region_sparsity_max,
         label=arguments.label,
         capture_cursor=arguments.capture_cursor,
         record_all=arguments.record_all,

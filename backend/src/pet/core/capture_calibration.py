@@ -25,14 +25,10 @@ from PIL import Image
 
 from pet.core.capture import (
     DECISION_REASONS,
-    DEFAULT_CAMERA_MOTION_RATIO,
     DEFAULT_INPUT_MOTION_THRESHOLD,
     DEFAULT_MAX_SILENCE_SECONDS,
     DEFAULT_MIN_SAVE_INTERVAL_SECONDS,
-    DEFAULT_NOISE_MARGIN,
-    DEFAULT_NOISE_MULTIPLIER,
-    DEFAULT_NOISE_WINDOW,
-    DEFAULT_PERSISTENCE_POLLS,
+    DEFAULT_REGION_SPARSITY_MAX,
     DEFAULT_STRONG_BLOCK_DELTA,
     AdaptiveFrameSelector,
     CaptureError,
@@ -46,8 +42,6 @@ DEFAULT_NOISE_WINDOWS = (10, 20, 40)
 DEFAULT_NOISE_MULTIPLIERS = (1.5, 2.0, 2.5, 3.5)
 DEFAULT_NOISE_MARGIN_PIXELS = (2.0, 4.0, 8.0)
 DEFAULT_PERSISTENCE_VALUES = (1, 2, 3)
-DEFAULT_CAMERA_MOTION_RATIOS = (0.20, 0.28, 0.35, 0.50)
-CAMERA_TRUTH_MOUSE_PERCENTILE = 0.90
 TOP_COMBINATION_COUNT = 20
 TRADEOFF_POINT_LIMIT = 30
 
@@ -66,13 +60,12 @@ class CalibrationOptions:
 
 @dataclass(frozen=True, slots=True)
 class CalibrationParameters:
-    """One point in the five-dimensional selector search space."""
+    """One point in the four-dimensional selector search space."""
 
     noise_window: int
     noise_multiplier: float
     noise_margin: float
     persistence_polls: int
-    camera_motion_ratio: float
 
     @property
     def noise_margin_pixels(self) -> float:
@@ -82,8 +75,7 @@ class CalibrationParameters:
     def identifier(self) -> str:
         return (
             f"n{self.noise_window}-k{self.noise_multiplier:g}-"
-            f"m{self.noise_margin_pixels:g}-p{self.persistence_polls}-"
-            f"c{self.camera_motion_ratio:g}"
+            f"m{self.noise_margin_pixels:g}-p{self.persistence_polls}"
         )
 
 
@@ -95,7 +87,6 @@ class CalibrationGrid:
     noise_multipliers: tuple[float, ...]
     noise_margin_pixels: tuple[float, ...]
     persistence_values: tuple[int, ...]
-    camera_motion_ratios: tuple[float, ...]
 
     def combinations(self) -> tuple[CalibrationParameters, ...]:
         return tuple(
@@ -104,20 +95,17 @@ class CalibrationGrid:
                 noise_multiplier=noise_multiplier,
                 noise_margin=noise_margin_pixels / 255.0,
                 persistence_polls=persistence,
-                camera_motion_ratio=camera_ratio,
             )
             for (
                 noise_window,
                 noise_multiplier,
                 noise_margin_pixels,
                 persistence,
-                camera_ratio,
             ) in itertools.product(
                 self.noise_windows,
                 self.noise_multipliers,
                 self.noise_margin_pixels,
                 self.persistence_values,
-                self.camera_motion_ratios,
             )
         )
 
@@ -184,28 +172,12 @@ class CalibrationResult:
         return dict(self.reason_counts)[reason]
 
 
-@dataclass(frozen=True, slots=True)
-class CameraMotionValidation:
-    """Mouse-derived camera-motion proxy result for one ratio."""
-
-    camera_motion_ratio: float
-    mouse_percentile: float
-    mouse_motion_threshold: float
-    large_turn_polls: int
-    non_turn_polls: int
-    true_positive_polls: int
-    false_positive_polls: int
-    recall: float | None
-    false_positive_rate: float | None
-
-
 def default_grid() -> CalibrationGrid:
     return CalibrationGrid(
         noise_windows=DEFAULT_NOISE_WINDOWS,
         noise_multipliers=DEFAULT_NOISE_MULTIPLIERS,
         noise_margin_pixels=DEFAULT_NOISE_MARGIN_PIXELS,
         persistence_values=DEFAULT_PERSISTENCE_VALUES,
-        camera_motion_ratios=DEFAULT_CAMERA_MOTION_RATIOS,
     )
 
 
@@ -229,9 +201,6 @@ def load_grid(path: Path | None) -> CalibrationGrid:
         ),
         persistence_values=_integer_values(
             grid, "persistence_polls", minimum=1
-        ),
-        camera_motion_ratios=_float_values(
-            grid, "camera_motion_ratio", minimum=0.0, maximum=1.0
         ),
     )
 
@@ -418,7 +387,7 @@ def evaluate_session(
         noise_multiplier=parameters.noise_multiplier,
         noise_margin=parameters.noise_margin,
         persistence_polls=parameters.persistence_polls,
-        camera_motion_ratio=parameters.camera_motion_ratio,
+        region_sparsity_max=DEFAULT_REGION_SPARSITY_MAX,
         min_save_interval=DEFAULT_MIN_SAVE_INTERVAL_SECONDS,
         max_silence=DEFAULT_MAX_SILENCE_SECONDS,
     )
@@ -479,63 +448,6 @@ def evaluate_session(
     )
 
 
-def validate_camera_motion(
-    session: PreparedCalibrationSession,
-    camera_ratios: Sequence[float],
-) -> tuple[CameraMotionValidation, ...]:
-    """Compare selector camera labels with the P90 mouse-motion proxy."""
-    if session.input_motion is None:
-        return ()
-    motion_values = list(session.input_motion)
-    threshold = _percentile(sorted(motion_values), CAMERA_TRUTH_MOUSE_PERCENTILE)
-    large_turn = tuple(value >= threshold and value > 0.0 for value in motion_values)
-    validations: list[CameraMotionValidation] = []
-    for ratio in camera_ratios:
-        selector = AdaptiveFrameSelector(
-            noise_window=DEFAULT_NOISE_WINDOW,
-            noise_multiplier=DEFAULT_NOISE_MULTIPLIER,
-            noise_margin=DEFAULT_NOISE_MARGIN,
-            persistence_polls=DEFAULT_PERSISTENCE_POLLS,
-            camera_motion_ratio=ratio,
-            min_save_interval=DEFAULT_MIN_SAVE_INTERVAL_SECONDS,
-            max_silence=DEFAULT_MAX_SILENCE_SECONDS,
-        )
-        camera_labels = tuple(
-            selector.observe_prepared(frame, timestamp.timestamp()).camera_motion
-            for frame, timestamp in zip(
-                session.frames, session.timestamps, strict=True
-            )
-        )
-        true_count = sum(large_turn)
-        non_turn_count = len(large_turn) - true_count
-        true_positive = sum(
-            truth and predicted
-            for truth, predicted in zip(large_turn, camera_labels, strict=True)
-        )
-        false_positive = sum(
-            not truth and predicted
-            for truth, predicted in zip(large_turn, camera_labels, strict=True)
-        )
-        validations.append(
-            CameraMotionValidation(
-                camera_motion_ratio=ratio,
-                mouse_percentile=CAMERA_TRUTH_MOUSE_PERCENTILE,
-                mouse_motion_threshold=threshold,
-                large_turn_polls=true_count,
-                non_turn_polls=non_turn_count,
-                true_positive_polls=true_positive,
-                false_positive_polls=false_positive,
-                recall=None if true_count == 0 else true_positive / true_count,
-                false_positive_rate=(
-                    None
-                    if non_turn_count == 0
-                    else false_positive / non_turn_count
-                ),
-            )
-        )
-    return tuple(validations)
-
-
 def _percentile(ordered: list[float], percentile: float) -> float:
     if not ordered:
         return 0.0
@@ -565,7 +477,6 @@ GRID_RESULT_HEADER = (
     "noise_margin",
     "noise_margin_pixels",
     "persistence_polls",
-    "camera_motion_ratio",
     "会话角色",
     "会话目录",
     "帧数",
@@ -578,8 +489,6 @@ GRID_RESULT_HEADER = (
     "上传率",
     "persistent_change次数",
     "persistent_change占比",
-    "camera_motion次数",
-    "camera_motion占比",
     "forced次数",
     "forced占比",
     "suppressed_min_interval次数",
@@ -613,7 +522,6 @@ def write_grid_results(path: Path, results: Sequence[CalibrationResult]) -> None
                     _decimal(parameters.noise_margin),
                     _decimal(parameters.noise_margin_pixels),
                     parameters.persistence_polls,
-                    _decimal(parameters.camera_motion_ratio),
                     result.session_role,
                     result.session_directory,
                     frame_count,
@@ -676,10 +584,6 @@ def _markdown_table(headers: Sequence[str], rows: Iterable[Sequence[object]]) ->
     ]
     lines.extend("| " + " | ".join(str(value) for value in row) + " |" for row in rows)
     return "\n".join(lines)
-
-
-def _format_percent(value: float | None) -> str:
-    return "不可用" if value is None else f"{value:.2%}"
 
 
 def _format_number(value: float | None, digits: int = 3) -> str:
@@ -758,7 +662,6 @@ def write_summary(
     results: Sequence[CalibrationResult],
     grid: CalibrationGrid,
     options: CalibrationOptions,
-    camera_validation: Sequence[CameraMotionValidation],
     elapsed_seconds: float,
     deterministic: bool,
     deterministic_hash: str,
@@ -827,7 +730,6 @@ def write_summary(
         ("地板系数 k", "noise_multiplier", lambda value: f"{value:g}"),
         ("余量 margin", "noise_margin", lambda value: f"{value * 255:g}/255"),
         ("持久性 P", "persistence_polls", lambda value: str(value)),
-        ("镜头移动占比", "camera_motion_ratio", lambda value: f"{value:.2f}"),
     )
     for title, attribute, formatter in marginal_specs:
         lines.extend(
@@ -857,37 +759,6 @@ def write_summary(
                     (
                         (point[0].identifier, f"{point[1]:.2%}", point[2], point[3], point[4])
                         for point in points
-                    ),
-                ),
-            )
-        )
-    lines.extend(("", "## explore-3a 镜头移动阈值真值校验", ""))
-    if not camera_validation:
-        lines.append("不可用：`explore-3a` 会话缺失或没有 input.csv。")
-    else:
-        first = camera_validation[0]
-        lines.extend(
-            (
-                (
-                    "大幅转视角代理：每轮询窗口累计鼠标相对位移的 "
-                    f"P{int(first.mouse_percentile * 100)}，阈值为 "
-                    f"{first.mouse_motion_threshold:.3f}。其他四个检测参数"
-                    "固定为当前初值，只改变 camera_motion_ratio。"
-                ),
-                "",
-                _markdown_table(
-                    ("camera_motion_ratio", "大幅转向轮次", "非转向轮次", "召回轮次", "误判轮次", "召回率", "误判率"),
-                    (
-                        (
-                            f"{row.camera_motion_ratio:.2f}",
-                            row.large_turn_polls,
-                            row.non_turn_polls,
-                            row.true_positive_polls,
-                            row.false_positive_polls,
-                            _format_percent(row.recall),
-                            _format_percent(row.false_positive_rate),
-                        )
-                        for row in camera_validation
                     ),
                 ),
             )
@@ -957,12 +828,6 @@ def run_calibration(options: CalibrationOptions) -> Path:
     deterministic = first_bytes == second_bytes
     deterministic_hash = hashlib.sha256(first_bytes).hexdigest()
 
-    explore = next((session for session in sessions if session.role == "explore-3a"), None)
-    camera_validation = (
-        ()
-        if explore is None
-        else validate_camera_motion(explore, grid.camera_motion_ratios)
-    )
     elapsed = time.perf_counter() - started
     options.output_dir.mkdir(parents=True, exist_ok=True)
     result_path = options.output_dir / "grid-results.csv"
@@ -974,7 +839,6 @@ def run_calibration(options: CalibrationOptions) -> Path:
         results=results,
         grid=grid,
         options=options,
-        camera_validation=camera_validation,
         elapsed_seconds=elapsed,
         deterministic=deterministic,
         deterministic_hash=deterministic_hash,

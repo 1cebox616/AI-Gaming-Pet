@@ -1,21 +1,24 @@
-"""Offline camera-motion diagnosis without changing capture behavior."""
+"""Historical offline diagnosis for the global-change classifier.
+
+M5-T5b removed that classifier from production. This module deliberately
+reconstructs its former ratio and reason locally so the M5-T5a evidence remains
+reproducible without restoring any production branch or compatibility switch.
+"""
 
 from __future__ import annotations
 
 import argparse
 from collections import Counter, deque
 import csv
-import inspect
 import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Literal, Sequence
 
 import numpy as np
 
 from pet.core.capture import (
-    DEFAULT_CAMERA_MOTION_RATIO,
     DEFAULT_INPUT_MOTION_THRESHOLD,
     DEFAULT_MAX_SILENCE_SECONDS,
     DEFAULT_MIN_SAVE_INTERVAL_SECONDS,
@@ -25,19 +28,26 @@ from pet.core.capture import (
     DEFAULT_STRONG_BLOCK_DELTA,
     AdaptiveFrameSelector,
     CaptureError,
-    DecisionReason,
     FrameChangeDetector,
     PreparedFrame,
 )
 from pet.core.capture_calibration import (
-    CAMERA_TRUTH_MOUSE_PERCENTILE,
-    DEFAULT_CAMERA_MOTION_RATIOS,
     PreparedCalibrationSession,
     prepare_session,
 )
 
 FIXED_BASELINE_LEAD_SECONDS = 3.0
 TRUTH_PERCENTILES = (0.75, 0.90, 0.95)
+CAMERA_TRUTH_MOUSE_PERCENTILE = 0.90
+HISTORICAL_CAMERA_MOTION_RATIO = 0.35
+HISTORICAL_CAMERA_MOTION_RATIOS = (0.20, 0.28, 0.35, 0.50)
+HistoricalDecisionReason = Literal[
+    "persistent_change",
+    "camera_motion",
+    "forced",
+    "suppressed_min_interval",
+    "no_change",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,7 +63,7 @@ class GateTrace:
     """One selector poll with pre- and post-persistence block sets."""
 
     sequence: int
-    reason: DecisionReason
+    reason: HistoricalDecisionReason
     should_save: bool
     camera_motion: bool
     pre_gate_count: int
@@ -146,7 +156,6 @@ class DiagnosticSelector:
             noise_multiplier=DEFAULT_NOISE_MULTIPLIER,
             noise_margin=DEFAULT_NOISE_MARGIN,
             persistence_polls=persistence_polls,
-            camera_motion_ratio=camera_motion_ratio,
             min_save_interval=DEFAULT_MIN_SAVE_INTERVAL_SECONDS,
             max_silence=DEFAULT_MAX_SILENCE_SECONDS,
         )
@@ -163,6 +172,7 @@ class DiagnosticSelector:
         self._baseline_time = 0.0
         self._last_saved_at: float | None = None
         self._persistence_polls = persistence_polls
+        self._camera_motion_ratio = camera_motion_ratio
         self._mouse_motion = mouse_motion
         self._fixed_baselines = fixed_baselines
 
@@ -224,11 +234,20 @@ class DiagnosticSelector:
         baseline_gap_seconds = 0.0
         if baseline_sequence != sequence:
             baseline_gap_seconds = timestamp.timestamp() - self._baseline_time
+        camera_motion = post_count / block_total >= self._camera_motion_ratio
+        if decision.reason in {"forced", "suppressed_min_interval"}:
+            historical_reason: HistoricalDecisionReason = decision.reason
+        elif camera_motion:
+            historical_reason = "camera_motion"
+        elif post_count:
+            historical_reason = "persistent_change"
+        else:
+            historical_reason = "no_change"
         trace = GateTrace(
             sequence=sequence,
-            reason=decision.reason,
+            reason=historical_reason,
             should_save=decision.should_save,
-            camera_motion=decision.camera_motion,
+            camera_motion=camera_motion,
             pre_gate_count=pre_count,
             pre_gate_ratio=pre_count / block_total,
             post_gate_count=post_count,
@@ -236,7 +255,7 @@ class DiagnosticSelector:
             baseline_sequence=baseline_sequence,
             baseline_gap_frames=sequence - baseline_sequence,
             baseline_gap_seconds=baseline_gap_seconds,
-            suppressed_min_interval=decision.reason == "suppressed_min_interval",
+            suppressed_min_interval=historical_reason == "suppressed_min_interval",
             mouse_motion=self._mouse_motion[sequence - 1],
             fixed_baseline_sequence=fixed_sequence,
             fixed_pre_gate_count=fixed_count,
@@ -349,23 +368,8 @@ def distribution(values: Iterable[float]) -> Distribution:
 
 
 def source_branch_lines() -> BranchLines:
-    lines, start = inspect.getsourcelines(AdaptiveFrameSelector.observe_prepared)
-    confirmed_offset = next(
-        index
-        for index, line in enumerate(lines)
-        if "confirmed = self._consecutive" in line
-    )
-    camera_offset = next(
-        index for index, line in enumerate(lines) if line.strip() == "if camera_motion:"
-    )
-    persistent_offset = next(
-        index for index, line in enumerate(lines) if line.strip() == "elif changed_count:"
-    )
-    return BranchLines(
-        start + confirmed_offset,
-        start + camera_offset,
-        start + persistent_offset,
-    )
+    """Return the cc07476 source locations recorded by the historical report."""
+    return BranchLines(confirmed=972, camera_if=979, persistent_elif=982)
 
 
 def recall_rows(
@@ -375,7 +379,7 @@ def recall_rows(
 ) -> tuple[RecallRow, ...]:
     truth_count = sum(truth)
     rows: list[RecallRow] = []
-    for ratio in DEFAULT_CAMERA_MOTION_RATIOS:
+    for ratio in HISTORICAL_CAMERA_MOTION_RATIOS:
         p1 = trace_session(
             session,
             persistence_polls=1,
@@ -680,7 +684,7 @@ def write_report(
         "",
         f"### H1 时间持久性门控：{h1}",
         "",
-        f"`capture.py:{lines_.confirmed}` 先生成 `confirmed = consecutive >= P`，camera_motion 使用的是该集合的占比。P=1/P=2 实测：",
+        f"历史提交 `cc07476` 的 `capture.py:{lines_.confirmed}` 先生成 `confirmed = consecutive >= P`，当时的 camera_motion 使用该集合占比。P=1/P=2 实测：",
         "",
         markdown_table(
             ("camera_motion_ratio", "P=1 命中/31", "P=1 召回率", "P=2 命中/31", "P=2 召回率"),
@@ -716,7 +720,7 @@ def write_report(
         "",
         f"### H3 判定顺序：{h3}",
         "",
-        f"`capture.py:{lines_.camera_if}` 是 `if camera_motion`，`capture.py:{lines_.persistent_elif}` 才是 `elif changed_count`；camera_motion 明确排在 persistent_change 前。",
+        f"历史提交 `cc07476` 中，`capture.py:{lines_.camera_if}` 是 `if camera_motion`，`capture.py:{lines_.persistent_elif}` 才是 `elif changed_count`；当时 camera_motion 明确排在 persistent_change 前。当前生产分支已删除该规则。",
         f"31 轮实际最终路径：{dict(sorted(p2_reason_counts.items()))}；min_save_interval 抑制 {suppressed_count} 轮。只要门控后占比达到阈值，就先进入 camera_motion，不存在被 persistent_change 提前截获。",
         "",
         "## 门控前后分布可分性",
@@ -878,13 +882,13 @@ def run_diagnostic(options: DiagnosticOptions) -> Path:
     p1 = trace_session(
         session,
         persistence_polls=1,
-        camera_motion_ratio=DEFAULT_CAMERA_MOTION_RATIO,
+        camera_motion_ratio=HISTORICAL_CAMERA_MOTION_RATIO,
         fixed_baselines=fixed,
     )
     p2 = trace_session(
         session,
         persistence_polls=2,
-        camera_motion_ratio=DEFAULT_CAMERA_MOTION_RATIO,
+        camera_motion_ratio=HISTORICAL_CAMERA_MOTION_RATIO,
         fixed_baselines=fixed,
     )
     recalls = recall_rows(session, truth, fixed)
@@ -892,7 +896,7 @@ def run_diagnostic(options: DiagnosticOptions) -> Path:
     p1_lowest_ratio = trace_session(
         session,
         persistence_polls=1,
-        camera_motion_ratio=min(DEFAULT_CAMERA_MOTION_RATIOS),
+        camera_motion_ratio=min(HISTORICAL_CAMERA_MOTION_RATIOS),
         fixed_baselines=fixed,
     )
     alignment = alignment_sensitivity(truth, p1_lowest_ratio)
