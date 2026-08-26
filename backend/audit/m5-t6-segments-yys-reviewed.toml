@@ -1,0 +1,20 @@
+# M5-T6 燕云十六声逐帧复核后的只读区间。
+# 路径相对此文件；边界为相对 session.json 时钟锚点的单调秒，采用 [start, end)。
+# 这三个角色只描述离线可见画面，不把“零输入”等同于“画面静止”。
+
+[[segments]]
+role = "C-dark-dynamic"
+session = "../recordings/capture/20260825-210142"
+start = 0.0
+end = 39.0
+
+[[segments]]
+role = "C-global-light-transition"
+session = "../recordings/capture/20260825-210142"
+start = 39.0
+end = 62.0
+
+[[segments]]
+role = "C-bright-dynamic"
+session = "../recordings/capture/20260825-210142"
+start = 62.0
