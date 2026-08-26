@@ -33,10 +33,9 @@ DEFAULT_TITLE_MAP_PATH = BACKEND_DIRECTORY / "data" / "generic" / "window-title-
 FAST_PROMPT_PATH = PROMPTS_DIRECTORY / "generic" / "observation-fast.md"
 HEARTBEAT_SECONDS = 60.0
 REGION_TEMPLATE = (
-    "画面被划分为 16 行 9 列的网格。与上一采样帧相比，"
+    "画面被划分为 16 行 9 列的网格。与 {seconds:.1f} 秒前的变化基线相比，"
     "以下格子发生了变化：{cells}。"
 )
-NO_CHANGE_TEXT = "无明显变化"
 
 
 class FrameMetadataLike(Protocol):
@@ -60,6 +59,7 @@ class CaptureBackendLike(Protocol):
 class SelectionDecisionLike(Protocol):
     should_save: bool
     region_grid: tuple[str, ...]
+    baseline_monotonic_seconds: float
 
 
 class SelectionObservationLike(Protocol):
@@ -70,9 +70,20 @@ class FrameSelectorLike(Protocol):
     def observe(self, frame: Image.Image, now: float) -> SelectionObservationLike: ...
 
 
+class InputContextLike(Protocol):
+    def summarize_window(
+        self,
+        start_exclusive: float | None,
+        end_inclusive: float,
+    ) -> str: ...
+
+    def close(self) -> None: ...
+
+
 CaptureBackendFactory = Callable[[], CaptureBackendLike]
 SelectorFactory = Callable[[float], FrameSelectorLike]
 ClientFactory = Callable[[str, str | None, str, float], LlmVisionClientProtocol]
+InputListenerFactory = Callable[[CaptureBackendLike], InputContextLike]
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +139,7 @@ class ObservationRecord:
     model_called: bool
     visible_output_tokens: int | None
     truncated: bool
+    user_prompt: str | None = None
 
     def json_value(self) -> dict[str, object]:
         return {
@@ -139,7 +151,17 @@ class ObservationRecord:
             "region": list(self.region) if self.region else None,
             "latency_ms": round(self.latency_ms, 3),
             "dropped": self.dropped,
+            "user_prompt": self.user_prompt,
         }
+
+
+@dataclass(slots=True)
+class PendingFrame:
+    seq: int
+    frame: CapturedFrameLike
+    game: str
+    region: tuple[str, ...]
+    baseline_monotonic_seconds: float
 
 
 class ObservationLog:
@@ -177,7 +199,6 @@ class ObservationLog:
         self.visible_output_token_total = 0
         self.visible_output_token_count = 0
         self.truncated = 0
-        self.unchanged = 0
         self._write_session(None)
 
     def append(self, record: ObservationRecord) -> None:
@@ -201,8 +222,6 @@ class ObservationLog:
             self.visible_output_token_count += 1
         if record.truncated:
             self.truncated += 1
-        if record.dropped is None and _is_no_change(record.text):
-            self.unchanged += 1
         self._write_session(None)
 
     def close(self) -> None:
@@ -222,7 +241,6 @@ class ObservationLog:
             "failure_rate": round(self.failures / self.calls, 6) if self.calls else 0.0,
             "total_cost_usd": round(self.total_cost_usd, 9),
             "truncated_count": self.truncated,
-            "unchanged_count": self.unchanged,
             "average_visible_output_tokens": (
                 round(
                     self.visible_output_token_total / self.visible_output_token_count,
@@ -266,6 +284,7 @@ class GenericVisionAdapter:
         capture_backend_factory: CaptureBackendFactory,
         selector_factory: SelectorFactory,
         client_factory: ClientFactory = _default_client_factory,
+        input_listener_factory: InputListenerFactory | None = None,
         title_map: WindowTitleMap | None = None,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
@@ -274,6 +293,7 @@ class GenericVisionAdapter:
         self._capture_backend_factory = capture_backend_factory
         self._selector_factory = selector_factory
         self._client_factory = client_factory
+        self._input_listener_factory = input_listener_factory
         self._title_map = title_map or WindowTitleMap.load()
         self._clock = clock
         self._core: CoreServices | None = None
@@ -283,18 +303,19 @@ class GenericVisionAdapter:
         self._client: LlmVisionClientProtocol | None = None
         self._log: ObservationLog | None = None
         self._inflight: set[asyncio.Task[None]] = set()
+        self._queued_frame: PendingFrame | None = None
         self._pending: dict[int, ObservationRecord] = {}
         self._next_sequence = 1
         self._next_write_sequence = 1
-        self._recent: list[tuple[float, str]] = []
-        self._unchanged_since_information = False
+        self._input_context: InputContextLike | None = None
+        self._last_dispatched_frame_ts: float | None = None
         self._last_status: tuple[str, str, bool, bool] | None = None
         self._last_status_at = float("-inf")
         self._consecutive_failures = 0
         self._degraded = False
         self._cost_warning = False
         self._current_game = ""
-        self._context_lines = 5
+        self._stopping = False
 
     async def start(self, core: CoreServices) -> None:
         if self._task is not None:
@@ -312,7 +333,6 @@ class GenericVisionAdapter:
         *,
         log_root: Path | None,
         exact_directory: bool,
-        context_lines: int = 5,
         extra_parameters: dict[str, object] | None = None,
     ) -> None:
         """Initialize the model and shared frame-to-log path.
@@ -343,12 +363,12 @@ class GenericVisionAdapter:
             log_root = Path(self._settings.observation_log_dir)
             if not log_root.is_absolute():
                 log_root = BACKEND_DIRECTORY / log_root
-        self._context_lines = context_lines
         parameters: dict[str, object] = {
             "poll_interval_seconds": self._settings.poll_interval_seconds,
             "send_width": self._settings.send_width,
             "fast_timeout_seconds": self._settings.fast_timeout_seconds,
             "max_inflight": self._settings.max_inflight,
+            "input_context": self._settings.input_context,
             "region_sparsity_max": self._settings.region_sparsity_max,
             "llm_profile": profile_id,
             "model": effective.model,
@@ -356,7 +376,6 @@ class GenericVisionAdapter:
             "max_tokens": effective.max_tokens,
             "input_price_per_million_usd": self._input_price,
             "output_price_per_million_usd": self._output_price,
-            "context_lines": context_lines,
         }
         if extra_parameters:
             parameters.update(extra_parameters)
@@ -370,18 +389,18 @@ class GenericVisionAdapter:
         self,
         output_directory: Path,
         *,
-        context_lines: int,
+        input_context: InputContextLike | None,
         extra_parameters: dict[str, object] | None = None,
     ) -> None:
         """Start the production observation path without a live capture loop."""
         if self._task is not None or self._log is not None:
             raise RuntimeError("通用视觉观察器已经启动")
-        if context_lines < 0:
-            raise ValueError("context_lines must not be negative")
+        if self._settings.input_context and input_context is None:
+            raise ValueError("input_context is required when replay input context is enabled")
+        self._input_context = input_context if self._settings.input_context else None
         self._initialize_observer(
             log_root=output_directory,
             exact_directory=True,
-            context_lines=context_lines,
             extra_parameters=extra_parameters,
         )
 
@@ -390,16 +409,27 @@ class GenericVisionAdapter:
         frame: CapturedFrameLike,
         game: str,
         region: tuple[str, ...],
+        baseline_monotonic_seconds: float,
     ) -> None:
         """Submit one retained frame with bounded backpressure for offline replay."""
         if self._log is None:
             raise RuntimeError("离线观察器尚未启动")
-        await self._schedule(frame, game, region, wait_for_capacity=True)
+        await self._schedule(
+            frame,
+            game,
+            region,
+            baseline_monotonic_seconds,
+            wait_for_capacity=True,
+        )
 
     async def finish_replay(self) -> None:
         """Drain all paid calls and close the production-format observation log."""
-        while self._inflight:
+        while self._inflight or self._queued_frame is not None:
+            self._launch_queued_frame()
+            if not self._inflight:
+                break
             await asyncio.gather(*tuple(self._inflight), return_exceptions=True)
+        self._close_input_context()
         close_client = getattr(self._client, "close", None)
         if callable(close_client):
             close_client()
@@ -414,11 +444,19 @@ class GenericVisionAdapter:
         return self._log.total_cost_usd if self._log is not None else 0.0
 
     async def stop(self) -> None:
+        self._stopping = True
         if self._task is not None:
             self._task.cancel()
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
         self._close_backend()
+        if self._queued_frame is not None:
+            queued = self._queued_frame
+            self._queued_frame = None
+            queued.frame.bitmap.close()
+            self._complete_record(
+                self._dropped_record(queued, "error:stopped")
+            )
         for task in tuple(self._inflight):
             task.cancel()
         if self._inflight:
@@ -446,8 +484,13 @@ class GenericVisionAdapter:
             try:
                 self._backend = self._capture_backend_factory()
                 self._selector = self._selector_factory(self._settings.region_sparsity_max)
+                if self._settings.input_context:
+                    if self._input_listener_factory is None:
+                        raise RuntimeError("通用视觉输入上下文缺少生产监听器工厂")
+                    self._input_context = self._input_listener_factory(self._backend)
             except Exception as error:
                 logger.warning("通用视觉未找到可捕获的前台窗口：%s", error)
+                self._close_backend()
                 await self._publish_status("no_window", "")
                 return
         assert self._selector is not None
@@ -466,7 +509,12 @@ class GenericVisionAdapter:
         self._current_game = game
         observation = self._selector.observe(frame.bitmap, frame.metadata.monotonic_seconds)
         if observation.decision.should_save:
-            await self._schedule(frame, game, observation.decision.region_grid)
+            await self._schedule(
+                frame,
+                game,
+                observation.decision.region_grid,
+                observation.decision.baseline_monotonic_seconds,
+            )
         else:
             frame.bitmap.close()
         await self._publish_status("watching", game)
@@ -476,47 +524,101 @@ class GenericVisionAdapter:
         frame: CapturedFrameLike,
         game: str,
         region: tuple[str, ...],
+        baseline_monotonic_seconds: float,
         *,
         wait_for_capacity: bool = False,
     ) -> None:
         sequence = self._next_sequence
         self._next_sequence += 1
+        pending = PendingFrame(
+            sequence,
+            frame,
+            game,
+            region,
+            baseline_monotonic_seconds,
+        )
         while wait_for_capacity and len(self._inflight) >= self._settings.max_inflight:
-            await asyncio.wait(tuple(self._inflight), return_when=asyncio.FIRST_COMPLETED)
-        if len(self._inflight) >= self._settings.max_inflight:
-            frame.bitmap.close()
-            self._complete_record(
-                ObservationRecord(
-                    sequence,
-                    frame.metadata.monotonic_seconds,
-                    frame.metadata.captured_at.astimezone(timezone.utc).isoformat(),
-                    game,
-                    "",
-                    region or None,
-                    0.0,
-                    "error:inflight_limit",
-                    0.0,
-                    False,
-                    None,
-                    False,
-                )
+            done, _ = await asyncio.wait(
+                tuple(self._inflight),
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            self._inflight.difference_update(done)
+        if len(self._inflight) >= self._settings.max_inflight:
+            replaced = self._queued_frame
+            self._queued_frame = pending
+            if replaced is not None:
+                replaced.frame.bitmap.close()
+                self._complete_record(self._dropped_record(replaced, "superseded"))
             return
-        timeline = tuple(self._recent[-self._context_lines :]) if self._context_lines else ()
-        unchanged_since_information = self._unchanged_since_information
+        self._launch_frame(pending)
+
+    def _launch_frame(self, pending: PendingFrame) -> None:
+        frame_ts = pending.frame.metadata.monotonic_seconds
+        input_summary: str | None = None
+        if self._settings.input_context:
+            if self._input_context is None:
+                raise RuntimeError("输入上下文已启用但监听器未初始化")
+            input_summary = self._input_context.summarize_window(
+                self._last_dispatched_frame_ts,
+                frame_ts,
+            )
+            self._last_dispatched_frame_ts = frame_ts
+        baseline_seconds_ago: float | None = None
+        if pending.region:
+            baseline_seconds_ago = frame_ts - pending.baseline_monotonic_seconds
+            if baseline_seconds_ago < -1e-6:
+                raise ValueError("变化基线时间晚于当前帧")
+            baseline_seconds_ago = max(0.0, baseline_seconds_ago)
+        user_prompt = _user_prompt(
+            pending.game,
+            input_summary,
+            pending.region,
+            baseline_seconds_ago=baseline_seconds_ago,
+        )
         task = asyncio.create_task(
             self._observe_frame(
-                sequence,
-                frame,
-                game,
-                region,
-                timeline,
-                unchanged_since_information,
+                pending.seq,
+                pending.frame,
+                pending.game,
+                pending.region,
+                user_prompt,
             ),
-            name=f"generic-vision-call-{sequence}",
+            name=f"generic-vision-call-{pending.seq}",
         )
         self._inflight.add(task)
-        task.add_done_callback(self._inflight.discard)
+        task.add_done_callback(self._observation_done)
+
+    def _observation_done(self, task: asyncio.Task[None]) -> None:
+        self._inflight.discard(task)
+        self._launch_queued_frame()
+
+    def _launch_queued_frame(self) -> None:
+        if (
+            self._stopping
+            or self._queued_frame is None
+            or len(self._inflight) >= self._settings.max_inflight
+        ):
+            return
+        pending = self._queued_frame
+        self._queued_frame = None
+        self._launch_frame(pending)
+
+    @staticmethod
+    def _dropped_record(pending: PendingFrame, reason: str) -> ObservationRecord:
+        return ObservationRecord(
+            pending.seq,
+            pending.frame.metadata.monotonic_seconds,
+            pending.frame.metadata.captured_at.astimezone(timezone.utc).isoformat(),
+            pending.game,
+            "",
+            pending.region or None,
+            0.0,
+            reason,
+            0.0,
+            False,
+            None,
+            False,
+        )
 
     async def _observe_frame(
         self,
@@ -524,8 +626,7 @@ class GenericVisionAdapter:
         frame: CapturedFrameLike,
         game: str,
         region: tuple[str, ...],
-        timeline: tuple[tuple[float, str], ...],
-        unchanged_since_information: bool,
+        user_prompt: str,
     ) -> None:
         started = self._clock()
         dropped: str | None = None
@@ -535,20 +636,13 @@ class GenericVisionAdapter:
         truncated = False
         try:
             assert self._client is not None
-            prompt = _user_prompt(
-                game,
-                timeline,
-                region,
-                context_lines=self._context_lines,
-                unchanged_since_information=unchanged_since_information,
-            )
             result = await asyncio.wait_for(
                 asyncio.to_thread(
                     self._client.complete_with_images_stream,
                     model=self._effective.model,
                     provider=self._effective.provider or None,
                     system_prompt=FAST_PROMPT_PATH.read_text(encoding="utf-8").strip(),
-                    user_prompt=prompt,
+                    user_prompt=user_prompt,
                     images=(
                         LlmImage(
                             frame.bitmap,
@@ -600,6 +694,7 @@ class GenericVisionAdapter:
                 True,
                 visible_output_tokens,
                 truncated,
+                user_prompt,
             )
         )
 
@@ -609,17 +704,6 @@ class GenericVisionAdapter:
             current = self._pending.pop(self._next_write_sequence)
             assert self._log is not None
             self._log.append(current)
-            if current.dropped is None:
-                if _is_no_change(current.text):
-                    self._unchanged_since_information = True
-                else:
-                    self._recent.append((current.frame_ts, current.text))
-                    self._recent = (
-                        self._recent[-self._context_lines :]
-                        if self._context_lines
-                        else []
-                    )
-                    self._unchanged_since_information = False
             self._next_write_sequence += 1
         self._refresh_cost_warning()
 
@@ -663,6 +747,7 @@ class GenericVisionAdapter:
                 state=state,
                 summary={
                     "game": game or None,
+                    "input_context": "yes" if self._settings.input_context else "no",
                     "session_cost_usd": f"{cost:.6f}",
                     "cost_warning": "yes" if self._cost_warning else "no",
                     "degraded": "yes" if self._degraded else "no",
@@ -671,34 +756,55 @@ class GenericVisionAdapter:
         )
 
     def _close_backend(self) -> None:
-        if self._backend is not None:
-            self._backend.close()
-            self._backend = None
-            self._selector = None
+        try:
+            self._close_input_context()
+        finally:
+            if self._backend is not None:
+                self._backend.close()
+                self._backend = None
+                self._selector = None
+
+    def _close_input_context(self) -> None:
+        if self._input_context is not None:
+            context = self._input_context
+            self._input_context = None
+            context.close()
 
 
 def _user_prompt(
     game: str,
-    timeline: Sequence[tuple[float, str]],
+    input_summary: str | None,
     region: Sequence[str],
     *,
-    context_lines: int = 5,
-    unchanged_since_information: bool = False,
+    baseline_seconds_ago: float | None,
 ) -> str:
-    context_label = "五" if context_lines == 5 else str(context_lines)
     lines = [
         "请观察当前这一张完整游戏画面，并遵守系统提示。",
         f"已知游戏：{game}",
-        f"最近观察（按画面时间，最多{context_label}条）：",
     ]
-    if timeline:
-        lines.extend(f"- {timestamp:.3f}：{text}" for timestamp, text in timeline)
-    else:
-        lines.append("- 暂无")
-    if unchanged_since_information:
-        lines.append("此后至今无明显变化")
+    if input_summary is not None:
+        lines.extend(("玩家输入：", input_summary))
     if region:
-        lines.append(REGION_TEMPLATE.format(cells="、".join(region)))
+        if baseline_seconds_ago is None:
+            raise ValueError("区域提示缺少变化基线秒差")
+        lines.append(
+            REGION_TEMPLATE.format(
+                seconds=baseline_seconds_ago,
+                cells="、".join(region),
+            )
+        )
+        lines.append(
+            "本条提供了变化区域信息；必须恰好输出两行：第一行以【画面】开头，"
+            "标签后以15个汉字为目标、25个为硬上限，只保留主体和关键状态；"
+            "第二行以【刚刚】开头，标签后以20个汉字为目标、30个为硬上限。"
+            "两行都不得复述游戏名。"
+        )
+    else:
+        lines.append(
+            "本条没有提供变化区域信息；必须恰好输出一行，以【画面】开头，"
+            "标签后以15个汉字为目标、25个为硬上限，只保留主体和关键状态；"
+            "禁止输出【刚刚】，不得复述游戏名。"
+        )
     return "\n".join(lines)
 
 
@@ -713,21 +819,18 @@ def _visible_output_tokens(result: LlmResult) -> int | None:
     return max(completion - (result.usage.reasoning_tokens or 0), 0)
 
 
-def _is_no_change(text: str) -> bool:
-    """Classify the model's harmless terminal punctuation as the same sentinel."""
-    return text.rstrip("。") == NO_CHANGE_TEXT
-
-
 def create_adapter(
     configuration: AdapterConfig,
     llm_configuration: LlmConfig,
     *,
     capture_backend_factory: CaptureBackendFactory,
     selector_factory: SelectorFactory,
+    input_listener_factory: InputListenerFactory,
 ) -> GenericVisionAdapter:
     return GenericVisionAdapter(
         configuration,
         llm_configuration,
         capture_backend_factory=capture_backend_factory,
         selector_factory=selector_factory,
+        input_listener_factory=input_listener_factory,
     )

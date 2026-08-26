@@ -83,6 +83,8 @@ def test_game_packages_do_not_cross_import_or_reach_eval_from_production() -> No
                     "generic/eval/observation_replay.py",
                 }:
                     allowed.add("capture")
+                if relative.as_posix() == "generic/eval/observation_replay.py":
+                    allowed.add("input_telemetry")
                 if imported_core not in allowed:
                     failures.append(
                         _failure(

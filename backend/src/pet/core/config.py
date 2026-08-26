@@ -158,6 +158,7 @@ class GenericVisionConfig(BaseModel):
     send_width: int = Field(default=896, ge=64, le=8192)
     fast_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     max_inflight: int = Field(default=4, ge=1, le=32)
+    input_context: bool = True
     observation_log_dir: str = "recordings/observation"
     region_sparsity_max: float = Field(
         default=DEFAULT_REGION_SPARSITY_MAX,

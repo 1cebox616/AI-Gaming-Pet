@@ -34,6 +34,7 @@ def test_missing_configuration_file_uses_validated_defaults(
     assert configuration.policy.cooldown_override_priority == 70
     assert configuration.policy.minimum_gap_seconds == 2.0
     assert configuration.policy.follow_up_max_age_seconds == 5.0
+    assert configuration.active_game.generic.input_context is True
     assert configuration.policy.streak_settle_seconds == 2.5
     assert configuration.personality.style == "brother"
     assert configuration.llm.enabled is False
@@ -466,6 +467,7 @@ def test_generic_visual_settings_and_profile_prices_load(tmp_path: Path) -> None
         "[active]\ngame = \"generic\"\n\n"
         "[games.generic]\nenabled = true\npoll_interval_seconds = 1.5\n"
         "send_width = 896\nfast_timeout_seconds = 5.0\nmax_inflight = 4\n"
+        "input_context = false\n"
         "observation_log_dir = \"recordings/observation\"\n"
         "region_sparsity_max = 0.25\nllm_profile = \"vision_fast\"\n"
         "cost_warn_per_hour = 1.0\n\n"
@@ -481,6 +483,7 @@ def test_generic_visual_settings_and_profile_prices_load(tmp_path: Path) -> None
     generic = configuration.games["generic"].generic
     assert generic.enabled is True
     assert generic.poll_interval_seconds == 1.5
+    assert generic.input_context is False
     assert generic.region_sparsity_max == 0.25
     profile = configuration.llm.profiles["vision_fast"]
     assert profile.model == "vendor/vision"

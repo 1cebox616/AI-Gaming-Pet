@@ -8,6 +8,7 @@ module only receives device events and never writes input back to the system.
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 import csv
 import ctypes
@@ -19,11 +20,18 @@ import statistics
 import sys
 import threading
 import time
-from typing import Literal, Self
+from typing import Literal, Protocol, Self, cast
 
 
 INPUT_WHITELIST_VERSION = "v1"
 MOUSE_SUMMARY_WINDOW_SECONDS = 0.100
+ACTION_INPUT_RETENTION_SECONDS = 65.0
+ACTION_INPUT_EMPTY_TEXT = "此窗口内无玩家输入"
+# The two M5 calibration recordings have per-100 ms movement medians of 43.6
+# and 106.9 raw units.  Five hundred units separates their approximate
+# one-second light/large regimes; this presentation threshold does not affect
+# capture or frame-selection decisions.
+MOUSE_LARGE_MOVEMENT_UNITS = 500.0
 
 KEYBOARD_INPUT_NAMES = (
     "W",
@@ -124,6 +132,50 @@ class InputRecord:
     dx: int = 0
     dy: int = 0
     monotonic_seconds: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class ActionInputEvent:
+    """One action-only event eligible for the model context timeline."""
+
+    monotonic_seconds: float
+    event_type: InputEventType
+    name: str = ""
+    dx: int = 0
+    dy: int = 0
+    absolute_dx: int = 0
+    absolute_dy: int = 0
+    direction_known: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class LoadedActionInput:
+    """Privacy-filtered replay timeline plus source limitations."""
+
+    timeline: ActionInputTimeline
+    csv_missing: bool
+    direction_available: bool
+
+
+class RawInputProcessorLike(Protocol):
+    def set_foreground(
+        self,
+        foreground: bool,
+        timestamp: datetime,
+        monotonic_seconds: float | None = None,
+    ) -> None: ...
+
+    def process(self, sample: InputSample) -> None: ...
+
+    def flush_due(
+        self,
+        timestamp: datetime,
+        monotonic_seconds: float | None = None,
+    ) -> None: ...
+
+
+class RawInputOwnerLike(Protocol):
+    processor: RawInputProcessorLike
 
 
 @dataclass(slots=True)
@@ -389,6 +441,265 @@ class InputTelemetryRecorder:
         return self.processor.statistics.summary()
 
 
+class ActionInputTimeline:
+    """Thread-safe action-only ring buffer with deterministic window summaries."""
+
+    def __init__(self, retention_seconds: float | None = ACTION_INPUT_RETENTION_SECONDS) -> None:
+        if retention_seconds is not None and retention_seconds <= 0:
+            raise ValueError("action input retention must be positive")
+        self._retention_seconds = retention_seconds
+        self._events: deque[ActionInputEvent] = deque()
+        self._lock = threading.Lock()
+
+    def append(self, event: ActionInputEvent) -> None:
+        """Retain only action names; rejected identities never enter memory."""
+        if event.name and event.name not in INPUT_NAME_WHITELIST:
+            return
+        with self._lock:
+            self._events.append(event)
+            if self._retention_seconds is not None:
+                cutoff = event.monotonic_seconds - self._retention_seconds
+                while self._events and self._events[0].monotonic_seconds < cutoff:
+                    self._events.popleft()
+
+    def summarize_window(
+        self,
+        start_exclusive: float | None,
+        end_inclusive: float,
+    ) -> str:
+        """Summarize exactly ``(start, end]`` without exposing raw key rows."""
+        if not math.isfinite(end_inclusive):
+            raise ValueError("action input window end must be finite")
+        if start_exclusive is not None:
+            if not math.isfinite(start_exclusive):
+                raise ValueError("action input window start must be finite")
+            if end_inclusive < start_exclusive:
+                raise ValueError("action input window end precedes start")
+        with self._lock:
+            if self._retention_seconds is not None:
+                cutoff = end_inclusive - self._retention_seconds
+                while self._events and self._events[0].monotonic_seconds < cutoff:
+                    self._events.popleft()
+            events = tuple(sorted(self._events, key=lambda item: item.monotonic_seconds))
+        return _summarize_action_events(events, start_exclusive, end_inclusive)
+
+    def close(self) -> None:
+        """Replay timelines own no OS or file resource."""
+
+
+class ActionInputEventProcessor:
+    """Action-only focus gate preserving signed mouse direction in memory."""
+
+    def __init__(
+        self,
+        sink: Callable[[ActionInputEvent], None],
+        *,
+        movement_window_seconds: float = MOUSE_SUMMARY_WINDOW_SECONDS,
+    ) -> None:
+        if movement_window_seconds <= 0:
+            raise ValueError("movement window must be positive")
+        self._sink = sink
+        self._window_seconds = movement_window_seconds
+        self._focused = False
+        self._movement_started_at_monotonic: float | None = None
+        self._movement_dx = 0
+        self._movement_dy = 0
+        self._movement_absolute_dx = 0
+        self._movement_absolute_dy = 0
+
+    def set_foreground(
+        self,
+        foreground: bool,
+        timestamp: datetime,
+        monotonic_seconds: float | None = None,
+    ) -> None:
+        normalized = _utc(timestamp)
+        monotonic = _event_monotonic(normalized, monotonic_seconds)
+        if foreground:
+            self._focused = True
+            return
+        if self._focused:
+            self._flush_movement(monotonic)
+            self._sink(ActionInputEvent(monotonic, "焦点丢失"))
+        self._focused = False
+
+    def process(self, sample: InputSample) -> None:
+        timestamp = _utc(sample.timestamp)
+        monotonic = _event_monotonic(timestamp, sample.monotonic_seconds)
+        self.set_foreground(sample.foreground, timestamp, monotonic)
+        if not self._focused:
+            return
+        self.flush_due(timestamp, monotonic)
+        if sample.kind in {"key", "mouse_button"}:
+            if sample.name not in INPUT_NAME_WHITELIST or sample.pressed is None:
+                return
+            event_type: InputEventType = "按下" if sample.pressed else "抬起"
+            self._sink(ActionInputEvent(monotonic, event_type, sample.name))
+            return
+        if sample.kind == "wheel":
+            if sample.name not in {"WheelUp", "WheelDown"}:
+                return
+            self._sink(ActionInputEvent(monotonic, "滚轮", sample.name))
+            return
+        if sample.kind == "move" and sample.relative:
+            self._accumulate_movement(monotonic, sample.dx, sample.dy)
+
+    def flush_due(
+        self,
+        timestamp: datetime,
+        monotonic_seconds: float | None = None,
+    ) -> None:
+        normalized = _utc(timestamp)
+        monotonic = _event_monotonic(normalized, monotonic_seconds)
+        started = self._movement_started_at_monotonic
+        if started is not None and monotonic - started + 1e-6 >= self._window_seconds:
+            self._flush_movement(monotonic)
+
+    def finish(
+        self,
+        timestamp: datetime,
+        monotonic_seconds: float | None = None,
+    ) -> None:
+        normalized = _utc(timestamp)
+        self._flush_movement(_event_monotonic(normalized, monotonic_seconds))
+
+    def _accumulate_movement(self, monotonic_seconds: float, dx: int, dy: int) -> None:
+        if dx == 0 and dy == 0:
+            return
+        if self._movement_started_at_monotonic is None:
+            self._movement_started_at_monotonic = monotonic_seconds
+        self._movement_dx += dx
+        self._movement_dy += dy
+        self._movement_absolute_dx += abs(dx)
+        self._movement_absolute_dy += abs(dy)
+
+    def _flush_movement(self, monotonic_seconds: float) -> None:
+        if self._movement_started_at_monotonic is None:
+            return
+        if self._movement_absolute_dx or self._movement_absolute_dy:
+            self._sink(
+                ActionInputEvent(
+                    monotonic_seconds,
+                    "移动汇总",
+                    dx=self._movement_dx,
+                    dy=self._movement_dy,
+                    absolute_dx=self._movement_absolute_dx,
+                    absolute_dy=self._movement_absolute_dy,
+                    direction_known=True,
+                )
+            )
+        self._movement_started_at_monotonic = None
+        self._movement_dx = 0
+        self._movement_dy = 0
+        self._movement_absolute_dx = 0
+        self._movement_absolute_dy = 0
+
+
+_MOUSE_LABELS = {
+    "MouseLeft": "左键",
+    "MouseRight": "右键",
+    "MouseMiddle": "中键",
+    "Mouse4": "鼠标侧键4",
+    "Mouse5": "鼠标侧键5",
+}
+
+
+def _summarize_action_events(
+    events: tuple[ActionInputEvent, ...],
+    start_exclusive: float | None,
+    end_inclusive: float,
+) -> str:
+    start = float("-inf") if start_exclusive is None else start_exclusive
+    active: dict[str, float] = {}
+    press_times: dict[str, list[float]] = {}
+    held_seconds: dict[str, float] = {}
+    wheel_counts: dict[str, int] = {}
+    movement: list[ActionInputEvent] = []
+
+    def finish_active(name: str, at: float) -> None:
+        pressed_at = active.pop(name)
+        overlap_start = max(pressed_at, start)
+        if at > overlap_start:
+            held_seconds[name] = held_seconds.get(name, 0.0) + (at - overlap_start)
+
+    for event in events:
+        at = event.monotonic_seconds
+        if at > end_inclusive:
+            break
+        in_window = at > start
+        if event.event_type == "按下" and event.name:
+            if event.name not in active:
+                active[event.name] = at
+                if in_window:
+                    press_times.setdefault(event.name, []).append(at)
+        elif event.event_type == "抬起" and event.name:
+            if event.name in active:
+                finish_active(event.name, at)
+        elif event.event_type == "滚轮" and event.name and in_window:
+            wheel_counts[event.name] = wheel_counts.get(event.name, 0) + 1
+        elif event.event_type == "移动汇总" and in_window:
+            movement.append(event)
+        elif event.event_type == "焦点丢失":
+            for name in tuple(active):
+                finish_active(name, at)
+    for name in tuple(active):
+        finish_active(name, end_inclusive)
+
+    parts: list[str] = []
+    for name in KEYBOARD_INPUT_NAMES:
+        presses = press_times.get(name, [])
+        duration = held_seconds.get(name, 0.0)
+        if len(presses) >= 2:
+            parts.append(_click_summary(name, presses))
+        elif presses or duration > 0:
+            parts.append(f"{name} 按住 {duration:.1f} 秒")
+    for name in MOUSE_INPUT_NAMES:
+        if name in {"WheelUp", "WheelDown"}:
+            continue
+        presses = press_times.get(name, [])
+        duration = held_seconds.get(name, 0.0)
+        label = _MOUSE_LABELS[name]
+        if presses:
+            parts.append(_click_summary(label, presses))
+        elif duration > 0:
+            parts.append(f"{label}按住 {duration:.1f} 秒")
+    if wheel_counts.get("WheelUp"):
+        parts.append(f"滚轮向上 {wheel_counts['WheelUp']} 次")
+    if wheel_counts.get("WheelDown"):
+        parts.append(f"滚轮向下 {wheel_counts['WheelDown']} 次")
+    if movement:
+        parts.append(_movement_summary(movement))
+    return "；".join(parts) if parts else ACTION_INPUT_EMPTY_TEXT
+
+
+def _click_summary(label: str, press_times: list[float]) -> str:
+    count = len(press_times)
+    value = f"{label}点击 {count} 次"
+    if count >= 2:
+        intervals = [right - left for left, right in zip(press_times, press_times[1:])]
+        value += f"（平均间隔约 {statistics.mean(intervals):.2f} 秒）"
+    return value
+
+
+def _movement_summary(events: list[ActionInputEvent]) -> str:
+    absolute_x = sum(event.absolute_dx for event in events)
+    absolute_y = sum(event.absolute_dy for event in events)
+    magnitude = sum(math.hypot(event.absolute_dx, event.absolute_dy) for event in events)
+    grade = "大幅" if magnitude >= MOUSE_LARGE_MOVEMENT_UNITS else "轻微"
+    if all(event.direction_known for event in events):
+        net_x = sum(event.dx for event in events)
+        net_y = sum(event.dy for event in events)
+        if abs(net_x) >= abs(net_y) and net_x:
+            direction = "向右" if net_x > 0 else "向左"
+        elif net_y:
+            direction = "向下" if net_y > 0 else "向上"
+        else:
+            direction = "以横向为主" if absolute_x >= absolute_y else "以纵向为主"
+    else:
+        direction = "以横向为主" if absolute_x >= absolute_y else "以纵向为主"
+    return f"鼠标{direction}{grade}移动"
+
+
 # Raw Input constants and structures. No hook or input-writing API is declared.
 _WM_INPUT = 0x00FF
 _WM_TIMER = 0x0113
@@ -563,12 +874,12 @@ def _full_keyboard_name(user32: object, keyboard: _RAWKEYBOARD) -> str | None:
 
 
 class WindowsRawInputBackend:
-    """Receive Raw Input in a message-only window on a dedicated thread."""
+    """Receive allowlisted Raw Input in a message-only window."""
 
     def __init__(
         self,
         target_hwnd: int,
-        recorder: InputTelemetryRecorder,
+        recorder: RawInputOwnerLike,
         *,
         ready_timeout_seconds: float = 5.0,
     ) -> None:
@@ -807,10 +1118,8 @@ class WindowsRawInputBackend:
         monotonic_seconds: float,
         foreground: bool,
     ) -> None:
-        if self._recorder.processor.full_keyboard:
-            name = _full_keyboard_name(user32, keyboard)
-        else:
-            name = _VIRTUAL_KEY_NAMES.get(int(keyboard.VKey))
+        del user32
+        name = _VIRTUAL_KEY_NAMES.get(int(keyboard.VKey))
         if name is None:
             return
         self._recorder.processor.process(
@@ -978,6 +1287,124 @@ class WindowsRawInputBackend:
         user32.PostMessageW.restype = ctypes.c_bool
         kernel32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
         kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+
+
+class FullKeyboardWindowsRawInputBackend(WindowsRawInputBackend):
+    """Development-probe backend; production never constructs this class."""
+
+    def _record_keyboard(
+        self,
+        user32: object,
+        keyboard: _RAWKEYBOARD,
+        timestamp: datetime,
+        monotonic_seconds: float,
+        foreground: bool,
+    ) -> None:
+        name = _full_keyboard_name(user32, keyboard)
+        if name is None:
+            return
+        self._recorder.processor.process(
+            InputSample(
+                timestamp,
+                "key",
+                foreground,
+                name=name,
+                pressed=not bool(keyboard.Flags & _RI_KEY_BREAK),
+                monotonic_seconds=monotonic_seconds,
+            )
+        )
+
+
+class ActionInputListener:
+    """Production action-only listener with no file writer or full-key mode."""
+
+    def __init__(
+        self,
+        target_hwnd: int,
+        *,
+        retention_seconds: float = ACTION_INPUT_RETENTION_SECONDS,
+        backend_factory: Callable[[int, RawInputOwnerLike], WindowsRawInputBackend]
+        | None = None,
+    ) -> None:
+        self.timeline = ActionInputTimeline(retention_seconds)
+        self.processor = ActionInputEventProcessor(self.timeline.append)
+        factory = backend_factory or WindowsRawInputBackend
+        self._backend = factory(target_hwnd, self)
+        self._closed = False
+
+    def summarize_window(
+        self,
+        start_exclusive: float | None,
+        end_inclusive: float,
+    ) -> str:
+        return self.timeline.summarize_window(start_exclusive, end_inclusive)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            self._backend.close()
+        finally:
+            anchor = ClockAnchor.sample()
+            self.processor.finish(anchor.utc, anchor.monotonic_seconds)
+            self._closed = True
+
+
+def load_action_input_csv(session_directory: Path) -> LoadedActionInput:
+    """Load a replay CSV through the same action allowlist used in production.
+
+    Historical probe CSVs stored absolute horizontal/vertical movement only,
+    so their summaries can report the dominant axis but cannot invent a sign.
+    """
+    timeline = ActionInputTimeline(retention_seconds=None)
+    path = session_directory / "input.csv"
+    if not path.is_file():
+        return LoadedActionInput(timeline, True, False)
+    with path.open(encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        fieldnames = set(reader.fieldnames or ())
+        if "时间" not in fieldnames or "事件类型" not in fieldnames:
+            raise InputTelemetryError(f"输入记录缺少必要列：{path}")
+        has_monotonic = "单调秒" in fieldnames
+        for row in reader:
+            try:
+                event_type = row["事件类型"]
+                if event_type not in {"按下", "抬起", "滚轮", "移动汇总", "焦点丢失"}:
+                    continue
+                name = row.get("键名", "")
+                if name and name not in INPUT_NAME_WHITELIST:
+                    continue
+                monotonic_text = row.get("单调秒", "") if has_monotonic else ""
+                monotonic = (
+                    float(monotonic_text)
+                    if monotonic_text
+                    else datetime.fromisoformat(row["时间"]).timestamp()
+                )
+                if not math.isfinite(monotonic):
+                    raise ValueError("non-finite monotonic timestamp")
+                if event_type == "移动汇总":
+                    horizontal = abs(int(row.get("dx", "") or 0))
+                    vertical = abs(int(row.get("dy", "") or 0))
+                    timeline.append(
+                        ActionInputEvent(
+                            monotonic,
+                            "移动汇总",
+                            absolute_dx=horizontal,
+                            absolute_dy=vertical,
+                            direction_known=False,
+                        )
+                    )
+                else:
+                    timeline.append(
+                        ActionInputEvent(
+                            monotonic,
+                            cast(InputEventType, event_type),
+                            name,
+                        )
+                    )
+            except (KeyError, TypeError, ValueError) as error:
+                raise InputTelemetryError(f"无法读取输入记录 {path}：{error}") from error
+    return LoadedActionInput(timeline, False, False)
 
 
 def empty_input_summary() -> dict[str, object]:

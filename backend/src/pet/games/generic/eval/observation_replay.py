@@ -35,6 +35,7 @@ from pet.core.config import (
     load_config,
     resolve_llm_profile,
 )
+from pet.core.input_telemetry import ActionInputTimeline, load_action_input_csv
 from pet.games.generic.adapter import GenericVisionAdapter, WindowTitleMap
 
 BACKEND_DIRECTORY = Path(__file__).resolve().parents[5]
@@ -64,6 +65,7 @@ class ReplayFrameSpec:
     timing: ReplayFrameTime
     relative_seconds: float
     region: tuple[str, ...]
+    baseline_monotonic_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +82,9 @@ class PreparedReplay:
     requested_send_width: int
     actual_send_width: int
     recording_hash: str
+    input_context: ActionInputTimeline
+    input_csv_missing: bool
+    input_direction_available: bool
 
 
 def _parse_segment(value: str) -> SegmentRange:
@@ -97,11 +102,10 @@ def _parse_segment(value: str) -> SegmentRange:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="M5-T7.2 离线快线观察日志重放")
+    parser = argparse.ArgumentParser(description="M5-T7.4 离线快线观察日志重放")
     parser.add_argument("--session", action="append", required=True, type=Path)
     parser.add_argument("--segment", type=_parse_segment)
     parser.add_argument("--profile", required=True)
-    parser.add_argument("--context-lines", type=int, default=5)
     parser.add_argument("--max-inflight", type=int, default=4)
     parser.add_argument("--send-width", type=int, default=PRODUCTION_SEND_WIDTH)
     parser.add_argument("--timeout", type=float, default=5.0)
@@ -188,11 +192,18 @@ def _prepare_replay(
         bitmap.close()
         if observation.decision.should_save:
             selected.append(
-                ReplayFrameSpec(path, timing, relative, observation.decision.region_grid)
+                ReplayFrameSpec(
+                    path,
+                    timing,
+                    relative,
+                    observation.decision.region_grid,
+                    observation.decision.baseline_monotonic_seconds,
+                )
             )
     if not included_count or source_size is None:
         raise ObservationReplayError(f"指定区间没有帧：{session}")
     actual_width = min(requested_width, source_size[0])
+    loaded_input = load_action_input_csv(session)
     return PreparedReplay(
         session=session,
         name=_session_label(payload, session),
@@ -206,6 +217,9 @@ def _prepare_replay(
         requested_send_width=requested_width,
         actual_send_width=actual_width,
         recording_hash=_recording_hash(session),
+        input_context=loaded_input.timeline,
+        input_csv_missing=loaded_input.csv_missing,
+        input_direction_available=loaded_input.direction_available,
     )
 
 
@@ -235,7 +249,6 @@ async def _run_prepared(
     *,
     llm_configuration: LlmConfig,
     profile: str,
-    context_lines: int,
     max_inflight: int,
     timeout: float,
     region_sparsity_max: float,
@@ -261,7 +274,7 @@ async def _run_prepared(
     )
     adapter.start_replay(
         output_directory,
-        context_lines=context_lines,
+        input_context=prepared.input_context,
         extra_parameters={
             "mode": "offline_replay",
             "source_session": str(prepared.session),
@@ -269,6 +282,8 @@ async def _run_prepared(
             "requested_send_width": prepared.requested_send_width,
             "actual_send_width": prepared.actual_send_width,
             "production_default_send_width": PRODUCTION_SEND_WIDTH,
+            "input_csv_missing": prepared.input_csv_missing,
+            "input_direction_available": prepared.input_direction_available,
             "width_difference_note": (
                 f"raw 原图宽 {prepared.source_width}，实际上传 {prepared.actual_send_width}；"
                 f"生产默认 {PRODUCTION_SEND_WIDTH}，本次未放大。"
@@ -298,7 +313,12 @@ async def _run_prepared(
                     item.timing.source,
                 ),
             )
-            await adapter.submit_replay_frame(frame, prepared.game, item.region)
+            await adapter.submit_replay_frame(
+                frame,
+                prepared.game,
+                item.region,
+                item.baseline_monotonic_seconds,
+            )
             last_dispatch = asyncio.get_running_loop().time()
             if prior_cost + adapter.total_cost_usd > cost_cap * 1.5:
                 stopped_by_cost = True
@@ -365,7 +385,7 @@ def _write_review(
     segment_manifest: Path = DEFAULT_SEGMENTS_PATH,
 ) -> None:
     lines = [
-        "# M5-T7.2 离线观察日志复核表",
+        "# M5-T7.4 离线观察日志复核表",
         "",
         "本文件只列机器输出与机械统计，不评价模型能力。相似度为相邻文本的字符级 "
         "SequenceMatcher 重合率；超过 0.6 的相邻对列为复读候选，需产品负责人判读。",
@@ -377,10 +397,22 @@ def _write_review(
         session = json.loads((directory / "session.json").read_text(encoding="utf-8"))
         latencies = [float(row["latency_ms"]) for row in rows if row.get("dropped") is None]
         dropped = Counter(str(row["dropped"]) for row in rows if row.get("dropped") is not None)
-        injected = sum(1 for row in rows if row.get("region"))
+        successful = [row for row in rows if row.get("dropped") is None]
+        injected = sum(1 for row in successful if row.get("region"))
+        failed_region_requests = sum(
+            1 for row in rows if row.get("dropped") is not None and row.get("region")
+        )
+        just_now = sum(
+            1
+            for row in rows
+            if row.get("dropped") is None and "【刚刚】" in str(row.get("text", ""))
+        )
         truncated = int(session.get("truncated_count", 0))
-        unchanged = int(session.get("unchanged_count", 0))
         average_visible_tokens = session.get("average_visible_output_tokens")
+        exact_repeats = sum(
+            str(previous["text"]) == str(current["text"])
+            for previous, current in zip(successful, successful[1:])
+        )
         lines.extend(
             [
                 f"## {prepared.name}",
@@ -397,10 +429,22 @@ def _write_review(
                     else "- 往返中位 / P90：无成功调用"
                 ),
                 f"- 实际花费：${float(session['total_cost_usd']):.9f}",
-                f"- 区域提示注入次数：{injected}",
+                f"- 区域提示注入次数（成功响应）：{injected}",
+                f"- 失败请求中的区域提示次数：{failed_region_requests}",
+                f"- 【刚刚】段出现次数：{just_now}",
                 f"- 截断条数：{truncated}",
-                f"- 「无明显变化」条数：{unchanged}",
+                f"- 逐字重复条数：{exact_repeats}",
                 f"- 平均可见输出 token：{average_visible_tokens}",
+                (
+                    "- 输入 CSV：缺失，所有窗口按无输入处理并已标注。"
+                    if prepared.input_csv_missing
+                    else "- 输入 CSV：存在，读取时已按生产动作键白名单过滤。"
+                ),
+                (
+                    "- 鼠标方向：录制保留正负方向。"
+                    if prepared.input_direction_available
+                    else "- 鼠标方向：旧录制仅有横纵绝对量，只报告主要轴，不猜测正负。"
+                ),
                 f"- 上传宽度：请求 {prepared.requested_send_width}，raw {prepared.source_width}，"
                 f"实际 {prepared.actual_send_width}；未放大，低于生产默认。",
                 "",
@@ -415,7 +459,6 @@ def _write_review(
                 lines.append(f"- {row['wall']} · {row['game']}：[丢弃：{row['dropped']}]")
         lines.extend(["", "### 复读候选（相邻相似度 > 0.6）", ""])
         repeats = []
-        successful = [row for row in rows if row.get("dropped") is None]
         for previous, current in zip(successful, successful[1:]):
             similarity = character_similarity(str(previous["text"]), str(current["text"]))
             if similarity > 0.6:
@@ -436,6 +479,31 @@ def _write_review(
                 )
         else:
             lines.append("无。")
+        prompt_rows = [row for row in successful if row.get("user_prompt")]
+        sampled: list[dict[str, object]] = []
+        for predicate in (
+            lambda row: not row.get("region"),
+            lambda row: bool(row.get("region")),
+            lambda row: "此窗口内无玩家输入" not in str(row.get("user_prompt", "")),
+        ):
+            match = next((row for row in prompt_rows if predicate(row)), None)
+            if match is not None and match not in sampled:
+                sampled.append(match)
+        lines.extend(["", "### 抽样实际用户消息", ""])
+        if sampled:
+            for row in sampled:
+                lines.extend(
+                    [
+                        f"帧 {row['frame_ts']}：",
+                        "",
+                        "```text",
+                        str(row["user_prompt"]),
+                        "```",
+                        "",
+                    ]
+                )
+        else:
+            lines.append("无可抽样的成功请求。")
         segments = _segments_for_session(segment_manifest, prepared.session)
         if segments:
             first_timing = min(
@@ -479,8 +547,8 @@ def _configure_console() -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     _configure_console()
     arguments = build_parser().parse_args(argv)
-    if arguments.context_lines < 0 or arguments.max_inflight < 1:
-        print("--context-lines 不得为负，--max-inflight 必须至少为 1", file=sys.stderr)
+    if arguments.max_inflight < 1:
+        print("--max-inflight 必须至少为 1", file=sys.stderr)
         return 2
     if (
         arguments.send_width < 1
@@ -559,7 +627,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     output_root / item.name,
                     llm_configuration=configuration.llm,
                     profile=arguments.profile,
-                    context_lines=arguments.context_lines,
                     max_inflight=arguments.max_inflight,
                     timeout=arguments.timeout,
                     region_sparsity_max=generic.region_sparsity_max,
@@ -596,8 +663,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "profile": arguments.profile,
             "model": effective.model,
             "parameters": {
-                "context_lines": arguments.context_lines,
                 "max_inflight": arguments.max_inflight,
+                "input_context": True,
                 "requested_send_width": arguments.send_width,
                 "production_default_send_width": PRODUCTION_SEND_WIDTH,
                 "timeout_seconds": arguments.timeout,
@@ -619,6 +686,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "selected_count": len(item.selected),
                     "source_dimensions": [item.source_width, item.source_height],
                     "actual_send_width": item.actual_send_width,
+                    "input_csv_missing": item.input_csv_missing,
+                    "input_direction_available": item.input_direction_available,
                     "width_difference_note": (
                         f"raw 原图宽 {item.source_width}，实际上传 {item.actual_send_width}；"
                         f"生产默认 {PRODUCTION_SEND_WIDTH}，本次未放大。"

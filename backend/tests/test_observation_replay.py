@@ -71,6 +71,11 @@ def test_prepare_replay_uses_final_selector_segment_and_never_upscales(tmp_path:
     assert prepared.source_width == 640
     assert prepared.game == "Fixture"
     assert prepared.selected
+    assert prepared.selected[0].baseline_monotonic_seconds <= (
+        prepared.selected[0].timing.monotonic_seconds
+    )
+    assert prepared.input_csv_missing is True
+    assert prepared.input_context.summarize_window(None, 200.0) == "此窗口内无玩家输入"
     assert before == after
 
 
@@ -82,5 +87,7 @@ def test_character_similarity_flags_repetition_without_semantic_model() -> None:
 def test_dispatch_interval_defaults_to_zero_and_accepts_production_pacing() -> None:
     parser = build_parser()
     common = ["--session", "fixture", "--profile", "vision_fast"]
-    assert parser.parse_args(common).dispatch_interval == 0.0
+    parsed = parser.parse_args(common)
+    assert parsed.dispatch_interval == 0.0
+    assert not hasattr(parsed, "context_lines")
     assert parser.parse_args([*common, "--dispatch-interval", "1.0"]).dispatch_interval == 1.0

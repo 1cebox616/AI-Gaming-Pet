@@ -13,6 +13,10 @@ import pytest
 from pet.core.capture import AdaptiveFrameSelector, MetricsCsvWriter, ProbeOptions
 from pet.core import capture, input_telemetry
 from pet.core.input_telemetry import (
+    ACTION_INPUT_EMPTY_TEXT,
+    ActionInputEvent,
+    ActionInputEventProcessor,
+    ActionInputTimeline,
     ClockAnchor,
     INPUT_CSV_HEADER,
     INPUT_NAME_WHITELIST,
@@ -21,6 +25,7 @@ from pet.core.input_telemetry import (
     InputTelemetryError,
     InputTelemetryRecorder,
     WindowsRawInputBackend,
+    load_action_input_csv,
 )
 
 
@@ -246,6 +251,96 @@ def test_full_keyboard_writes_non_allowlisted_key_to_local_csv(tmp_path: Path) -
 
     assert rows[0]["键名"] == "B"
     assert rows[0]["单调秒"] == "20.000000000"
+
+
+def test_action_context_preserves_window_boundaries_clicks_holds_and_direction() -> None:
+    timeline = ActionInputTimeline(retention_seconds=None)
+    processor = ActionInputEventProcessor(timeline.append)
+
+    def sample(
+        seconds: float,
+        kind: input_telemetry.InputSampleKind,
+        *,
+        name: str = "",
+        pressed: bool | None = None,
+        dx: int = 0,
+        dy: int = 0,
+    ) -> None:
+        processor.process(
+            InputSample(
+                STARTED + timedelta(seconds=seconds),
+                kind,
+                True,
+                name=name,
+                pressed=pressed,
+                dx=dx,
+                dy=dy,
+                monotonic_seconds=seconds,
+            )
+        )
+
+    sample(1.0, "key", name="W", pressed=True)
+    sample(1.1, "key", name="B", pressed=True)
+    sample(1.2, "mouse_button", name="MouseLeft", pressed=True)
+    sample(1.21, "mouse_button", name="MouseLeft", pressed=False)
+    sample(1.35, "mouse_button", name="MouseLeft", pressed=True)
+    sample(1.36, "mouse_button", name="MouseLeft", pressed=False)
+    sample(1.4, "move", dx=-30, dy=-80)
+    processor.flush_due(
+        STARTED + timedelta(seconds=1.5),
+        monotonic_seconds=1.5,
+    )
+    sample(2.0, "key", name="W", pressed=False)
+    sample(2.1, "key", name="A", pressed=True)
+
+    summary = timeline.summarize_window(1.0, 2.0)
+
+    assert "W 按住 1.0 秒" in summary
+    assert "左键点击 2 次（平均间隔约 0.15 秒）" in summary
+    assert "鼠标向上轻微移动" in summary
+    assert "B" not in summary
+    assert "A" not in summary
+
+
+def test_action_timeline_rejects_full_keyboard_events_before_model_summary() -> None:
+    timeline = ActionInputTimeline(retention_seconds=None)
+    timeline.append(ActionInputEvent(1.0, "按下", "B"))
+    timeline.append(ActionInputEvent(1.1, "按下", "W"))
+    timeline.append(ActionInputEvent(1.6, "抬起", "W"))
+
+    summary = timeline.summarize_window(None, 2.0)
+
+    assert summary == "W 按住 0.5 秒"
+
+
+def test_replay_csv_filters_full_keyboard_and_marks_legacy_mouse_axis(
+    tmp_path: Path,
+) -> None:
+    with (tmp_path / "input.csv").open(
+        "w", encoding="utf-8-sig", newline=""
+    ) as stream:
+        writer = csv.writer(stream)
+        writer.writerow(INPUT_CSV_HEADER)
+        writer.writerow((STARTED.isoformat(), "1.000000000", "按下", "B", "", ""))
+        writer.writerow((STARTED.isoformat(), "1.100000000", "按下", "W", "", ""))
+        writer.writerow((STARTED.isoformat(), "1.600000000", "抬起", "W", "", ""))
+        writer.writerow((STARTED.isoformat(), "1.700000000", "移动汇总", "", 800, 100))
+
+    loaded = load_action_input_csv(tmp_path)
+    summary = loaded.timeline.summarize_window(None, 2.0)
+
+    assert loaded.csv_missing is False
+    assert loaded.direction_available is False
+    assert "W 按住 0.5 秒" in summary
+    assert "B" not in summary
+    assert "鼠标以横向为主大幅移动" in summary
+
+
+def test_missing_replay_csv_produces_explicit_no_input_signal(tmp_path: Path) -> None:
+    loaded = load_action_input_csv(tmp_path)
+
+    assert loaded.csv_missing is True
+    assert loaded.timeline.summarize_window(None, 10.0) == ACTION_INPUT_EMPTY_TEXT
 
 
 def test_session_json_receives_input_statistics(tmp_path: Path) -> None:

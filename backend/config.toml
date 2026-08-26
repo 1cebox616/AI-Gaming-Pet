@@ -59,6 +59,7 @@ poll_interval_seconds = 1.0
 send_width = 896
 fast_timeout_seconds = 5.0
 max_inflight = 4
+input_context = true
 observation_log_dir = "recordings/observation"
 region_sparsity_max = 0.25
 llm_profile = "vision_fast"

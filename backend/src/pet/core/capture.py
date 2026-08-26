@@ -34,6 +34,7 @@ from pet.core.input_telemetry import (
     INPUT_WHITELIST_VERSION,
     KEYBOARD_INPUT_NAMES,
     MOUSE_INPUT_NAMES,
+    FullKeyboardWindowsRawInputBackend,
     InputTelemetryError,
     InputTelemetryRecorder,
     WindowsRawInputBackend,
@@ -876,6 +877,7 @@ class SelectionDecision:
     region_grid: tuple[str, ...]
     region_sparsity_suppressed: bool
     floor_median: float
+    baseline_monotonic_seconds: float = field(compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -941,6 +943,7 @@ class AdaptiveFrameSelector:
         )
         self._previous: PreparedFrame | None = None
         self._baseline: PreparedFrame | None = None
+        self._baseline_at: float | None = None
         self._last_saved_at: float | None = None
 
     def observe(self, frame: FrameLike, now: float) -> SelectionObservation:
@@ -966,6 +969,7 @@ class AdaptiveFrameSelector:
         """
         is_first = self._previous is None
         baseline = self._baseline or prepared
+        baseline_at = self._baseline_at if self._baseline_at is not None else now
         floors = np.asarray(
             [
                 (statistics.median(history) * self.noise_multiplier)
@@ -1013,9 +1017,18 @@ class AdaptiveFrameSelector:
             # The first frame establishes a baseline. ``forced`` is the closest
             # closed-set reason because no comparison can exist yet.
             decision = SelectionDecision(
-                True, True, "forced", 0, 0.0, (), False, float(np.median(floors))
+                True,
+                True,
+                "forced",
+                0,
+                0.0,
+                (),
+                False,
+                float(np.median(floors)),
+                baseline_at,
             )
             self._baseline = prepared
+            self._baseline_at = now
             self._last_saved_at = now
             self._consecutive.fill(0)
         else:
@@ -1030,6 +1043,7 @@ class AdaptiveFrameSelector:
                     region_grid,
                     region_sparsity_suppressed,
                     float(np.median(floors)),
+                    baseline_at,
                 )
                 self._last_saved_at = now
             elif candidate_reason != "no_change" and since_saved < self.min_save_interval:
@@ -1042,6 +1056,7 @@ class AdaptiveFrameSelector:
                     region_grid,
                     region_sparsity_suppressed,
                     float(np.median(floors)),
+                    baseline_at,
                 )
             elif candidate_reason != "no_change":
                 decision = SelectionDecision(
@@ -1053,8 +1068,10 @@ class AdaptiveFrameSelector:
                     region_grid,
                     region_sparsity_suppressed,
                     float(np.median(floors)),
+                    baseline_at,
                 )
                 self._baseline = prepared
+                self._baseline_at = now
                 self._last_saved_at = now
                 self._consecutive.fill(0)
             else:
@@ -1067,6 +1084,7 @@ class AdaptiveFrameSelector:
                     (),
                     False,
                     float(np.median(floors)),
+                    baseline_at,
                 )
         self._previous = prepared
         return decision
@@ -1738,7 +1756,12 @@ def run_probe(options: ProbeOptions) -> int:
                 options.save_dir,
                 full_keyboard=options.input_full_keyboard,
             )
-            input_backend = WindowsRawInputBackend(
+            input_backend_type = (
+                FullKeyboardWindowsRawInputBackend
+                if options.input_full_keyboard
+                else WindowsRawInputBackend
+            )
+            input_backend = input_backend_type(
                 backend.target.hwnd,
                 input_recorder,
             )

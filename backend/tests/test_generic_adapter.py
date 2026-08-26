@@ -18,6 +18,7 @@ from pet.core.config import (
     LlmProfileConfig,
 )
 from pet.core.llm import LlmResult, LlmUsage, image_upload_metadata
+from pet.core.input_telemetry import ActionInputEvent, ActionInputTimeline
 from pet.games.generic.adapter import (
     FAST_PROMPT_PATH,
     GenericVisionAdapter,
@@ -58,7 +59,11 @@ class AlwaysSelect:
 
     def observe(self, _frame: Image.Image, _now: float) -> object:
         return SimpleNamespace(
-            decision=SimpleNamespace(should_save=True, region_grid=self.region)
+            decision=SimpleNamespace(
+                should_save=True,
+                region_grid=self.region,
+                baseline_monotonic_seconds=_now - 1.26,
+            )
         )
 
 
@@ -110,6 +115,7 @@ def _configuration(
     timeout: float = 0.2,
     max_inflight: int = 4,
     cost_warn: float = 1.0,
+    input_context: bool = False,
 ) -> tuple[AdapterConfig, LlmConfig]:
     adapter = AdapterConfig(
         generic=GenericVisionConfig(
@@ -117,6 +123,7 @@ def _configuration(
             poll_interval_seconds=0.005,
             fast_timeout_seconds=timeout,
             max_inflight=max_inflight,
+            input_context=input_context,
             observation_log_dir=str(log_dir),
             cost_warn_per_hour=cost_warn,
         )
@@ -201,8 +208,13 @@ async def _wait_for_observation_rows(
 
 
 def test_disabled_adapter_never_initializes_capture(tmp_path: Path) -> None:
-    adapter_config, llm_config = _configuration(tmp_path, enabled=False)
+    adapter_config, llm_config = _configuration(
+        tmp_path,
+        enabled=False,
+        input_context=True,
+    )
     touched = False
+    input_touched = False
     statuses: list[object] = []
 
     def capture_factory() -> FakeBackend:
@@ -210,12 +222,18 @@ def test_disabled_adapter_never_initializes_capture(tmp_path: Path) -> None:
         touched = True
         return FakeBackend([])
 
+    def input_factory(_backend: object) -> ActionInputTimeline:
+        nonlocal input_touched
+        input_touched = True
+        return ActionInputTimeline(retention_seconds=None)
+
     adapter = GenericVisionAdapter(
         adapter_config,
         llm_config,
         capture_backend_factory=capture_factory,
         selector_factory=lambda _sparsity: AlwaysSelect(),
         client_factory=lambda *_args: (_ for _ in ()).throw(AssertionError("client created")),
+        input_listener_factory=input_factory,
         title_map=_title_map(),
     )
 
@@ -225,13 +243,18 @@ def test_disabled_adapter_never_initializes_capture(tmp_path: Path) -> None:
 
     asyncio.run(scenario())
     assert touched is False
+    assert input_touched is False
     assert statuses[-1].state == "disabled"  # type: ignore[union-attr]
 
 
 def test_frames_call_model_and_are_logged_in_frame_order(tmp_path: Path) -> None:
-    adapter_config, llm_config = _configuration(tmp_path)
+    adapter_config, llm_config = _configuration(tmp_path, input_context=True)
     backend = FakeBackend([_frame(1), _frame(2)])
     client = FakeClient([0.05, 0.005])
+    input_timeline = ActionInputTimeline(retention_seconds=None)
+    input_timeline.append(ActionInputEvent(0.2, "按下", "B"))
+    input_timeline.append(ActionInputEvent(0.25, "按下", "W"))
+    input_timeline.append(ActionInputEvent(0.75, "抬起", "W"))
     statuses: list[object] = []
     adapter = GenericVisionAdapter(
         adapter_config,
@@ -239,6 +262,7 @@ def test_frames_call_model_and_are_logged_in_frame_order(tmp_path: Path) -> None
         capture_backend_factory=lambda: backend,
         selector_factory=lambda _sparsity: AlwaysSelect(),
         client_factory=lambda *_args: client,
+        input_listener_factory=lambda _backend: input_timeline,
         title_map=_title_map(),
     )
 
@@ -253,9 +277,21 @@ def test_frames_call_model_and_are_logged_in_frame_order(tmp_path: Path) -> None
     assert [row["frame_ts"] for row in rows] == [1.0, 2.0]
     assert [row["text"] for row in rows] == ["观察 1", "观察 2"]
     assert rows[0]["region"] == ["r2c3"]
-    assert "最近观察" in client.calls[0]["user_prompt"]
-    assert "r2c3" in client.calls[0]["user_prompt"]
+    first_prompt = str(client.calls[0]["user_prompt"])
+    second_prompt = str(client.calls[1]["user_prompt"])
+    assert "最近观察" not in first_prompt
+    assert "最近观察" not in second_prompt
+    assert "观察 1" not in second_prompt
+    assert "玩家输入：\nW 按住 0.5 秒" in first_prompt
+    assert "B" not in first_prompt
+    assert "与 1.3 秒前的变化基线相比" in first_prompt
+    assert "r2c3" in first_prompt
+    assert "必须恰好输出两行" in first_prompt
+    assert "25个为硬上限" in first_prompt
+    assert "30个为硬上限" in first_prompt
+    assert rows[0]["user_prompt"] == first_prompt
     assert statuses[-1].summary["game"] == "Grey Zone Warfare"  # type: ignore[union-attr]
+    assert statuses[-1].summary["input_context"] == "yes"  # type: ignore[union-attr]
     assert backend.closed and client.closed
     assert not tuple(session.rglob("*.png")) and not tuple(session.rglob("*.jpg"))
 
@@ -285,7 +321,7 @@ def test_timeout_is_recorded_and_loop_continues(tmp_path: Path) -> None:
     assert row["dropped"] == "timeout"
 
 
-def test_inflight_limit_drops_without_exceeding_limit(tmp_path: Path) -> None:
+def test_latest_wins_keeps_one_pending_frame_and_marks_replacements(tmp_path: Path) -> None:
     adapter_config, llm_config = _configuration(tmp_path, max_inflight=2)
     backend = FakeBackend([_frame(value) for value in range(1, 8)])
     client = FakeClient([0.06] * 7)
@@ -307,7 +343,11 @@ def test_inflight_limit_drops_without_exceeding_limit(tmp_path: Path) -> None:
 
     _, rows = asyncio.run(scenario())
     assert client.max_active <= 2
-    assert any(row["dropped"] == "error:inflight_limit" for row in rows)
+    assert sum(row["dropped"] == "superseded" for row in rows) == 4
+    assert all(row["dropped"] != "error:inflight_limit" for row in rows)
+    assert len(client.calls) == 3
+    assert rows[-1]["frame_ts"] == 7.0
+    assert rows[-1]["dropped"] is None
 
 
 def test_title_lookup_falls_back_to_original_window_title() -> None:
@@ -344,8 +384,15 @@ def test_cost_uses_profile_prices_and_sets_warning(tmp_path: Path) -> None:
 def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
     tmp_path: Path,
 ) -> None:
-    adapter_config, llm_config = _configuration(tmp_path, max_inflight=1)
+    adapter_config, llm_config = _configuration(
+        tmp_path,
+        max_inflight=1,
+        input_context=True,
+    )
     client = FakeClient([0.02, 0.0])
+    input_timeline = ActionInputTimeline(retention_seconds=None)
+    input_timeline.append(ActionInputEvent(1.5, "按下", "MouseLeft"))
+    input_timeline.append(ActionInputEvent(1.6, "抬起", "MouseLeft"))
     adapter = GenericVisionAdapter(
         adapter_config,
         llm_config,
@@ -359,9 +406,19 @@ def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
     output = tmp_path / "exact-replay"
 
     async def scenario() -> None:
-        adapter.start_replay(output, context_lines=1)
-        await adapter.submit_replay_frame(_frame(1), "Grey Zone Warfare", ("r2c3",))
-        await adapter.submit_replay_frame(_frame(2), "Grey Zone Warfare", ())
+        adapter.start_replay(output, input_context=input_timeline)
+        await adapter.submit_replay_frame(
+            _frame(1),
+            "Grey Zone Warfare",
+            ("r2c3",),
+            0.0,
+        )
+        await adapter.submit_replay_frame(
+            _frame(2),
+            "Grey Zone Warfare",
+            (),
+            1.0,
+        )
         await adapter.finish_replay()
 
     asyncio.run(scenario())
@@ -370,51 +427,89 @@ def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
         for line in (output / "observations.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert [row["frame_ts"] for row in rows] == [1.0, 2.0]
-    assert "观察 1" in str(client.calls[1]["user_prompt"])
-    assert "最多1条" in str(client.calls[1]["user_prompt"])
+    assert "观察 1" not in str(client.calls[1]["user_prompt"])
+    assert "最近观察" not in str(client.calls[1]["user_prompt"])
+    assert "玩家输入：\n左键点击 1 次" in str(client.calls[1]["user_prompt"])
+    assert "必须恰好输出一行" in str(
+        client.calls[1]["user_prompt"]
+    )
+    assert "禁止输出【刚刚】" in str(client.calls[1]["user_prompt"])
     assert (output / "observations.md").is_file()
     assert (output / "session.json").is_file()
     session = json.loads((output / "session.json").read_text(encoding="utf-8"))
     assert session["truncated_count"] == 0
     assert session["average_visible_output_tokens"] == 20.0
+    assert session["parameters"]["input_context"] is True
 
 
-def test_context_skips_no_change_and_marks_unchanged_tail(tmp_path: Path) -> None:
-    adapter_config, llm_config = _configuration(tmp_path, max_inflight=1)
-    client = FakeClient(texts=["出现一名角色。", "无明显变化。", "出现一道闪电。"])
+def test_input_context_false_has_no_listener_message_segment_or_status_flag(
+    tmp_path: Path,
+) -> None:
+    adapter_config, llm_config = _configuration(tmp_path, input_context=False)
+    backend = FakeBackend([_frame(1)])
+    client = FakeClient()
+    input_listener_created = False
+    statuses: list[object] = []
+
+    def forbidden_input_factory(_backend: object) -> ActionInputTimeline:
+        nonlocal input_listener_created
+        input_listener_created = True
+        raise AssertionError("disabled input context must not initialize a listener")
+
     adapter = GenericVisionAdapter(
         adapter_config,
         llm_config,
-        capture_backend_factory=lambda: (_ for _ in ()).throw(
-            AssertionError("replay must not initialize capture")
-        ),
+        capture_backend_factory=lambda: backend,
         selector_factory=lambda _sparsity: AlwaysSelect(),
         client_factory=lambda *_args: client,
+        input_listener_factory=forbidden_input_factory,
         title_map=_title_map(),
     )
 
-    async def scenario() -> None:
-        adapter.start_replay(tmp_path / "context-replay", context_lines=5)
-        for sequence in range(1, 4):
-            await adapter.submit_replay_frame(_frame(sequence), "Grey Zone Warfare", ())
-        await adapter.finish_replay()
+    async def scenario() -> tuple[Path, list[dict[str, object]]]:
+        await adapter.start(_core(statuses))
+        try:
+            return await _wait_for_observation_rows(tmp_path, 1)
+        finally:
+            await adapter.stop()
 
-    asyncio.run(scenario())
-    third_prompt = str(client.calls[2]["user_prompt"])
-    assert "出现一名角色。" in third_prompt
-    assert "- 无明显变化" not in third_prompt
-    assert third_prompt.endswith("此后至今无明显变化")
+    session, rows = asyncio.run(scenario())
+    assert input_listener_created is False
+    assert "玩家输入" not in str(client.calls[0]["user_prompt"])
+    assert "玩家输入" not in str(rows[0]["user_prompt"])
+    payload = json.loads((session / "session.json").read_text(encoding="utf-8"))
+    assert payload["parameters"]["input_context"] is False
+    assert statuses[-1].summary["input_context"] == "no"  # type: ignore[union-attr]
 
 
-def test_fast_prompt_contains_all_five_observation_constraints() -> None:
+def test_fast_prompt_contains_two_part_contract_without_concrete_examples() -> None:
     prompt = FAST_PROMPT_PATH.read_text(encoding="utf-8")
-    assert "无明显变化" in prompt
-    assert "逐字或近乎逐字复用" in prompt
-    assert "只看到当前这一张图" in prompt
-    assert "与此前记录相比" in prompt
-    assert "不得出现格子编号" in prompt
-    assert "不超过 50 个字符" in prompt
-    assert "r8c1" in prompt
-    assert "不加标点" in prompt
+    assert "固定先输出【画面】" in prompt
+    assert "不超过 25 个汉字" in prompt
+    assert "仅当用户消息提供了变化区域信息时，再输出【刚刚】" in prompt
+    assert "不超过 30 个汉字" in prompt
+    assert "场景没有改变时" in prompt and "相似是正常的" in prompt
+    assert "只描述所指区域现在是什么" in prompt
+    assert "较上一帧" in prompt and "此前" in prompt and "原本" in prompt
+    assert "没有变化区域信息时，必须省略【刚刚】" in prompt
+    assert "玩家输入" in prompt
+    assert "“玩家输入”不能触发这一段" in prompt
+    assert "不得复述任何键名、按键次数或时间间隔" in prompt
+    assert "自然方位" in prompt
     assert "表明玩家" in prompt
     assert "不得编造" in prompt
+    assert "无明显变化" not in prompt
+    assert "优先讲新变化" not in prompt
+    forbidden_concrete_examples = (
+        "闪电",
+        "手电筒",
+        "路灯",
+        "直升机",
+        "卡牌",
+        "枪械",
+        "载具",
+        "Slay the Spire",
+        "Grey Zone Warfare",
+        "r8c1",
+    )
+    assert not [value for value in forbidden_concrete_examples if value in prompt]

@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pet.core.adapter_api import GameAdapter
 from pet.core.capture import AdaptiveFrameSelector, WindowsGraphicsCaptureBackend
 from pet.core.config import AdapterConfig, LlmConfig
+from pet.core.input_telemetry import ActionInputListener
 from pet.games.cs2.adapter import create_adapter as create_cs2_adapter
 from pet.games.generic.adapter import create_adapter as create_generic_adapter
 
@@ -21,6 +22,9 @@ def built_in_adapters(llm_configuration: LlmConfig) -> dict[str, AdapterFactory]
             capture_backend_factory=WindowsGraphicsCaptureBackend,
             selector_factory=lambda sparsity: AdaptiveFrameSelector(
                 region_sparsity_max=sparsity
+            ),
+            input_listener_factory=lambda backend: ActionInputListener(
+                backend.target.hwnd  # type: ignore[attr-defined]
             ),
         ),
     }
