@@ -52,7 +52,7 @@ class HealthResponse(BaseModel):
 
 def _load_adapter() -> GameAdapter:
     game_id = configuration.active.game
-    factory = built_in_adapters().get(game_id)
+    factory = built_in_adapters(configuration.llm).get(game_id)
     game_configuration = configuration.games.get(game_id)
     if factory is None or game_configuration is None:
         logger.error("active game adapter %r is not installed", game_id)

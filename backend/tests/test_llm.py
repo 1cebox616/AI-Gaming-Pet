@@ -435,6 +435,50 @@ def test_complete_with_images_honors_smaller_per_attachment_limit(tmp_path) -> N
     assert uploaded_size == (6, 3)
 
 
+def test_complete_with_images_accepts_an_in_memory_capture() -> None:
+    uploaded_size: tuple[int, int] | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal uploaded_size
+        payload = json.loads(request.content)
+        data_url = payload["messages"][1]["content"][2]["image_url"]["url"]
+        assert data_url.startswith("data:image/jpeg;base64,")
+        with Image.open(BytesIO(base64.b64decode(data_url.partition(",")[2]))) as uploaded:
+            uploaded_size = uploaded.size
+        return httpx.Response(
+            200,
+            json={
+                "model": "vendor/vision-actual",
+                "choices": [{"message": {"content": "ok"}}],
+            },
+        )
+
+    frame = Image.new("RGB", (1600, 900), (10, 20, 30))
+    client = OpenRouterClient("test-api-key", transport=httpx.MockTransport(handler))
+    try:
+        client.complete_with_images(
+            model="vendor/vision-under-test",
+            system_prompt="system",
+            user_prompt="observe",
+            images=(
+                LlmImage(
+                    frame,
+                    "当前画面",
+                    target_width=896,
+                    encoding="jpeg",
+                ),
+            ),
+            max_image_edge=None,
+            max_tokens=64,
+            temperature=0.0,
+        )
+    finally:
+        client.close()
+        frame.close()
+
+    assert uploaded_size == (896, 504)
+
+
 def test_streamed_vision_completion_measures_first_visible_token_and_usage(
     tmp_path,
 ) -> None:

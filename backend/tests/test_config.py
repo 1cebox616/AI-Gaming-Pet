@@ -460,6 +460,34 @@ def test_llm_section_loads_runtime_tuning_without_accepting_credentials(tmp_path
     assert configuration.llm.max_tokens == 128
 
 
+def test_generic_visual_settings_and_profile_prices_load(tmp_path: Path) -> None:
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[active]\ngame = \"generic\"\n\n"
+        "[games.generic]\nenabled = true\npoll_interval_seconds = 1.5\n"
+        "send_width = 896\nfast_timeout_seconds = 5.0\nmax_inflight = 4\n"
+        "observation_log_dir = \"recordings/observation\"\n"
+        "region_sparsity_max = 0.25\nllm_profile = \"vision_fast\"\n"
+        "cost_warn_per_hour = 1.0\n\n"
+        "[llm.profiles.vision_fast]\nenabled = true\nmodel = \"vendor/vision\"\n"
+        "provider = \"locked-provider\"\nmax_tokens = 80\n"
+        "input_price_per_million_usd = 0.03\n"
+        "output_price_per_million_usd = 0.13\n",
+        encoding="utf-8",
+    )
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    generic = configuration.games["generic"].generic
+    assert generic.enabled is True
+    assert generic.poll_interval_seconds == 1.5
+    assert generic.region_sparsity_max == 0.25
+    profile = configuration.llm.profiles["vision_fast"]
+    assert profile.model == "vendor/vision"
+    assert profile.input_price_per_million_usd == 0.03
+    assert profile.output_price_per_million_usd == 0.13
+
+
 def test_nested_active_game_configuration_and_llm_profile_load(tmp_path: Path) -> None:
     default_path = tmp_path / "config.toml"
     default_path.write_text(

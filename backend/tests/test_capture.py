@@ -71,6 +71,15 @@ def _selector(**overrides: object) -> AdaptiveFrameSelector:
     return AdaptiveFrameSelector(**defaults)  # type: ignore[arg-type]
 
 
+def test_m5_t6_selected_defaults_are_production_defaults() -> None:
+    selector = AdaptiveFrameSelector()
+
+    assert selector.noise_window == 10
+    assert selector.noise_multiplier == 1.2
+    assert selector.noise_margin == pytest.approx(4.0 / 255.0)
+    assert selector.persistence_polls == 1
+
+
 def test_identical_images_are_not_changed() -> None:
     detector = FrameChangeDetector()
     frame = _image(96)
@@ -473,7 +482,9 @@ def test_session_json_records_new_arguments(tmp_path: Path) -> None:
 
     payload = json.loads((tmp_path / "session.json").read_text(encoding="utf-8"))
     assert payload["标签"] == "adaptive"
-    assert payload["启动参数"]["noise_window"] == 20
+    assert payload["启动参数"]["noise_window"] == 10
+    assert payload["启动参数"]["noise_multiplier"] == 1.2
+    assert payload["启动参数"]["noise_margin"] == pytest.approx(4.0 / 255.0)
     assert payload["启动参数"]["persistence_polls"] == 1
     assert payload["启动参数"]["region_sparsity_max"] == 0.25
     assert payload["启动参数"]["record_all"] is False

@@ -48,12 +48,18 @@ class LlmResult:
 
 @dataclass(frozen=True, slots=True)
 class LlmImage:
-    """One local image attachment and its human-readable position label."""
+    """One image attachment and its human-readable position label.
 
-    path: Path
+    Captured production frames may stay entirely in memory; evaluation tools
+    retain the existing file-backed path.
+    """
+
+    path: Path | Image.Image
     label: str
     max_edge: int | None = None
     target_width: int | None = None
+    encoding: Literal["png", "jpeg"] = "png"
+    jpeg_quality: int = 85
 
 
 @dataclass(frozen=True, slots=True)
@@ -1020,9 +1026,8 @@ def _image_messages(
                 "type": "image_url",
                 "image_url": {
                     "url": _image_data_url(
-                        attachment.path,
+                        attachment,
                         max_image_edge=effective_max_edge,
-                        target_width=attachment.target_width,
                     )
                 },
             }
@@ -1034,19 +1039,20 @@ def _image_messages(
 
 
 def _image_data_url(
-    path: Path,
+    image: LlmImage,
     *,
     max_image_edge: int | None,
-    target_width: int | None,
 ) -> str:
     """Load, optionally resize, and re-encode one image without its metadata."""
     payload, _ = _prepare_image_upload(
-        path,
+        image.path,
         max_image_edge=max_image_edge,
-        target_width=target_width,
+        target_width=image.target_width,
+        encoding=image.encoding,
+        jpeg_quality=image.jpeg_quality,
     )
     encoded = base64.b64encode(payload).decode("ascii")
-    return f"data:image/png;base64,{encoded}"
+    return f"data:image/{image.encoding};base64,{encoded}"
 
 
 def probe_llm_profile(
@@ -1400,22 +1406,31 @@ def image_upload_metadata(
         image.path,
         max_image_edge=_smallest_limit(max_image_edge, image.max_edge),
         target_width=image.target_width,
+        encoding=image.encoding,
+        jpeg_quality=image.jpeg_quality,
     )
     return LlmImageUploadMetadata(size[0], size[1], len(payload))
 
 
 def _prepare_image_upload(
-    path: Path,
+    path: Path | Image.Image,
     *,
     max_image_edge: int | None,
     target_width: int | None,
+    encoding: Literal["png", "jpeg"] = "png",
+    jpeg_quality: int = 85,
 ) -> tuple[bytes, tuple[int, int]]:
-    try:
-        with Image.open(path) as source:
-            source.load()
-            image = source.convert("RGBA" if source.has_transparency_data else "RGB")
-    except (OSError, ValueError) as error:
-        raise LlmError(f"无法读取待上传图像 {path}：{error}") from error
+    if encoding == "jpeg" and not 1 <= jpeg_quality <= 95:
+        raise ValueError("JPEG quality must be between 1 and 95")
+    if isinstance(path, Image.Image):
+        image = path.convert("RGBA" if path.has_transparency_data else "RGB")
+    else:
+        try:
+            with Image.open(path) as source:
+                source.load()
+                image = source.convert("RGBA" if source.has_transparency_data else "RGB")
+        except (OSError, ValueError) as error:
+            raise LlmError(f"无法读取待上传图像 {path}：{error}") from error
 
     if target_width is not None and image.width != target_width:
         target_height = max(1, round(image.height * target_width / image.width))
@@ -1429,7 +1444,11 @@ def _prepare_image_upload(
             resample=Image.Resampling.LANCZOS,
         )
     output = BytesIO()
-    image.save(output, format="PNG", optimize=True)
+    if encoding == "jpeg":
+        image = image.convert("RGB")
+        image.save(output, format="JPEG", quality=jpeg_quality, optimize=True)
+    else:
+        image.save(output, format="PNG", optimize=True)
     return output.getvalue(), image.size
 
 

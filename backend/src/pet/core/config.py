@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 DEFAULT_LLM_API_KEY_ENV = "OPENROUTER_API_KEY"
 ENVIRONMENT_VARIABLE_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
+DEFAULT_REGION_SPARSITY_MAX = 0.25
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,8 @@ class LlmProfileConfig(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     timeout_seconds: float | None = Field(default=None, gt=0, le=30)
     max_tokens: int | None = Field(default=None, ge=1, le=2048)
+    input_price_per_million_usd: float | None = Field(default=None, ge=0)
+    output_price_per_million_usd: float | None = Field(default=None, ge=0)
 
 
 class LlmConfig(BaseModel):
@@ -145,8 +148,31 @@ def resolve_llm_profile(
     return configuration.model_copy(update=profile.model_dump(exclude_none=True))
 
 
+class GenericVisionConfig(BaseModel):
+    """Disabled-by-default settings for the generic visual adapter."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    enabled: bool = False
+    poll_interval_seconds: float = Field(default=1.0, gt=0, le=60)
+    send_width: int = Field(default=896, ge=64, le=8192)
+    fast_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    max_inflight: int = Field(default=4, ge=1, le=32)
+    observation_log_dir: str = "recordings/observation"
+    region_sparsity_max: float = Field(
+        default=DEFAULT_REGION_SPARSITY_MAX,
+        ge=0,
+        le=1,
+    )
+    llm_profile: str = "vision_fast"
+    cost_warn_per_hour: float = Field(default=1.0, gt=0)
+
+
+GENERIC_VISION_FIELDS = frozenset(GenericVisionConfig.model_fields)
+
+
 class AdapterConfig(BaseModel):
-    """Configuration shape currently consumed by a built-in game adapter."""
+    """Configuration shape consumed by the built-in adapters."""
 
     model_config = ConfigDict(strict=True, extra="forbid")
 
@@ -154,6 +180,7 @@ class AdapterConfig(BaseModel):
     events: EventsConfig = Field(default_factory=EventsConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     personality: PersonalityConfig = Field(default_factory=PersonalityConfig)
+    generic: GenericVisionConfig = Field(default_factory=GenericVisionConfig)
 
 
 class PetConfig(BaseModel):
@@ -197,6 +224,7 @@ ConfigSection = TypeVar(
     EventsConfig,
     PolicyConfig,
     PersonalityConfig,
+    GenericVisionConfig,
     LlmProfileConfig,
     LlmConfig,
 )
@@ -304,6 +332,15 @@ def _load_games(
                     PersonalityConfig,
                     game_data.get("personality", {}),
                 ),
+                generic=_validate_section(
+                    f"games.{game_id}",
+                    GenericVisionConfig,
+                    {
+                        field_name: game_data[field_name]
+                        for field_name in GENERIC_VISION_FIELDS
+                        if field_name in game_data
+                    },
+                ),
             )
         return games
 
@@ -321,6 +358,7 @@ def _load_games(
                 PersonalityConfig,
                 configuration_data.get("personality", {}),
             ),
+            generic=GenericVisionConfig(),
         )
     }
 

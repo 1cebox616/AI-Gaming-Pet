@@ -1,0 +1,41 @@
+# Deterministic game identity from capture metadata. Matching is case-insensitive.
+
+[[games]]
+name = "Grey Zone Warfare"
+title_contains = ["Grey Zone Warfare", "GZW"]
+process_names = []
+
+[[games]]
+name = "Disco Elysium"
+title_contains = ["Disco Elysium"]
+process_names = []
+
+[[games]]
+name = "Subnautica 2"
+title_contains = ["Subnautica 2"]
+process_names = []
+
+[[games]]
+name = "Slay the Spire 2"
+title_contains = ["Slay the Spire 2"]
+process_names = []
+
+[[games]]
+name = "Project Zomboid"
+title_contains = ["Project Zomboid"]
+process_names = []
+
+[[games]]
+name = "燕云十六声"
+title_contains = ["燕云十六声"]
+process_names = []
+
+[[games]]
+name = "Counter-Strike 2"
+title_contains = ["Counter-Strike 2"]
+process_names = ["cs2.exe"]
+
+[[games]]
+name = "War Thunder"
+title_contains = ["War Thunder"]
+process_names = ["aces.exe"]

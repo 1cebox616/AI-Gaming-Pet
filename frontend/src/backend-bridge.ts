@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { isPetExpression, setPetDimmed, setPetExpression } from "./pet";
 import { showSpeech } from "./bubble";
+import { setWatchStatus } from "./watch-status";
 import {
   formatLlmCost,
   formatLlmMode,
@@ -46,13 +47,15 @@ let lastUtteranceId: string | undefined;
 function setPetDisconnected(): void {
   setPetExpression("speechless");
   setPetDimmed(true);
-  updatePetMenuState(false, false, false, "CS2：未知（后端未连接）", "—", "—");
+  setWatchStatus(null);
+  updatePetMenuState(false, false, false, "", "后端：未连接", "—", "—");
 }
 
 function updatePetMenuState(
   connected: boolean,
   speechEnabled: boolean,
   muted: boolean,
+  gameId: string,
   gameStatus: string,
   llmMode: string,
   llmCost: string,
@@ -61,6 +64,7 @@ function updatePetMenuState(
     connected,
     speechEnabled,
     muted,
+    gameId,
     gameStatus,
     llmMode,
     llmCost,
@@ -131,6 +135,19 @@ function isGameSummary(
 }
 
 function formatGameStatus(game: GameStatus): string {
+  if (game.game_id === "generic") {
+    const watchedGame = summaryString(game, "game");
+    const cost = summaryString(game, "session_cost_usd") ?? "0.000000";
+    if (game.state === "disabled") {
+      return "通用视觉：已关闭";
+    }
+    if (game.state === "no_window") {
+      return `通用视觉：未找到窗口 · 本会话 $${cost}`;
+    }
+    const degraded =
+      summaryString(game, "degraded") === "yes" ? " · 调用降级" : "";
+    return `正在观看：${watchedGame ?? "未知窗口"} · 本会话 $${cost}${degraded}`;
+  }
   const displayName = game.game_id === "cs2" ? "CS2" : game.game_id;
   if (game.state === "offline") {
     return `${displayName}：未运行`;
@@ -226,10 +243,16 @@ function handleMessage(event: MessageEvent<unknown>): void {
   }
 
   if (isStateMessage(message)) {
+    setWatchStatus(
+      message.game.game_id === "generic" && message.game.state === "watching"
+        ? summaryString(message.game, "game")
+        : null,
+    );
     updatePetMenuState(
       true,
       message.speech_enabled,
       message.muted,
+      message.game.game_id,
       formatGameStatus(message.game),
       formatLlmMode(message.llm),
       formatLlmCost(message.llm),

@@ -20,7 +20,7 @@ from typing import Literal, cast
 
 import httpx
 
-from pet.core.config import LlmConfig, load_config
+from pet.core.config import DEFAULT_REGION_SPARSITY_MAX, LlmConfig, load_config
 from pet.core.llm import (
     LlmError,
     LlmImage,
@@ -75,7 +75,6 @@ OUTPUT_MAX_TOKENS: Mapping[OutputMode, int] = {
     "deep": DEEP_MAX_TOKENS,
     "fast-relaxed": FAST_RELAXED_MAX_TOKENS,
 }
-DEFAULT_REGION_SPARSITY_MAX = 0.25  # 此数待实测确定。
 DEFAULT_COST_CAP_USD = 5.0
 DEFAULT_ESTIMATED_INPUT_TOKENS = 4_000
 FAST_RELAXED_TRIGGER_FRACTION = 0.30

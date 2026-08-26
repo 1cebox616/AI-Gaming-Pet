@@ -28,6 +28,7 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
+from pet.core.config import DEFAULT_REGION_SPARSITY_MAX
 from pet.core.input_telemetry import (
     ClockAnchor,
     INPUT_WHITELIST_VERSION,
@@ -55,14 +56,17 @@ DEFAULT_MAX_SILENCE_SECONDS = 60.0
 DEFAULT_MAX_FILES = 500
 DEFAULT_MAX_BYTES = 200 * 1024 * 1024
 # 设计原则：本地帧选取的首要目标是不漏掉应上传的帧，次要目标才是丢弃冗余帧。
-DEFAULT_NOISE_WINDOW = 20
-DEFAULT_NOISE_MULTIPLIER = 2.5
+# M5-T6 second-round constrained selection fixed these production defaults.
+# Versus N=20/k=2.5/margin=4/255, N=10/k=1.2/margin=4/255 changed
+# subtitle strong misses 3→0 and world-event hits 14→19 while retaining a
+# 2.0% upload rate on the rain-idle negative anchor.
+DEFAULT_NOISE_WINDOW = 10
+DEFAULT_NOISE_MULTIPLIER = 1.2
 DEFAULT_NOISE_MARGIN = 4.0 / 255.0
 # M5-T4 的 1403 帧实测中，P=2 相比 P=1 将局部剧变漏检从
 # 11.6 提高到 115.9、输入活动漏检从 49.0 提高到 153.3，因此默认取 1。
 DEFAULT_PERSISTENCE_POLLS = 1
-# 与视觉评测工具中的稀疏抑制同源；此数待与 M5-A 的扫描结果统一。
-DEFAULT_REGION_SPARSITY_MAX = 0.25
+# Imported from core.config so capture and the generic adapter use one value.
 # M5-T4 calibration proxies. These initial values are awaiting calibration too;
 # they measure misses and do not alter the production selector's decision.
 DEFAULT_STRONG_BLOCK_DELTA = 40.0 / 255.0

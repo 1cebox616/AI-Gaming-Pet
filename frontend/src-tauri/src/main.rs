@@ -174,13 +174,15 @@ struct BackendMenuState {
     connected: bool,
     speech_enabled: bool,
     muted: bool,
+    game_id: String,
     llm_mode: String,
     llm_cost: String,
 }
 
 struct PetMenu {
     menu: Menu<Wry>,
-    current_game_item: CheckMenuItem<Wry>,
+    current_game_cs2_item: CheckMenuItem<Wry>,
+    current_game_generic_item: CheckMenuItem<Wry>,
     game_status_item: MenuItem<Wry>,
     llm_mode_item: MenuItem<Wry>,
     llm_cost_item: MenuItem<Wry>,
@@ -195,6 +197,7 @@ impl PetMenu {
         connected: bool,
         speech_enabled: bool,
         muted: bool,
+        game_id: &str,
         game_status: &str,
         llm_mode: &str,
         llm_cost: &str,
@@ -203,6 +206,7 @@ impl PetMenu {
             connected,
             speech_enabled,
             muted,
+            game_id: game_id.to_owned(),
             llm_mode: llm_mode.to_owned(),
             llm_cost: llm_cost.to_owned(),
         };
@@ -221,6 +225,12 @@ impl PetMenu {
             .map_err(|error| error.to_string())?;
         self.llm_mode_item
             .set_enabled(false)
+            .map_err(|error| error.to_string())?;
+        self.current_game_cs2_item
+            .set_checked(connected && game_id == "cs2")
+            .map_err(|error| error.to_string())?;
+        self.current_game_generic_item
+            .set_checked(connected && game_id == "generic")
             .map_err(|error| error.to_string())?;
         self.llm_cost_item
             .set_text(&state.llm_cost)
@@ -341,7 +351,8 @@ fn unregister_shortcuts_and_exit(app: &AppHandle) {
 fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
     let menu = Menu::new(app)?;
     let mut game_status_item = None;
-    let mut current_game_item = None;
+    let mut current_game_cs2_item = None;
+    let mut current_game_generic_item = None;
     let mut llm_mode_item = None;
     let mut llm_cost_item = None;
     let mut speech_item = None;
@@ -370,6 +381,14 @@ fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
                     true,
                     None::<&str>,
                 )?;
+                let generic = CheckMenuItem::with_id(
+                    app,
+                    "current-game-generic",
+                    "通用视觉",
+                    true,
+                    false,
+                    None::<&str>,
+                )?;
                 let unavailable = MenuItem::with_id(
                     app,
                     "current-game-warthunder",
@@ -378,9 +397,11 @@ fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
                     None::<&str>,
                 )?;
                 current_game.append(&selected)?;
+                current_game.append(&generic)?;
                 current_game.append(&unavailable)?;
                 menu.append(&current_game)?;
-                current_game_item = Some(selected);
+                current_game_cs2_item = Some(selected);
+                current_game_generic_item = Some(generic);
             }
             PetMenuEntry::LlmMode => {
                 let item = MenuItem::with_id(
@@ -433,8 +454,10 @@ fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
 
     Ok(PetMenu {
         menu,
-        current_game_item: current_game_item
-            .expect("current game must be present in the pet menu layout"),
+        current_game_cs2_item: current_game_cs2_item
+            .expect("CS2 must be present in the current-game menu"),
+        current_game_generic_item: current_game_generic_item
+            .expect("generic vision must be present in the current-game menu"),
         game_status_item: game_status_item
             .expect("game status must be present in the pet menu layout"),
         llm_mode_item: llm_mode_item.expect("LLM mode must be present in the pet menu layout"),
@@ -451,6 +474,7 @@ fn update_pet_menu_state(
     connected: bool,
     speech_enabled: bool,
     muted: bool,
+    game_id: String,
     game_status: String,
     llm_mode: String,
     llm_cost: String,
@@ -460,6 +484,7 @@ fn update_pet_menu_state(
         connected,
         speech_enabled,
         muted,
+        &game_id,
         &game_status,
         &llm_mode,
         &llm_cost,
@@ -682,10 +707,29 @@ fn configure_tray(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
 fn main() {
     let application = tauri::Builder::default()
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == "current-game-cs2" {
+            if matches!(
+                event.id().as_ref(),
+                "current-game-cs2" | "current-game-generic"
+            ) {
                 let menu = app.state::<PetMenu>();
-                if let Err(error) = menu.current_game_item.set_checked(true) {
-                    eprintln!("failed to restore the selected game menu item: {error}");
+                match menu.backend_state() {
+                    Ok(state) => {
+                        if let Err(error) = menu
+                            .current_game_cs2_item
+                            .set_checked(state.connected && state.game_id == "cs2")
+                        {
+                            eprintln!("failed to restore the CS2 game item: {error}");
+                        }
+                        if let Err(error) = menu
+                            .current_game_generic_item
+                            .set_checked(state.connected && state.game_id == "generic")
+                        {
+                            eprintln!("failed to restore the generic game item: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("failed to restore current-game menu state: {error}");
+                    }
                 }
                 return;
             }
