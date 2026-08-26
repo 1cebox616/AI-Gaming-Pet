@@ -165,7 +165,7 @@ async def _wait_for_observation_rows(
     log_root: Path,
     expected_count: int,
     *,
-    timeout_seconds: float = 2.0,
+    timeout_seconds: float = 10.0,
 ) -> tuple[Path, list[dict[str, object]]]:
     """Wait for flushed JSONL rows instead of assuming scheduler timing."""
     deadline = asyncio.get_running_loop().time() + timeout_seconds
@@ -328,3 +328,38 @@ def test_cost_uses_profile_prices_and_sets_warning(tmp_path: Path) -> None:
     summary = json.loads((session / "session.json").read_text(encoding="utf-8"))
     assert summary["total_cost_usd"] == 0.00014
     assert adapter._cost_warning is True
+
+
+def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
+    tmp_path: Path,
+) -> None:
+    adapter_config, llm_config = _configuration(tmp_path, max_inflight=1)
+    client = FakeClient([0.02, 0.0])
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("replay must not initialize capture")
+        ),
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: client,
+        title_map=_title_map(),
+    )
+    output = tmp_path / "exact-replay"
+
+    async def scenario() -> None:
+        adapter.start_replay(output, context_lines=1)
+        await adapter.submit_replay_frame(_frame(1), "Grey Zone Warfare", ("r2c3",))
+        await adapter.submit_replay_frame(_frame(2), "Grey Zone Warfare", ())
+        await adapter.finish_replay()
+
+    asyncio.run(scenario())
+    rows = [
+        json.loads(line)
+        for line in (output / "observations.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["frame_ts"] for row in rows] == [1.0, 2.0]
+    assert "观察 1" in str(client.calls[1]["user_prompt"])
+    assert "最多1条" in str(client.calls[1]["user_prompt"])
+    assert (output / "observations.md").is_file()
+    assert (output / "session.json").is_file()

@@ -142,14 +142,24 @@ class ObservationRecord:
 class ObservationLog:
     """Frame-ordered machine and human logs; screenshots never enter this class."""
 
-    def __init__(self, root: Path, parameters: dict[str, object]) -> None:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        self.directory = root / stamp
-        suffix = 1
-        while self.directory.exists():
-            self.directory = root / f"{stamp}-{suffix}"
-            suffix += 1
-        self.directory.mkdir(parents=True)
+    def __init__(
+        self,
+        root: Path,
+        parameters: dict[str, object],
+        *,
+        exact_directory: bool = False,
+    ) -> None:
+        if exact_directory:
+            self.directory = root
+            self.directory.mkdir(parents=True, exist_ok=False)
+        else:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            self.directory = root / stamp
+            suffix = 1
+            while self.directory.exists():
+                self.directory = root / f"{stamp}-{suffix}"
+                suffix += 1
+            self.directory.mkdir(parents=True)
         self._jsonl = (self.directory / "observations.jsonl").open("w", encoding="utf-8", newline="\n")
         self._markdown = (self.directory / "observations.md").open("w", encoding="utf-8", newline="\n")
         self._markdown.write("# 通用视觉观察日志\n\n")
@@ -259,6 +269,7 @@ class GenericVisionAdapter:
         self._degraded = False
         self._cost_warning = False
         self._current_game = ""
+        self._context_lines = 5
 
     async def start(self, core: CoreServices) -> None:
         if self._task is not None:
@@ -268,6 +279,23 @@ class GenericVisionAdapter:
             await self._publish_status("disabled", "")
             return
 
+        self._initialize_observer(log_root=None, exact_directory=False)
+        self._task = asyncio.create_task(self._run(), name="generic-vision-observer")
+
+    def _initialize_observer(
+        self,
+        *,
+        log_root: Path | None,
+        exact_directory: bool,
+        context_lines: int = 5,
+        extra_parameters: dict[str, object] | None = None,
+    ) -> None:
+        """Initialize the model and shared frame-to-log path.
+
+        Production and offline replay intentionally enter through this same
+        initialization and scheduling implementation. Replay only substitutes
+        the read-only source of frames and an exact output directory.
+        """
         profile_id = self._settings.llm_profile
         profile = self._llm_configuration.profiles.get(profile_id)
         if profile is None:
@@ -286,26 +314,79 @@ class GenericVisionAdapter:
             effective.api_key_env,
             self._settings.fast_timeout_seconds,
         )
-        log_root = Path(self._settings.observation_log_dir)
-        if not log_root.is_absolute():
-            log_root = BACKEND_DIRECTORY / log_root
+        if log_root is None:
+            log_root = Path(self._settings.observation_log_dir)
+            if not log_root.is_absolute():
+                log_root = BACKEND_DIRECTORY / log_root
+        self._context_lines = context_lines
+        parameters: dict[str, object] = {
+            "poll_interval_seconds": self._settings.poll_interval_seconds,
+            "send_width": self._settings.send_width,
+            "fast_timeout_seconds": self._settings.fast_timeout_seconds,
+            "max_inflight": self._settings.max_inflight,
+            "region_sparsity_max": self._settings.region_sparsity_max,
+            "llm_profile": profile_id,
+            "model": effective.model,
+            "provider": effective.provider or None,
+            "max_tokens": effective.max_tokens,
+            "input_price_per_million_usd": self._input_price,
+            "output_price_per_million_usd": self._output_price,
+            "context_lines": context_lines,
+        }
+        if extra_parameters:
+            parameters.update(extra_parameters)
         self._log = ObservationLog(
             log_root,
-            {
-                "poll_interval_seconds": self._settings.poll_interval_seconds,
-                "send_width": self._settings.send_width,
-                "fast_timeout_seconds": self._settings.fast_timeout_seconds,
-                "max_inflight": self._settings.max_inflight,
-                "region_sparsity_max": self._settings.region_sparsity_max,
-                "llm_profile": profile_id,
-                "model": effective.model,
-                "provider": effective.provider or None,
-                "max_tokens": effective.max_tokens,
-                "input_price_per_million_usd": self._input_price,
-                "output_price_per_million_usd": self._output_price,
-            },
+            parameters,
+            exact_directory=exact_directory,
         )
-        self._task = asyncio.create_task(self._run(), name="generic-vision-observer")
+
+    def start_replay(
+        self,
+        output_directory: Path,
+        *,
+        context_lines: int,
+        extra_parameters: dict[str, object] | None = None,
+    ) -> None:
+        """Start the production observation path without a live capture loop."""
+        if self._task is not None or self._log is not None:
+            raise RuntimeError("通用视觉观察器已经启动")
+        if context_lines < 0:
+            raise ValueError("context_lines must not be negative")
+        self._initialize_observer(
+            log_root=output_directory,
+            exact_directory=True,
+            context_lines=context_lines,
+            extra_parameters=extra_parameters,
+        )
+
+    async def submit_replay_frame(
+        self,
+        frame: CapturedFrameLike,
+        game: str,
+        region: tuple[str, ...],
+    ) -> None:
+        """Submit one retained frame with bounded backpressure for offline replay."""
+        if self._log is None:
+            raise RuntimeError("离线观察器尚未启动")
+        await self._schedule(frame, game, region, wait_for_capacity=True)
+
+    async def finish_replay(self) -> None:
+        """Drain all paid calls and close the production-format observation log."""
+        while self._inflight:
+            await asyncio.gather(*tuple(self._inflight), return_exceptions=True)
+        close_client = getattr(self._client, "close", None)
+        if callable(close_client):
+            close_client()
+        self._client = None
+        if self._log is not None:
+            self._log.close()
+            self._log = None
+
+    @property
+    def total_cost_usd(self) -> float:
+        """Return the flushed configured-price total for status and cost guards."""
+        return self._log.total_cost_usd if self._log is not None else 0.0
 
     async def stop(self) -> None:
         if self._task is not None:
@@ -370,9 +451,13 @@ class GenericVisionAdapter:
         frame: CapturedFrameLike,
         game: str,
         region: tuple[str, ...],
+        *,
+        wait_for_capacity: bool = False,
     ) -> None:
         sequence = self._next_sequence
         self._next_sequence += 1
+        while wait_for_capacity and len(self._inflight) >= self._settings.max_inflight:
+            await asyncio.wait(tuple(self._inflight), return_when=asyncio.FIRST_COMPLETED)
         if len(self._inflight) >= self._settings.max_inflight:
             frame.bitmap.close()
             self._complete_record(
@@ -390,7 +475,7 @@ class GenericVisionAdapter:
                 )
             )
             return
-        timeline = tuple(self._recent[-5:])
+        timeline = tuple(self._recent[-self._context_lines :]) if self._context_lines else ()
         task = asyncio.create_task(
             self._observe_frame(sequence, frame, game, region, timeline),
             name=f"generic-vision-call-{sequence}",
@@ -412,7 +497,7 @@ class GenericVisionAdapter:
         cost = 0.0
         try:
             assert self._client is not None
-            prompt = _user_prompt(game, timeline, region)
+            prompt = _user_prompt(game, timeline, region, context_lines=self._context_lines)
             result = await asyncio.wait_for(
                 asyncio.to_thread(
                     self._client.complete_with_images_stream,
@@ -537,11 +622,14 @@ def _user_prompt(
     game: str,
     timeline: Sequence[tuple[float, str]],
     region: Sequence[str],
+    *,
+    context_lines: int = 5,
 ) -> str:
+    context_label = "五" if context_lines == 5 else str(context_lines)
     lines = [
         "请观察当前这一张完整游戏画面，并遵守系统提示。",
         f"已知游戏：{game}",
-        "最近观察（按画面时间，最多五条）：",
+        f"最近观察（按画面时间，最多{context_label}条）：",
     ]
     if timeline:
         lines.extend(f"- {timestamp:.3f}：{text}" for timestamp, text in timeline)
