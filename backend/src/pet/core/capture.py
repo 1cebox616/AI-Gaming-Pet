@@ -14,6 +14,7 @@ import ctypes
 import importlib
 import io
 import json
+import math
 import statistics
 import sys
 import time
@@ -21,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from types import ModuleType
-from typing import Literal, Protocol, Self
+from typing import Literal, Protocol, Self, Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -1233,6 +1234,8 @@ class ProbeOptions:
     raw_max_files: int = DEFAULT_RAW_MAX_FILES
     raw_max_bytes: int = DEFAULT_RAW_MAX_BYTES
     replay_dir: Path | None = None
+    segments_path: Path | None = None
+    segment_role: str | None = None
 
 
 def _positive_float(value: str) -> float:
@@ -1282,9 +1285,9 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--replay", type=Path, metavar="RAW目录", help="离线重放 raw JPEG 流")
     mode.add_argument(
         "--calibrate",
-        nargs="+",
+        nargs="*",
         metavar="角色=会话目录",
-        help="在一个或多个含 raw/ 的录制会话上离线搜索检测参数",
+        help="在会话参数和/或 --segments 区间上离线搜索检测参数",
     )
     parser.add_argument(
         "--interval",
@@ -1380,6 +1383,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="全量流最大总字节数（默认 1073741824）",
     )
     parser.add_argument("--grid", type=Path, help="校准搜索空间 TOML（默认使用内置 108 组）")
+    parser.add_argument(
+        "--segments",
+        type=Path,
+        help="只读区间 TOML；校准可含多段，重放须只匹配一段",
+    )
+    parser.add_argument(
+        "--segment-role",
+        help="--replay 使用多区间 TOML 时选择一个角色",
+    )
     parser.add_argument(
         "--sample-stride",
         type=_positive_int,
@@ -1922,6 +1934,29 @@ def _load_replay_frame_times(
     )
 
 
+def _replay_session_monotonic_origin(
+    raw_dir: Path, frame_times: Sequence[ReplayFrameTime]
+) -> float:
+    """Return the recorded session anchor used by relative segment manifests."""
+    session_path = raw_dir.parent / "session.json"
+    if (
+        frame_times
+        and all(item.recorded_monotonic for item in frame_times)
+        and session_path.is_file()
+    ):
+        try:
+            payload = json.loads(session_path.read_text(encoding="utf-8"))
+            anchor = payload.get("时钟锚点")
+            value = anchor.get("perf_counter秒") if isinstance(anchor, dict) else None
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                return float(value)
+        except (OSError, json.JSONDecodeError):
+            pass
+    if not frame_times:
+        raise CaptureError(f"无法确定空重放流的时间原点：{raw_dir}")
+    return frame_times[0].monotonic_seconds
+
+
 _LEGACY_GLOBAL_CHANGE_REASON = "camera" "_motion"
 
 
@@ -1966,6 +2001,41 @@ def run_replay(options: ProbeOptions) -> tuple[SelectionDecision, ...]:
     options.save_dir.mkdir(parents=True, exist_ok=True)
     _read_existing_metrics_reason_counts(options.replay_dir)
     frame_times = _load_replay_frame_times(options.replay_dir, paths)
+    replay_scope: tuple[bool, ...] | None = None
+    if options.segments_path is not None:
+        from pet.core.capture_calibration import load_segments
+
+        matching = [
+            segment
+            for segment in load_segments(options.segments_path)
+            if (segment.session_dir / "raw").resolve()
+            == options.replay_dir.resolve()
+            and (
+                options.segment_role is None
+                or segment.role == options.segment_role
+            )
+        ]
+        if len(matching) != 1:
+            raise CaptureError(
+                "--replay 配合 --segments 时必须恰好匹配一个区间；"
+                f"当前匹配 {len(matching)} 个，请用 --segment-role 选择角色"
+            )
+        segment = matching[0]
+        origin = _replay_session_monotonic_origin(options.replay_dir, frame_times)
+        context = [
+            (path, frame_time)
+            for path, frame_time in zip(paths, frame_times, strict=True)
+            if segment.end_seconds is None
+            or frame_time.monotonic_seconds - origin < segment.end_seconds
+        ]
+        replay_scope = tuple(
+            segment.contains(frame_time.monotonic_seconds - origin)
+            for _, frame_time in context
+        )
+        if not any(replay_scope):
+            raise CaptureError(f"重放区间 {segment.role!r} 内没有 raw 帧")
+        paths = [item[0] for item in context]
+        frame_times = tuple(item[1] for item in context)
     selector = _make_selector(options)
     probe_statistics = ProbeStatistics()
     decisions: list[SelectionDecision] = []
@@ -1982,6 +2052,9 @@ def run_replay(options: ProbeOptions) -> tuple[SelectionDecision, ...]:
     )
     print("=" * 72)
     print(f"【离线重放】读取：{options.replay_dir}")
+    if options.segments_path is not None:
+        print(f"只读区间清单：{options.segments_path}")
+        print(f"区间角色：{segment.role}")
     print(f"输出：{options.save_dir}（只写 metrics.csv 与 session.json，不写图片）")
     print("=" * 72)
     with MetricsCsvWriter(options.save_dir) as csv_writer:
@@ -1992,6 +2065,8 @@ def run_replay(options: ProbeOptions) -> tuple[SelectionDecision, ...]:
             with Image.open(path) as source:
                 bitmap = source.convert("RGB")
             observation = selector.observe(bitmap, frame_time.monotonic_seconds)
+            if replay_scope is not None and not replay_scope[sequence - 1]:
+                continue
             decision = observation.decision
             decisions.append(decision)
             probe_statistics.poll_count += 1
@@ -2029,6 +2104,10 @@ def main() -> None:
     arguments = parser.parse_args()
     if arguments.input_full_keyboard and not arguments.record_input:
         parser.error("--input-full-keyboard 必须与 --record-input 一起使用")
+    if arguments.watch and arguments.segments is not None:
+        parser.error("--segments 只适用于 --replay 或 --calibrate")
+    if arguments.segment_role is not None and arguments.replay is None:
+        parser.error("--segment-role 只适用于 --replay")
     if arguments.replay is not None and arguments.record_input:
         parser.error("--record-input 只适用于 --watch；离线重放不读取实时键鼠")
     if arguments.calibrate is not None:
@@ -2040,6 +2119,7 @@ def main() -> None:
                 CalibrationOptions(
                     session_specs=tuple(arguments.calibrate),
                     output_dir=output_dir,
+                    segments_path=arguments.segments,
                     grid_path=arguments.grid,
                     sample_stride=arguments.sample_stride,
                     strong_block_delta=arguments.strong_block_delta,
@@ -2070,6 +2150,8 @@ def main() -> None:
         raw_max_files=arguments.raw_max_files,
         raw_max_bytes=arguments.raw_max_bytes,
         replay_dir=arguments.replay,
+        segments_path=arguments.segments,
+        segment_role=arguments.segment_role,
     )
     try:
         if arguments.replay is not None:

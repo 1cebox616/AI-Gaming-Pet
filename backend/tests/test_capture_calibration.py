@@ -1,4 +1,4 @@
-"""Synthetic-stream tests for M5-T4 offline calibration metrics."""
+"""Synthetic-stream tests for the M5 offline calibration tools."""
 
 from __future__ import annotations
 
@@ -17,9 +17,13 @@ from pet.core.capture_calibration import (
     InputEvent,
     PreparedCalibrationSession,
     _align_input_events,
+    _correlation_peak_lag,
     _result_bytes,
     default_grid,
     evaluate_session,
+    load_segments,
+    measure_crosscorrelation,
+    prepare_session,
     write_grid_results,
 )
 
@@ -174,7 +178,10 @@ def test_input_rows_use_monotonic_timeline_when_available() -> None:
 def test_default_grid_has_all_108_combinations_without_removed_dimension() -> None:
     combinations = default_grid().combinations()
 
-    assert len(combinations) == 3 * 4 * 3 * 3 == 108
+    assert len(combinations) == 3 * 6 * 6 * 1 == 108
+    assert {parameters.persistence_polls for parameters in combinations} == {1}
+    assert min(parameters.noise_multiplier for parameters in combinations) == 0.8
+    assert min(parameters.noise_margin_pixels for parameters in combinations) == 0.0
     assert all(
         not hasattr(parameters, "camera_motion_ratio")
         for parameters in combinations
@@ -219,3 +226,140 @@ def test_cli_accepts_calibration_sessions_and_stride() -> None:
 
     assert arguments.calibrate == ["text-heavy=session-a", "explore-3a=session-b"]
     assert arguments.sample_stride == 2
+
+
+def test_segments_filter_synthetic_monotonic_stream_read_only(tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    raw = session / "raw"
+    raw.mkdir(parents=True)
+    started = datetime(2026, 8, 25, tzinfo=timezone.utc)
+    for index, value in enumerate((10, 20, 30, 40), start=1):
+        stamp = (started + timedelta(seconds=index - 1)).strftime("%Y%m%dT%H%M%S.%fZ")
+        _frame(value).save(raw / f"raw-{index:06d}-{stamp}.jpg", quality=70)
+    with (session / "metrics.csv").open("w", encoding="utf-8-sig", newline="") as target:
+        writer = csv.writer(target)
+        writer.writerow(("序号", "时间", "单调秒", "时间来源"))
+        writer.writerow((0, started.isoformat(), "", "capture"))  # WGC empty poll
+        for index in range(1, 5):
+            writer.writerow(
+                (
+                    index,
+                    (started + timedelta(seconds=index - 1)).isoformat(),
+                    99.0 + index,
+                    "capture",
+                )
+            )
+    with (session / "input.csv").open("w", encoding="utf-8-sig", newline="") as target:
+        writer = csv.writer(target)
+        writer.writerow(("时间", "单调秒", "事件类型", "键名", "dx", "dy"))
+        writer.writerow(((started + timedelta(milliseconds=500)).isoformat(), 100.5, "按下", "W", 0, 0))
+        writer.writerow(((started + timedelta(seconds=1, milliseconds=500)).isoformat(), 101.5, "按下", "W", 0, 0))
+    (session / "session.json").write_text(
+        '{"时钟锚点":{"perf_counter秒":99.75}}', encoding="utf-8"
+    )
+    manifest = tmp_path / "segments.toml"
+    manifest.write_text(
+        "[[segments]]\nrole='slice'\nsession='session'\nstart=1.0\nend=3.0\n",
+        encoding="utf-8",
+    )
+
+    spec = load_segments(manifest)[0]
+    prepared = prepare_session(
+        spec.role,
+        spec.session_dir,
+        sample_stride=1,
+        strong_block_delta=40.0 / 255.0,
+        input_motion_threshold=20.0,
+        start_seconds=spec.start_seconds,
+        end_seconds=spec.end_seconds,
+    )
+
+    scoped_paths = tuple(
+        path.name.split("-")[1]
+        for path, in_scope in zip(prepared.paths, prepared.in_scope, strict=True)
+        if in_scope
+    )
+    scoped_times = tuple(
+        value
+        for value, in_scope in zip(
+            prepared.relative_seconds, prepared.in_scope, strict=True
+        )
+        if in_scope
+    )
+    scoped_input = tuple(
+        active
+        for active, in_scope in zip(
+            prepared.input_activity or (), prepared.in_scope, strict=True
+        )
+        if in_scope
+    )
+    assert scoped_paths == ("000002", "000003")
+    assert scoped_times == pytest.approx((1.25, 2.25))
+    assert scoped_input == (True, True)
+    assert len(tuple(raw.glob("*.jpg"))) == 4
+    replayed = capture.run_replay(
+        capture.ProbeOptions(
+            interval=1.0,
+            title=None,
+            save_dir=tmp_path / "replay-output",
+            replay_dir=raw,
+            segments_path=manifest,
+        )
+    )
+    assert len(replayed) == 2
+    correlation = measure_crosscorrelation(
+        spec, strong_block_delta=40.0 / 255.0
+    )
+    assert correlation.frame_difference_count == 3
+    assert correlation.input_event_count == 1
+
+
+def test_cross_correlation_recovers_known_synthetic_lag() -> None:
+    rng = np.random.default_rng(20260825)
+    input_times = np.arange(0.05, 30.0, 0.1)
+    input_values = rng.uniform(0.0, 5.0, len(input_times))
+    frame_times = np.arange(5.0, 26.0, 1.0)
+    expected_lag = 2.3
+    frame_values = np.asarray(
+        [
+            np.sum(
+                input_values[
+                    (input_times > frame_time - expected_lag - 1.0)
+                    & (input_times <= frame_time - expected_lag)
+                ]
+            )
+            for frame_time in frame_times
+        ]
+    )
+
+    peak = _correlation_peak_lag(
+        input_times,
+        input_values,
+        frame_times,
+        frame_values,
+    )
+
+    assert peak is not None
+    assert peak[0] == pytest.approx(expected_lag, abs=0.11)
+    assert peak[1] > 0.99
+
+
+def test_cli_accepts_segments_without_positional_sessions() -> None:
+    arguments = capture._build_parser().parse_args(
+        ["--calibrate", "--segments", "segments.toml"]
+    )
+
+    assert arguments.calibrate == []
+    assert arguments.segments == Path("segments.toml")
+
+    replay_arguments = capture._build_parser().parse_args(
+        [
+            "--replay",
+            "session/raw",
+            "--segments",
+            "segments.toml",
+            "--segment-role",
+            "A-world",
+        ]
+    )
+    assert replay_arguments.segment_role == "A-world"

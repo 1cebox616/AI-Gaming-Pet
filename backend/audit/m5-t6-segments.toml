@@ -1,0 +1,88 @@
+# M5-T6 只读校准区间。
+# 路径相对此文件；区间为相对 session.json 会话时钟锚点的单调秒，采用 [start, end)。
+
+[[segments]]
+role = "B-idle"
+session = "../recordings/capture/20260825-201328"
+start = 0.0
+end = 147.7
+
+[[segments]]
+role = "C-idle"
+session = "../recordings/capture/20260825-210142"
+
+[[segments]]
+role = "A-static-1"
+session = "../recordings/capture/20260825-200156"
+start = 0.0
+end = 83.9
+
+[[segments]]
+role = "A-static-2"
+session = "../recordings/capture/20260825-200156"
+start = 90.2
+end = 180.1
+
+[[segments]]
+role = "A-static-3"
+session = "../recordings/capture/20260825-200156"
+start = 188.6
+end = 205.9
+
+[[segments]]
+role = "A-static-4"
+session = "../recordings/capture/20260825-200156"
+start = 206.0
+end = 254.0
+
+[[segments]]
+role = "A-static-5"
+session = "../recordings/capture/20260825-200156"
+start = 263.3
+end = 340.0
+
+[[segments]]
+role = "A-world"
+session = "../recordings/capture/20260825-200156"
+start = 371.6
+end = 520.8
+
+[[segments]]
+role = "A-trans-1"
+session = "../recordings/capture/20260825-200156"
+start = 83.9
+end = 90.2
+
+[[segments]]
+role = "A-trans-2"
+session = "../recordings/capture/20260825-200156"
+start = 180.1
+end = 188.6
+
+[[segments]]
+role = "A-trans-3"
+session = "../recordings/capture/20260825-200156"
+start = 254.0
+end = 263.3
+
+[[segments]]
+role = "A-trans-4"
+session = "../recordings/capture/20260825-200156"
+start = 340.0
+end = 371.6
+
+[[segments]]
+role = "text-heavy"
+session = "../recordings/capture/20260824-231738"
+
+[[segments]]
+role = "explore-3a"
+session = "../recordings/capture/20260824-232313"
+
+[[segments]]
+role = "idle-3a"
+session = "../recordings/capture/20260824-230914"
+
+[[segments]]
+role = "combat-3a"
+session = "../recordings/capture/20260824-232954"
