@@ -105,6 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-inflight", type=int, default=4)
     parser.add_argument("--send-width", type=int, default=PRODUCTION_SEND_WIDTH)
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument("--dispatch-interval", type=float, default=0.0)
     parser.add_argument("--cost-cap", type=float, default=DEFAULT_COST_CAP_USD)
     parser.add_argument("--yes", action="store_true")
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
@@ -240,6 +241,7 @@ async def _run_prepared(
     region_sparsity_max: float,
     cost_cap: float,
     prior_cost: float,
+    dispatch_interval: float,
 ) -> bool:
     adapter = GenericVisionAdapter(
         _adapter_configuration(
@@ -274,8 +276,14 @@ async def _run_prepared(
         },
     )
     stopped_by_cost = False
+    last_dispatch: float | None = None
     try:
         for item in prepared.selected:
+            now = asyncio.get_running_loop().time()
+            if last_dispatch is not None:
+                remaining = dispatch_interval - (now - last_dispatch)
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
             with Image.open(item.path) as source:
                 bitmap = source.convert("RGB")
             frame = CapturedFrame(
@@ -291,6 +299,7 @@ async def _run_prepared(
                 ),
             )
             await adapter.submit_replay_frame(frame, prepared.game, item.region)
+            last_dispatch = asyncio.get_running_loop().time()
             if prior_cost + adapter.total_cost_usd > cost_cap * 1.5:
                 stopped_by_cost = True
                 print(
@@ -369,6 +378,9 @@ def _write_review(
         latencies = [float(row["latency_ms"]) for row in rows if row.get("dropped") is None]
         dropped = Counter(str(row["dropped"]) for row in rows if row.get("dropped") is not None)
         injected = sum(1 for row in rows if row.get("region"))
+        truncated = int(session.get("truncated_count", 0))
+        unchanged = int(session.get("unchanged_count", 0))
+        average_visible_tokens = session.get("average_visible_output_tokens")
         lines.extend(
             [
                 f"## {prepared.name}",
@@ -386,6 +398,9 @@ def _write_review(
                 ),
                 f"- 实际花费：${float(session['total_cost_usd']):.9f}",
                 f"- 区域提示注入次数：{injected}",
+                f"- 截断条数：{truncated}",
+                f"- 「无明显变化」条数：{unchanged}",
+                f"- 平均可见输出 token：{average_visible_tokens}",
                 f"- 上传宽度：请求 {prepared.requested_send_width}，raw {prepared.source_width}，"
                 f"实际 {prepared.actual_send_width}；未放大，低于生产默认。",
                 "",
@@ -467,8 +482,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.context_lines < 0 or arguments.max_inflight < 1:
         print("--context-lines 不得为负，--max-inflight 必须至少为 1", file=sys.stderr)
         return 2
-    if arguments.send_width < 1 or arguments.timeout <= 0 or arguments.cost_cap <= 0:
-        print("--send-width、--timeout、--cost-cap 必须为正数", file=sys.stderr)
+    if (
+        arguments.send_width < 1
+        or arguments.timeout <= 0
+        or arguments.cost_cap <= 0
+        or arguments.dispatch_interval < 0
+    ):
+        print(
+            "--send-width、--timeout、--cost-cap 必须为正数；"
+            "--dispatch-interval 不得为负数",
+            file=sys.stderr,
+        )
         return 2
     try:
         configuration = load_config()
@@ -541,6 +565,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     region_sparsity_max=generic.region_sparsity_max,
                     cost_cap=arguments.cost_cap,
                     prior_cost=running_cost,
+                    dispatch_interval=arguments.dispatch_interval,
                 )
             ) or stopped_by_cost
             session_summary = json.loads(
@@ -576,6 +601,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "requested_send_width": arguments.send_width,
                 "production_default_send_width": PRODUCTION_SEND_WIDTH,
                 "timeout_seconds": arguments.timeout,
+                "dispatch_interval_seconds": arguments.dispatch_interval,
                 "region_sparsity_max": generic.region_sparsity_max,
                 "cost_cap_usd": arguments.cost_cap,
             },

@@ -18,7 +18,12 @@ from pet.core.config import (
     LlmProfileConfig,
 )
 from pet.core.llm import LlmResult, LlmUsage, image_upload_metadata
-from pet.games.generic.adapter import GenericVisionAdapter, TitleRule, WindowTitleMap
+from pet.games.generic.adapter import (
+    FAST_PROMPT_PATH,
+    GenericVisionAdapter,
+    TitleRule,
+    WindowTitleMap,
+)
 
 
 @dataclass(frozen=True)
@@ -58,8 +63,13 @@ class AlwaysSelect:
 
 
 class FakeClient:
-    def __init__(self, delays: list[float] | None = None) -> None:
+    def __init__(
+        self,
+        delays: list[float] | None = None,
+        texts: list[str] | None = None,
+    ) -> None:
         self.delays = delays or []
+        self.texts = texts or []
         self.calls: list[dict[str, object]] = []
         self.active = 0
         self.max_active = 0
@@ -79,11 +89,12 @@ class FakeClient:
             if index < len(self.delays):
                 time.sleep(self.delays[index])
             return LlmResult(
-                text=f"观察 {index + 1}",
+                text=self.texts[index] if index < len(self.texts) else f"观察 {index + 1}",
                 usage=LlmUsage(100, 20, None),
                 latency_seconds=0.01,
                 model="fixture-model",
                 provider="fixture-provider",
+                finish_reason="stop",
             )
         finally:
             self.active -= 1
@@ -363,3 +374,47 @@ def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
     assert "最多1条" in str(client.calls[1]["user_prompt"])
     assert (output / "observations.md").is_file()
     assert (output / "session.json").is_file()
+    session = json.loads((output / "session.json").read_text(encoding="utf-8"))
+    assert session["truncated_count"] == 0
+    assert session["average_visible_output_tokens"] == 20.0
+
+
+def test_context_skips_no_change_and_marks_unchanged_tail(tmp_path: Path) -> None:
+    adapter_config, llm_config = _configuration(tmp_path, max_inflight=1)
+    client = FakeClient(texts=["出现一名角色。", "无明显变化。", "出现一道闪电。"])
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("replay must not initialize capture")
+        ),
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: client,
+        title_map=_title_map(),
+    )
+
+    async def scenario() -> None:
+        adapter.start_replay(tmp_path / "context-replay", context_lines=5)
+        for sequence in range(1, 4):
+            await adapter.submit_replay_frame(_frame(sequence), "Grey Zone Warfare", ())
+        await adapter.finish_replay()
+
+    asyncio.run(scenario())
+    third_prompt = str(client.calls[2]["user_prompt"])
+    assert "出现一名角色。" in third_prompt
+    assert "- 无明显变化" not in third_prompt
+    assert third_prompt.endswith("此后至今无明显变化")
+
+
+def test_fast_prompt_contains_all_five_observation_constraints() -> None:
+    prompt = FAST_PROMPT_PATH.read_text(encoding="utf-8")
+    assert "无明显变化" in prompt
+    assert "逐字或近乎逐字复用" in prompt
+    assert "只看到当前这一张图" in prompt
+    assert "与此前记录相比" in prompt
+    assert "不得出现格子编号" in prompt
+    assert "不超过 50 个字符" in prompt
+    assert "r8c1" in prompt
+    assert "不加标点" in prompt
+    assert "表明玩家" in prompt
+    assert "不得编造" in prompt

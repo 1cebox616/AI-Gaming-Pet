@@ -14,6 +14,7 @@ from pet.games.generic.eval.observation_replay import (
     SegmentRange,
     _prepare_replay,
     _recording_hash,
+    build_parser,
     character_similarity,
 )
 
@@ -76,3 +77,10 @@ def test_prepare_replay_uses_final_selector_segment_and_never_upscales(tmp_path:
 def test_character_similarity_flags_repetition_without_semantic_model() -> None:
     assert character_similarity("玩家站在门边。", "玩家仍站在门边。") > 0.6
     assert character_similarity("打开地图。", "进入战斗并抽了一张牌。") < 0.6
+
+
+def test_dispatch_interval_defaults_to_zero_and_accepts_production_pacing() -> None:
+    parser = build_parser()
+    common = ["--session", "fixture", "--profile", "vision_fast"]
+    assert parser.parse_args(common).dispatch_interval == 0.0
+    assert parser.parse_args([*common, "--dispatch-interval", "1.0"]).dispatch_interval == 1.0

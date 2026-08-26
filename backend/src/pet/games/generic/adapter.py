@@ -36,6 +36,7 @@ REGION_TEMPLATE = (
     "画面被划分为 16 行 9 列的网格。与上一采样帧相比，"
     "以下格子发生了变化：{cells}。"
 )
+NO_CHANGE_TEXT = "无明显变化"
 
 
 class FrameMetadataLike(Protocol):
@@ -125,6 +126,8 @@ class ObservationRecord:
     dropped: str | None
     cost_usd: float
     model_called: bool
+    visible_output_tokens: int | None
+    truncated: bool
 
     def json_value(self) -> dict[str, object]:
         return {
@@ -171,6 +174,10 @@ class ObservationLog:
         self.dropped = 0
         self.failures = 0
         self.total_cost_usd = 0.0
+        self.visible_output_token_total = 0
+        self.visible_output_token_count = 0
+        self.truncated = 0
+        self.unchanged = 0
         self._write_session(None)
 
     def append(self, record: ObservationRecord) -> None:
@@ -189,6 +196,13 @@ class ObservationLog:
             self.dropped += 1
         if record.model_called and record.dropped is not None:
             self.failures += 1
+        if record.visible_output_tokens is not None:
+            self.visible_output_token_total += record.visible_output_tokens
+            self.visible_output_token_count += 1
+        if record.truncated:
+            self.truncated += 1
+        if record.dropped is None and _is_no_change(record.text):
+            self.unchanged += 1
         self._write_session(None)
 
     def close(self) -> None:
@@ -207,6 +221,16 @@ class ObservationLog:
             "failure_count": self.failures,
             "failure_rate": round(self.failures / self.calls, 6) if self.calls else 0.0,
             "total_cost_usd": round(self.total_cost_usd, 9),
+            "truncated_count": self.truncated,
+            "unchanged_count": self.unchanged,
+            "average_visible_output_tokens": (
+                round(
+                    self.visible_output_token_total / self.visible_output_token_count,
+                    6,
+                )
+                if self.visible_output_token_count
+                else None
+            ),
         }
         (self.directory / "session.json").write_text(
             json.dumps(value, ensure_ascii=False, indent=2) + "\n",
@@ -263,6 +287,7 @@ class GenericVisionAdapter:
         self._next_sequence = 1
         self._next_write_sequence = 1
         self._recent: list[tuple[float, str]] = []
+        self._unchanged_since_information = False
         self._last_status: tuple[str, str, bool, bool] | None = None
         self._last_status_at = float("-inf")
         self._consecutive_failures = 0
@@ -472,12 +497,22 @@ class GenericVisionAdapter:
                     "error:inflight_limit",
                     0.0,
                     False,
+                    None,
+                    False,
                 )
             )
             return
         timeline = tuple(self._recent[-self._context_lines :]) if self._context_lines else ()
+        unchanged_since_information = self._unchanged_since_information
         task = asyncio.create_task(
-            self._observe_frame(sequence, frame, game, region, timeline),
+            self._observe_frame(
+                sequence,
+                frame,
+                game,
+                region,
+                timeline,
+                unchanged_since_information,
+            ),
             name=f"generic-vision-call-{sequence}",
         )
         self._inflight.add(task)
@@ -490,14 +525,23 @@ class GenericVisionAdapter:
         game: str,
         region: tuple[str, ...],
         timeline: tuple[tuple[float, str], ...],
+        unchanged_since_information: bool,
     ) -> None:
         started = self._clock()
         dropped: str | None = None
         text = ""
         cost = 0.0
+        visible_output_tokens: int | None = None
+        truncated = False
         try:
             assert self._client is not None
-            prompt = _user_prompt(game, timeline, region, context_lines=self._context_lines)
+            prompt = _user_prompt(
+                game,
+                timeline,
+                region,
+                context_lines=self._context_lines,
+                unchanged_since_information=unchanged_since_information,
+            )
             result = await asyncio.wait_for(
                 asyncio.to_thread(
                     self._client.complete_with_images_stream,
@@ -524,6 +568,11 @@ class GenericVisionAdapter:
             if not text:
                 raise RuntimeError("模型返回空观察")
             cost = self._price(result)
+            visible_output_tokens = _visible_output_tokens(result)
+            truncated = result.finish_reason in {"length", "max_tokens"} or (
+                visible_output_tokens is not None
+                and visible_output_tokens >= self._effective.max_tokens
+            )
             self._consecutive_failures = 0
         except asyncio.TimeoutError:
             dropped = "timeout"
@@ -549,6 +598,8 @@ class GenericVisionAdapter:
                 dropped,
                 cost,
                 True,
+                visible_output_tokens,
+                truncated,
             )
         )
 
@@ -559,8 +610,16 @@ class GenericVisionAdapter:
             assert self._log is not None
             self._log.append(current)
             if current.dropped is None:
-                self._recent.append((current.frame_ts, current.text))
-                self._recent = self._recent[-5:]
+                if _is_no_change(current.text):
+                    self._unchanged_since_information = True
+                else:
+                    self._recent.append((current.frame_ts, current.text))
+                    self._recent = (
+                        self._recent[-self._context_lines :]
+                        if self._context_lines
+                        else []
+                    )
+                    self._unchanged_since_information = False
             self._next_write_sequence += 1
         self._refresh_cost_warning()
 
@@ -624,6 +683,7 @@ def _user_prompt(
     region: Sequence[str],
     *,
     context_lines: int = 5,
+    unchanged_since_information: bool = False,
 ) -> str:
     context_label = "五" if context_lines == 5 else str(context_lines)
     lines = [
@@ -635,6 +695,8 @@ def _user_prompt(
         lines.extend(f"- {timestamp:.3f}：{text}" for timestamp, text in timeline)
     else:
         lines.append("- 暂无")
+    if unchanged_since_information:
+        lines.append("此后至今无明显变化")
     if region:
         lines.append(REGION_TEMPLATE.format(cells="、".join(region)))
     return "\n".join(lines)
@@ -642,6 +704,18 @@ def _user_prompt(
 
 def _one_line(error: object) -> str:
     return " ".join(str(error).split())[:240]
+
+
+def _visible_output_tokens(result: LlmResult) -> int | None:
+    completion = result.usage.completion_tokens
+    if completion is None:
+        return None
+    return max(completion - (result.usage.reasoning_tokens or 0), 0)
+
+
+def _is_no_change(text: str) -> bool:
+    """Classify the model's harmless terminal punctuation as the same sentinel."""
+    return text.rstrip("。") == NO_CHANGE_TEXT
 
 
 def create_adapter(
