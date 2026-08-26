@@ -161,6 +161,34 @@ def _title_map() -> WindowTitleMap:
     return WindowTitleMap((TitleRule("Grey Zone Warfare", ("gzw",), ()),))
 
 
+async def _wait_for_observation_rows(
+    log_root: Path,
+    expected_count: int,
+    *,
+    timeout_seconds: float = 2.0,
+) -> tuple[Path, list[dict[str, object]]]:
+    """Wait for flushed JSONL rows instead of assuming scheduler timing."""
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        sessions = tuple(path for path in log_root.iterdir() if path.is_dir())
+        if len(sessions) == 1:
+            session = sessions[0]
+            path = session / "observations.jsonl"
+            if path.is_file():
+                rows = [
+                    json.loads(line)
+                    for line in path.read_text(encoding="utf-8").splitlines()
+                ]
+                if len(rows) >= expected_count:
+                    return session, rows
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(
+                f"observations.jsonl did not reach {expected_count} rows within "
+                f"{timeout_seconds:.1f} seconds"
+            )
+        await asyncio.sleep(0.005)
+
+
 def test_disabled_adapter_never_initializes_capture(tmp_path: Path) -> None:
     adapter_config, llm_config = _configuration(tmp_path, enabled=False)
     touched = False
@@ -205,12 +233,12 @@ def test_frames_call_model_and_are_logged_in_frame_order(tmp_path: Path) -> None
 
     async def scenario() -> None:
         await adapter.start(_core(statuses))
-        await asyncio.sleep(0.12)
-        await adapter.stop()
+        try:
+            return await _wait_for_observation_rows(tmp_path, 2)
+        finally:
+            await adapter.stop()
 
-    asyncio.run(scenario())
-    session = next(tmp_path.iterdir())
-    rows = [json.loads(line) for line in (session / "observations.jsonl").read_text(encoding="utf-8").splitlines()]
+    session, rows = asyncio.run(scenario())
     assert [row["frame_ts"] for row in rows] == [1.0, 2.0]
     assert [row["text"] for row in rows] == ["观察 1", "观察 2"]
     assert rows[0]["region"] == ["r2c3"]
@@ -236,12 +264,13 @@ def test_timeout_is_recorded_and_loop_continues(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         await adapter.start(_core([]))
-        await asyncio.sleep(0.04)
-        await adapter.stop()
+        try:
+            return await _wait_for_observation_rows(tmp_path, 1)
+        finally:
+            await adapter.stop()
 
-    asyncio.run(scenario())
-    session = next(tmp_path.iterdir())
-    row = json.loads((session / "observations.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    _, rows = asyncio.run(scenario())
+    row = rows[0]
     assert row["dropped"] == "timeout"
 
 
@@ -260,12 +289,12 @@ def test_inflight_limit_drops_without_exceeding_limit(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         await adapter.start(_core([]))
-        await asyncio.sleep(0.16)
-        await adapter.stop()
+        try:
+            return await _wait_for_observation_rows(tmp_path, 7)
+        finally:
+            await adapter.stop()
 
-    asyncio.run(scenario())
-    session = next(tmp_path.iterdir())
-    rows = [json.loads(line) for line in (session / "observations.jsonl").read_text(encoding="utf-8").splitlines()]
+    _, rows = asyncio.run(scenario())
     assert client.max_active <= 2
     assert any(row["dropped"] == "error:inflight_limit" for row in rows)
 
@@ -290,11 +319,12 @@ def test_cost_uses_profile_prices_and_sets_warning(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         await adapter.start(_core([]))
-        await asyncio.sleep(0.04)
-        await adapter.stop()
+        try:
+            return await _wait_for_observation_rows(tmp_path, 1)
+        finally:
+            await adapter.stop()
 
-    asyncio.run(scenario())
-    session = next(tmp_path.iterdir())
+    session, _ = asyncio.run(scenario())
     summary = json.loads((session / "session.json").read_text(encoding="utf-8"))
     assert summary["total_cost_usd"] == 0.00014
     assert adapter._cost_warning is True
