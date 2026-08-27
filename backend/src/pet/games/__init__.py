@@ -20,8 +20,8 @@ def built_in_adapters(llm_configuration: LlmConfig) -> dict[str, AdapterFactory]
             configuration,
             llm_configuration,
             capture_backend_factory=WindowsGraphicsCaptureBackend,
-            selector_factory=lambda sparsity: AdaptiveFrameSelector(
-                region_sparsity_max=sparsity
+            selector_factory=lambda focus_max: AdaptiveFrameSelector(
+                region_sparsity_max=focus_max
             ),
             input_listener_factory=lambda backend: ActionInputListener(
                 backend.target.hwnd  # type: ignore[attr-defined]

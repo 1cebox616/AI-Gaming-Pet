@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
+import re
 import time
 import tomllib
 from typing import Literal, Protocol
@@ -33,17 +34,16 @@ BACKEND_DIRECTORY = Path(__file__).resolve().parents[4]
 DEFAULT_TITLE_MAP_PATH = BACKEND_DIRECTORY / "data" / "generic" / "window-title-map.toml"
 FAST_PROMPT_PATH = PROMPTS_DIRECTORY / "generic" / "observation-fast.md"
 HEARTBEAT_SECONDS = 60.0
-REGION_TEMPLATE = (
-    "画面被划分为 16 行 9 列的网格。与 {seconds:.1f} 秒前的变化基线相比，"
-    "以下格子发生了变化：{cells}。"
+FOCUS_REGION_TEMPLATE = (
+    "画面{location}、约占屏幕{area:.0f}%的区域正在变化"
+    "（区域内像素变化强度约{intensity:.0f}%，全局约{global_change:.1f}%）。"
+    "请重点观察该区域及其紧邻环境。"
 )
-COARSE_REGION_TEMPLATE = "画面变化集中于{location}，约 {percent:.0f}% 区域。"
-LARGE_CHANGE_TEMPLATE = (
-    "本帧存在大范围画面变化（约 {percent:.0f}% 区域），未提供具体位置。"
-)
+WIDE_CHANGE_TEMPLATE = "本帧变化范围较广（全局像素变化约{global_change:.1f}%），未提供聚焦区域。"
 FORCED_TEMPLATE = "本帧为定时快照，此前约 {seconds:.1f} 秒未检测到显著变化。"
 MODEL_NO_INPUT_SUMMARY = "此窗口内无玩家输入"
 LOG_NO_INPUT_SUMMARY = "无输入"
+GRID_COORDINATE_PATTERN = re.compile(r"(?i)r\d+c\d+")
 ChangeReason = Literal["sparse", "coarse", "large", "forced"]
 CHANGE_REASONS: tuple[ChangeReason, ...] = ("sparse", "coarse", "large", "forced")
 
@@ -73,10 +73,20 @@ class SelectionDecisionLike(Protocol):
     confirmed_region_grid: tuple[str, ...]
     changed_block_ratio: float
     baseline_monotonic_seconds: float
+    confirmed_region_intensity: float
+
+
+class FrameMetricsLike(Protocol):
+    mean_amplitude: float
+
+
+class FrameComparisonsLike(Protocol):
+    vs_baseline: FrameMetricsLike
 
 
 class SelectionObservationLike(Protocol):
     decision: SelectionDecisionLike
+    comparisons: FrameComparisonsLike
 
 
 class FrameSelectorLike(Protocol):
@@ -148,8 +158,11 @@ class ObservationRecord:
     region: tuple[str, ...] | None
     reason: ChangeReason
     change_ratio: float
+    global_change: float
+    region_area_ratio: float | None
+    region_intensity: float | None
     input: str
-    coarse_location: str | None
+    focus_location: str | None
     latency_ms: float
     ttft_ms: float | None
     dropped: str | None
@@ -169,6 +182,17 @@ class ObservationRecord:
             "region": list(self.region) if self.region else None,
             "reason": self.reason,
             "change_ratio": round(self.change_ratio, 2),
+            "global_change": round(self.global_change, 1),
+            "region_area_ratio": (
+                round(self.region_area_ratio)
+                if self.region_area_ratio is not None
+                else None
+            ),
+            "region_intensity": (
+                round(self.region_intensity)
+                if self.region_intensity is not None
+                else None
+            ),
             "input": self.input,
             "latency_ms": round(self.latency_ms, 3),
             "ttft_ms": round(self.ttft_ms, 3) if self.ttft_ms is not None else None,
@@ -186,7 +210,10 @@ class PendingFrame:
     confirmed_region: tuple[str, ...]
     reason: ChangeReason
     change_ratio: float
-    coarse_location: str | None
+    global_change: float
+    region_area_ratio: float | None
+    region_intensity: float | None
+    focus_location: str | None
     baseline_monotonic_seconds: float
 
 
@@ -204,8 +231,13 @@ def _change_reason(forced: bool, change_ratio: float) -> ChangeReason:
 
 
 def _coarse_location(region: Sequence[str]) -> str:
+    return _focus_geometry(region)[0]
+
+
+def _focus_geometry(region: Sequence[str]) -> tuple[str, float]:
+    """Return the neutral nine-grid location and bbox screen percentage."""
     if not region:
-        raise ValueError("粗定位缺少 confirmed 格子")
+        raise ValueError("聚焦区域缺少 confirmed 格子")
     rows: list[int] = []
     columns: list[int] = []
     for cell in region:
@@ -231,11 +263,13 @@ def _coarse_location(region: Sequence[str]) -> str:
         if center_column <= 3.0
         else (1 if center_column <= 6.0 else 2)
     )
-    return (
+    location = (
         ("左上", "上方", "右上"),
         ("左侧", "中央", "右侧"),
         ("左下", "下方", "右下"),
     )[vertical][horizontal]
+    bbox_cells = (max(rows) - min(rows) + 1) * (max(columns) - min(columns) + 1)
+    return location, bbox_cells / (16 * 9) * 100.0
 
 
 def _logged_input(input_summary: str | None) -> str:
@@ -244,17 +278,15 @@ def _logged_input(input_summary: str | None) -> str:
     return input_summary.strip()
 
 
-def _markdown_annotation(record: ObservationRecord) -> str:
-    percent = record.change_ratio * 100.0
-    if record.reason == "forced":
-        return "心跳"
-    if record.reason == "large":
-        return f"大幅变化 {percent:.0f}%"
-    if record.reason == "coarse":
-        if record.coarse_location is None:
-            raise ValueError("coarse 日志缺少粗定位")
-        return f"变化 {percent:.0f}%·{record.coarse_location}"
-    return f"变化 {percent:.0f}%"
+def _model_segment(text: str, label: str) -> str | None:
+    match = re.search(
+        rf"{re.escape(label)}\s*(.*?)(?=【(?:画面|局部)】|\Z)",
+        text,
+        flags=re.DOTALL,
+    )
+    if match is None:
+        return None
+    return " ".join(match.group(1).split())
 
 
 class ObservationLog:
@@ -278,11 +310,15 @@ class ObservationLog:
                 self.directory = root / f"{stamp}-{suffix}"
                 suffix += 1
             self.directory.mkdir(parents=True)
+        self.started_at = datetime.now(timezone.utc)
+        self._first_frame_ts: float | None = None
         self._jsonl = (self.directory / "observations.jsonl").open("w", encoding="utf-8", newline="\n")
         self._markdown = (self.directory / "observations.md").open("w", encoding="utf-8", newline="\n")
-        self._markdown.write("# 通用视觉观察日志\n\n")
+        self._markdown.write(
+            "# 通用视觉观察日志\n\n"
+            f"本会话始于 {self.started_at.isoformat()}\n\n"
+        )
         self._markdown.flush()
-        self.started_at = datetime.now(timezone.utc)
         self.parameters = parameters
         self.records = 0
         self.calls = 0
@@ -298,16 +334,29 @@ class ObservationLog:
     def append(self, record: ObservationRecord) -> None:
         self._jsonl.write(json.dumps(record.json_value(), ensure_ascii=False) + "\n")
         self._jsonl.flush()
-        annotation = _markdown_annotation(record)
-        input_suffix = (
-            "｜无输入"
-            if record.input == LOG_NO_INPUT_SUMMARY
-            else f"｜输入：{record.input}"
-        )
-        body = record.text if record.dropped is None else f"[丢弃：{record.dropped}]"
-        self._markdown.write(
-            f"- {record.wall} · {record.game}（{annotation}）：{body}{input_suffix}\n"
-        )
+        if self._first_frame_ts is None:
+            self._first_frame_ts = record.frame_ts
+        relative_seconds = max(0, round(record.frame_ts - self._first_frame_ts))
+        heartbeat = "（心跳）" if record.reason == "forced" else ""
+        self._markdown.write(f"T+{relative_seconds}{heartbeat}：\n")
+        if record.dropped is not None:
+            self._markdown.write(f"[丢弃：{record.dropped}]\n")
+        else:
+            scene = _model_segment(record.text, "【画面】")
+            if scene is None:
+                scene = " ".join(record.text.split())
+            self._markdown.write(
+                f"【全局画面】（全局像素变化{record.global_change:.1f}%）{scene}\n"
+            )
+            if record.region_area_ratio is not None:
+                local = _model_segment(record.text, "【局部】")
+                if local is not None:
+                    assert record.region_intensity is not None
+                    self._markdown.write(
+                        f"【局部｜区域占比{record.region_area_ratio:.0f}%】"
+                        f"（区域像素变化{record.region_intensity:.0f}%）{local}\n"
+                    )
+        self._markdown.write(f"【玩家输入】{record.input}\n\n")
         self._markdown.flush()
         self.records += 1
         if record.model_called:
@@ -473,7 +522,7 @@ class GenericVisionAdapter:
             "fast_timeout_seconds": self._settings.fast_timeout_seconds,
             "max_inflight": self._settings.max_inflight,
             "input_context": self._settings.input_context,
-            "region_sparsity_max": self._settings.region_sparsity_max,
+            "region_focus_max": self._settings.region_focus_max,
             "llm_profile": profile_id,
             "model": effective.model,
             "provider": effective.provider or None,
@@ -517,6 +566,8 @@ class GenericVisionAdapter:
         *,
         confirmed_region: tuple[str, ...],
         change_ratio: float,
+        global_change: float,
+        region_intensity: float,
         forced: bool,
     ) -> None:
         """Submit one retained frame with bounded backpressure for offline replay."""
@@ -529,6 +580,8 @@ class GenericVisionAdapter:
             baseline_monotonic_seconds,
             confirmed_region=confirmed_region,
             change_ratio=change_ratio,
+            global_change=global_change,
+            region_intensity=region_intensity,
             forced=forced,
             wait_for_capacity=True,
         )
@@ -594,7 +647,7 @@ class GenericVisionAdapter:
         if self._backend is None:
             try:
                 self._backend = self._capture_backend_factory()
-                self._selector = self._selector_factory(self._settings.region_sparsity_max)
+                self._selector = self._selector_factory(self._settings.region_focus_max)
                 if self._settings.input_context:
                     if self._input_listener_factory is None:
                         raise RuntimeError("通用视觉输入上下文缺少生产监听器工厂")
@@ -627,6 +680,8 @@ class GenericVisionAdapter:
                 observation.decision.baseline_monotonic_seconds,
                 confirmed_region=observation.decision.confirmed_region_grid,
                 change_ratio=observation.decision.changed_block_ratio,
+                global_change=observation.comparisons.vs_baseline.mean_amplitude * 100.0,
+                region_intensity=observation.decision.confirmed_region_intensity * 100.0,
                 forced=observation.decision.forced,
             )
         else:
@@ -642,6 +697,8 @@ class GenericVisionAdapter:
         *,
         confirmed_region: tuple[str, ...],
         change_ratio: float,
+        global_change: float,
+        region_intensity: float,
         forced: bool,
         wait_for_capacity: bool = False,
     ) -> None:
@@ -649,20 +706,34 @@ class GenericVisionAdapter:
         self._next_sequence += 1
         if not 0.0 <= change_ratio <= 1.0:
             raise ValueError("change_ratio 必须在 0–1")
+        if not 0.0 <= global_change <= 100.0:
+            raise ValueError("global_change 必须在 0–100")
+        if not 0.0 <= region_intensity <= 100.0:
+            raise ValueError("region_intensity 必须在 0–100")
         reason = _change_reason(forced, change_ratio)
-        prompt_region = region if reason == "sparse" else ()
-        coarse_location = (
-            _coarse_location(confirmed_region) if reason == "coarse" else None
+        has_focus = (
+            reason != "forced"
+            and bool(confirmed_region)
+            and change_ratio <= self._settings.region_focus_max
         )
+        focus_location: str | None = None
+        region_area_ratio: float | None = None
+        focused_intensity: float | None = None
+        if has_focus:
+            focus_location, region_area_ratio = _focus_geometry(confirmed_region)
+            focused_intensity = region_intensity
         pending = PendingFrame(
             sequence,
             frame,
             game,
-            prompt_region,
+            region,
             confirmed_region,
             reason,
             change_ratio,
-            coarse_location,
+            global_change,
+            region_area_ratio,
+            focused_intensity,
+            focus_location,
             baseline_monotonic_seconds,
         )
         while wait_for_capacity and len(self._inflight) >= self._settings.max_inflight:
@@ -699,12 +770,15 @@ class GenericVisionAdapter:
         user_prompt = _user_prompt(
             pending.game,
             input_summary,
-            pending.region,
             reason=pending.reason,
-            change_ratio=pending.change_ratio,
-            coarse_location=pending.coarse_location,
+            global_change=pending.global_change,
+            region_area_ratio=pending.region_area_ratio,
+            region_intensity=pending.region_intensity,
+            focus_location=pending.focus_location,
             baseline_seconds_ago=baseline_seconds_ago,
         )
+        if GRID_COORDINATE_PATTERN.search(user_prompt):
+            raise AssertionError("模型消息不得包含格子坐标")
         task = asyncio.create_task(
             self._observe_frame(
                 pending.seq,
@@ -713,8 +787,11 @@ class GenericVisionAdapter:
                 pending.region,
                 pending.reason,
                 pending.change_ratio,
+                pending.global_change,
+                pending.region_area_ratio,
+                pending.region_intensity,
                 logged_input,
-                pending.coarse_location,
+                pending.focus_location,
                 user_prompt,
             ),
             name=f"generic-vision-call-{pending.seq}",
@@ -748,8 +825,11 @@ class GenericVisionAdapter:
             pending.region or None,
             pending.reason,
             pending.change_ratio,
+            pending.global_change,
+            pending.region_area_ratio,
+            pending.region_intensity,
             LOG_NO_INPUT_SUMMARY,
-            pending.coarse_location,
+            pending.focus_location,
             0.0,
             None,
             reason,
@@ -767,8 +847,11 @@ class GenericVisionAdapter:
         region: tuple[str, ...],
         reason: ChangeReason,
         change_ratio: float,
+        global_change: float,
+        region_area_ratio: float | None,
+        region_intensity: float | None,
         logged_input: str,
-        coarse_location: str | None,
+        focus_location: str | None,
         user_prompt: str,
     ) -> None:
         started = self._clock()
@@ -839,8 +922,11 @@ class GenericVisionAdapter:
                 region or None,
                 reason,
                 change_ratio,
+                global_change,
+                region_area_ratio,
+                region_intensity,
                 logged_input,
-                coarse_location,
+                focus_location,
                 (self._clock() - started) * 1000.0,
                 ttft_ms,
                 dropped,
@@ -928,11 +1014,12 @@ class GenericVisionAdapter:
 def _user_prompt(
     game: str,
     input_summary: str | None,
-    region: Sequence[str],
     *,
     reason: ChangeReason,
-    change_ratio: float,
-    coarse_location: str | None,
+    global_change: float,
+    region_area_ratio: float | None,
+    region_intensity: float | None,
+    focus_location: str | None,
     baseline_seconds_ago: float,
 ) -> str:
     lines = [
@@ -941,55 +1028,38 @@ def _user_prompt(
     ]
     if input_summary is not None:
         lines.extend(("玩家输入：", input_summary))
-    if reason == "sparse":
-        if not region:
-            raise ValueError("sparse 提示缺少格子清单")
+    if region_area_ratio is not None:
+        if focus_location is None or region_intensity is None:
+            raise ValueError("聚焦区域提示缺少机械方位或强度")
         lines.append(
-            REGION_TEMPLATE.format(
-                seconds=baseline_seconds_ago,
-                cells="、".join(region),
+            FOCUS_REGION_TEMPLATE.format(
+                location=focus_location,
+                area=region_area_ratio,
+                intensity=region_intensity,
+                global_change=global_change,
             )
         )
         lines.append(
-            "本条提供了变化区域信息；必须恰好输出两行：第一行以【画面】开头，"
-            "标签后以15个汉字为目标、25个为硬上限，只保留主体和关键状态；"
-            "第二行以【刚刚】开头，标签后以30个汉字为目标、40个为硬上限。"
-            "格子编号只是定位信息，输出中不得出现。"
+            "本条提供了聚焦区域；输出【画面】和【局部】两段，每段一到两句。"
+            "【局部】要说明该区域及紧邻环境正在发生什么，并把局部所见放进环境里说清它是什么。"
             "若发生变化的只是亮度、颜色、光效或粒子，而对象本身没有出现、消失或移动，"
-            "标签后必须以“仅”开头且总长四到六个字。"
-            "两行都不得复述游戏名。"
+            "【局部】标签后必须以“仅”开头且总长四到六个字。"
+            f"{region_area_ratio:.0f}%、{region_intensity:.0f}%、{global_change:.1f}%"
+            "是系统定位数值，严禁在输出中写出或改写这三个数；日志会机械添加。"
+            "不得复述游戏名。"
         )
-    elif reason == "coarse":
-        if coarse_location is None:
-            raise ValueError("coarse 提示缺少机械方位")
-        lines.append(
-            COARSE_REGION_TEMPLATE.format(
-                location=coarse_location,
-                percent=change_ratio * 100.0,
-            )
-        )
-        lines.append(
-            "本条提供了粗定位变化区域信息；必须恰好输出两行：第一行以【画面】开头，"
-            "标签后以15个汉字为目标、25个为硬上限，只保留主体和关键状态；"
-            "第二行以【刚刚】开头，标签后以30个汉字为目标、40个为硬上限，"
-            "只描述所指方位现在是什么。"
-            "若发生变化的只是亮度、颜色、光效或粒子，而对象本身没有出现、消失或移动，"
-            "标签后必须以“仅”开头且总长四到六个字。"
-            "两行都不得复述游戏名。"
-        )
-    elif reason == "large":
-        lines.append(LARGE_CHANGE_TEMPLATE.format(percent=change_ratio * 100.0))
-        lines.append(
-            "本条是大范围变化帧；必须恰好输出一行，以【画面】开头，"
-            "标签后以25个汉字为目标、40个为硬上限，允许完整描述新场景；"
-            "禁止输出【刚刚】，不得复述游戏名。"
-        )
-    else:
+    elif reason == "forced":
         lines.append(FORCED_TEMPLATE.format(seconds=baseline_seconds_ago))
         lines.append(
-            "本条是定时心跳快照；必须恰好输出一行，以【画面】开头，"
-            "标签后以15个汉字为目标、25个为硬上限，只保留主体和关键状态；"
-            "禁止输出【刚刚】，不得复述游戏名。"
+            "本条是定时心跳快照；只输出【画面】，用一到两句描述当前场景与正在发生的事；"
+            "不要输出【局部】，不得复述游戏名。"
+        )
+    else:
+        lines.append(WIDE_CHANGE_TEMPLATE.format(global_change=global_change))
+        lines.append(
+            "本条没有聚焦区域；只输出【画面】，用一到两句按当前新场景完整定场；"
+            f"不要输出【局部】；{global_change:.1f}%是系统定位数值，严禁在输出中写出或改写，"
+            "日志会机械添加；不得复述游戏名。"
         )
     return "\n".join(lines)
 

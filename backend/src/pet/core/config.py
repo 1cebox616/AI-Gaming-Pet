@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 DEFAULT_LLM_API_KEY_ENV = "OPENROUTER_API_KEY"
 ENVIRONMENT_VARIABLE_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
-DEFAULT_REGION_SPARSITY_MAX = 0.25
+DEFAULT_REGION_FOCUS_MAX = 0.50
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +160,8 @@ class GenericVisionConfig(BaseModel):
     max_inflight: int = Field(default=4, ge=1, le=32)
     input_context: bool = True
     observation_log_dir: str = "recordings/observation"
-    region_sparsity_max: float = Field(
-        default=DEFAULT_REGION_SPARSITY_MAX,
+    region_focus_max: float = Field(
+        default=DEFAULT_REGION_FOCUS_MAX,
         ge=0,
         le=1,
     )

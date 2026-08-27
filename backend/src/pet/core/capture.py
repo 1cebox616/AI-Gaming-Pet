@@ -28,7 +28,6 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-from pet.core.config import DEFAULT_REGION_SPARSITY_MAX
 from pet.core.input_telemetry import (
     ClockAnchor,
     INPUT_WHITELIST_VERSION,
@@ -52,6 +51,7 @@ DEFAULT_PIXEL_DELTA_THRESHOLD = 24
 DEFAULT_BLOCK_GRID = (9, 16)  # 9 列 × 16 行。
 # 此数待实测确定。
 DEFAULT_BLOCK_DELTA_THRESHOLD = 12
+DEFAULT_REGION_SPARSITY_MAX = 0.25
 DEFAULT_MIN_SAVE_INTERVAL_SECONDS = 1.0
 DEFAULT_MAX_SILENCE_SECONDS = 60.0
 DEFAULT_MAX_FILES = 500
@@ -879,6 +879,7 @@ class SelectionDecision:
     region_sparsity_suppressed: bool
     floor_median: float
     baseline_monotonic_seconds: float = field(compare=False)
+    confirmed_region_intensity: float = field(default=0.0, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -998,6 +999,9 @@ class AdaptiveFrameSelector:
 
         changed_count = int(np.count_nonzero(confirmed))
         changed_ratio = changed_count / confirmed.size
+        confirmed_region_intensity = (
+            float(np.mean(differences[confirmed])) if changed_count else 0.0
+        )
         confirmed_region_grid = tuple(
             f"r{row + 1}c{column + 1}"
             for row, column in np.argwhere(confirmed)
@@ -1029,6 +1033,7 @@ class AdaptiveFrameSelector:
                 False,
                 float(np.median(floors)),
                 baseline_at,
+                0.0,
             )
             self._baseline = prepared
             self._baseline_at = now
@@ -1048,6 +1053,7 @@ class AdaptiveFrameSelector:
                     region_sparsity_suppressed,
                     float(np.median(floors)),
                     baseline_at,
+                    confirmed_region_intensity,
                 )
                 self._last_saved_at = now
             elif candidate_reason != "no_change" and since_saved < self.min_save_interval:
@@ -1062,6 +1068,7 @@ class AdaptiveFrameSelector:
                     region_sparsity_suppressed,
                     float(np.median(floors)),
                     baseline_at,
+                    confirmed_region_intensity,
                 )
             elif candidate_reason != "no_change":
                 decision = SelectionDecision(
@@ -1075,6 +1082,7 @@ class AdaptiveFrameSelector:
                     region_sparsity_suppressed,
                     float(np.median(floors)),
                     baseline_at,
+                    confirmed_region_intensity,
                 )
                 self._baseline = prepared
                 self._baseline_at = now
@@ -1092,6 +1100,7 @@ class AdaptiveFrameSelector:
                     False,
                     float(np.median(floors)),
                     baseline_at,
+                    0.0,
                 )
         self._previous = prepared
         return decision

@@ -284,6 +284,9 @@ def test_sparse_confirmed_blocks_keep_exact_region_grid() -> None:
     base = np.full((180, 320), 100, dtype=np.uint8)
     changed = base.copy()
     changed[0:11, 0:35] = 240
+    expected_intensity = selector.detector.block_mean_differences(
+        selector.detector.prepare(base), selector.detector.prepare(changed)
+    )[0, 0]
     selector.observe(base, 0.0)
 
     decision = selector.observe(changed, 1.0).decision
@@ -292,6 +295,7 @@ def test_sparse_confirmed_blocks_keep_exact_region_grid() -> None:
     assert decision.region_grid == ("r1c1",)
     assert decision.confirmed_region_grid == ("r1c1",)
     assert decision.region_sparsity_suppressed is False
+    assert decision.confirmed_region_intensity == pytest.approx(expected_intensity)
 
 
 def test_large_change_uploads_as_persistent_without_region_grid() -> None:

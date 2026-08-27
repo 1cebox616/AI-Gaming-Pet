@@ -13,9 +13,10 @@ from pet.games.generic.adapter import TitleRule, WindowTitleMap
 from pet.games.generic.eval.observation_replay import (
     SegmentRange,
     _extract_scene,
-    _extract_just_now,
-    _just_now_entries,
-    _just_now_statistics,
+    _echoed_metric_values,
+    _extract_local,
+    _local_entries,
+    _local_statistics,
     _prepare_replay,
     _recording_hash,
     build_parser,
@@ -67,7 +68,7 @@ def test_prepare_replay_uses_final_selector_segment_and_never_upscales(tmp_path:
         896,
         SegmentRange(1.0, 3.0),
         WindowTitleMap((TitleRule("Fixture", ("fixture",), ()),)),
-        0.25,
+        0.50,
     )
     after = _recording_hash(tmp_path)
     assert prepared.frame_count == 2
@@ -80,6 +81,8 @@ def test_prepare_replay_uses_final_selector_segment_and_never_upscales(tmp_path:
     )
     assert prepared.selected[0].forced is True
     assert prepared.selected[0].change_ratio == 0.0
+    assert prepared.selected[0].global_change == 0.0
+    assert prepared.selected[0].region_intensity == 0.0
     assert prepared.selected[0].confirmed_region == ()
     assert prepared.input_csv_missing is True
     assert prepared.input_context.summarize_window(None, 200.0) == "此窗口内无玩家输入"
@@ -91,43 +94,43 @@ def test_character_similarity_flags_repetition_without_semantic_model() -> None:
     assert character_similarity("打开地图。", "进入战斗并抽了一张牌。") < 0.6
 
 
-def test_just_now_metrics_use_only_observation_body_and_exclude_effect_markers() -> None:
+def test_local_metrics_use_only_observation_body_and_exclude_effect_markers() -> None:
     rows: list[dict[str, object]] = [
         {
             "frame_ts": 123.4,
             "wall": "2026-08-26T12:34:56Z",
-            "text": "【画面】室内场景\n【刚刚】仅亮度变化",
+            "text": "【画面】室内场景\n【局部】仅亮度变化",
             "dropped": None,
         },
         {
             "frame_ts": 124.4,
             "wall": "2026-08-26T12:34:57Z",
-            "text": "【画面】状态面板\n【刚刚】中央数值为42",
+            "text": "【画面】状态面板\n【局部】中央数值为42",
             "dropped": None,
         },
         {
             "frame_ts": 125.4,
             "wall": "2026-08-26T12:34:58Z",
-            "text": "【画面】状态面板\n【刚刚】中央数值为43",
+            "text": "【画面】状态面板\n【局部】中央数值为43",
             "dropped": None,
         },
         {
             "frame_ts": 126.4,
             "wall": "2026-08-26T12:34:59Z",
-            "text": "【画面】没有数字的观察\n【刚刚】r3c5区域时间12:34",
+            "text": "【画面】没有数字的观察\n【局部】r3c5区域时间12:34",
             "dropped": None,
         },
         {
             "frame_ts": 127.4,
             "wall": "2026-08-26T12:35:00Z",
-            "text": "【画面】失败项\n【刚刚】数值99",
+            "text": "【画面】失败项\n【局部】数值99",
             "dropped": "timeout",
         },
     ]
-    assert _extract_just_now(str(rows[0]["text"])) == "仅亮度变化"
-    assert _just_now_statistics(rows) == (4, 1, 2, 1, 8.0)
+    assert _extract_local(str(rows[0]["text"])) == "仅亮度变化"
+    assert _local_statistics(rows) == (4, 1, 2, 1, 8.0)
     informative = [
-        body for _row, body in _just_now_entries(rows) if not body.startswith("仅")
+        body for _row, body in _local_entries(rows) if not body.startswith("仅")
     ]
     assert informative[:2] == ["中央数值为42", "中央数值为43"]
     assert character_similarity(*informative[:2]) > 0.6
@@ -141,3 +144,13 @@ def test_dispatch_interval_defaults_to_zero_and_accepts_production_pacing() -> N
     assert parsed.dispatch_interval == 0.0
     assert not hasattr(parsed, "context_lines")
     assert parser.parse_args([*common, "--dispatch-interval", "1.0"]).dispatch_interval == 1.0
+
+
+def test_metric_echo_detection_only_matches_renderer_values() -> None:
+    row: dict[str, object] = {
+        "text": "【画面】界面显示30%\n【局部】画面上方约38%的区域正在移动",
+        "global_change": 1.6,
+        "region_area_ratio": 38,
+        "region_intensity": 5,
+    }
+    assert _echoed_metric_values(row) == ("38%",)

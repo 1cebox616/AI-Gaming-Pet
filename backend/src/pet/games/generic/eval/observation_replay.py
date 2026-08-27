@@ -37,7 +37,7 @@ from pet.core.config import (
     resolve_llm_profile,
 )
 from pet.core.input_telemetry import ActionInputTimeline, load_action_input_csv
-from pet.games.generic.adapter import GenericVisionAdapter, WindowTitleMap
+from pet.games.generic.adapter import GenericVisionAdapter, WindowTitleMap, _focus_geometry
 
 BACKEND_DIRECTORY = Path(__file__).resolve().parents[5]
 DEFAULT_OUTPUT_ROOT = BACKEND_DIRECTORY / "eval-reports"
@@ -74,6 +74,8 @@ class ReplayFrameSpec:
     region: tuple[str, ...]
     confirmed_region: tuple[str, ...]
     change_ratio: float
+    global_change: float
+    region_intensity: float
     forced: bool
     baseline_monotonic_seconds: float
 
@@ -112,7 +114,7 @@ def _parse_segment(value: str) -> SegmentRange:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="M5-T7.7 离线快线观察日志重放")
+    parser = argparse.ArgumentParser(description="M5-T7.9 离线快线观察日志重放")
     parser.add_argument("--session", action="append", required=True, type=Path)
     parser.add_argument("--segment", type=_parse_segment)
     parser.add_argument("--profile", required=True)
@@ -164,7 +166,7 @@ def _prepare_replay(
     requested_width: int,
     segment: SegmentRange | None,
     title_map: WindowTitleMap,
-    region_sparsity_max: float,
+    region_focus_max: float,
 ) -> PreparedReplay:
     session = session.resolve()
     raw_dir = session / "raw"
@@ -182,7 +184,7 @@ def _prepare_replay(
     title = _session_title(payload)
     process_name = ""
     game = title_map.identify(title, process_name)
-    selector = AdaptiveFrameSelector(region_sparsity_max=region_sparsity_max)
+    selector = AdaptiveFrameSelector(region_sparsity_max=region_focus_max)
     selected: list[ReplayFrameSpec] = []
     source_size: tuple[int, int] | None = None
     included_count = 0
@@ -209,6 +211,8 @@ def _prepare_replay(
                     observation.decision.region_grid,
                     observation.decision.confirmed_region_grid,
                     observation.decision.changed_block_ratio,
+                    observation.comparisons.vs_baseline.mean_amplitude * 100.0,
+                    observation.decision.confirmed_region_intensity * 100.0,
                     observation.decision.forced,
                     observation.decision.baseline_monotonic_seconds,
                 )
@@ -242,7 +246,7 @@ def _adapter_configuration(
     send_width: int,
     timeout: float,
     max_inflight: int,
-    region_sparsity_max: float,
+    region_focus_max: float,
 ) -> AdapterConfig:
     return AdapterConfig(
         generic=GenericVisionConfig(
@@ -250,7 +254,7 @@ def _adapter_configuration(
             send_width=send_width,
             fast_timeout_seconds=timeout,
             max_inflight=max_inflight,
-            region_sparsity_max=region_sparsity_max,
+            region_focus_max=region_focus_max,
             llm_profile=profile,
         )
     )
@@ -264,7 +268,7 @@ async def _run_prepared(
     profile: str,
     max_inflight: int,
     timeout: float,
-    region_sparsity_max: float,
+    region_focus_max: float,
     cost_cap: float,
     prior_cost: float,
     dispatch_interval: float,
@@ -275,7 +279,7 @@ async def _run_prepared(
             send_width=prepared.actual_send_width,
             timeout=timeout,
             max_inflight=max_inflight,
-            region_sparsity_max=region_sparsity_max,
+            region_focus_max=region_focus_max,
         ),
         llm_configuration,
         capture_backend_factory=lambda: (_ for _ in ()).throw(
@@ -333,6 +337,8 @@ async def _run_prepared(
                 item.baseline_monotonic_seconds,
                 confirmed_region=item.confirmed_region,
                 change_ratio=item.change_ratio,
+                global_change=item.global_change,
+                region_intensity=item.region_intensity,
                 forced=item.forced,
             )
             last_dispatch = asyncio.get_running_loop().time()
@@ -373,12 +379,12 @@ def character_similarity(left: str, right: str) -> float:
     return difflib.SequenceMatcher(None, left, right, autojunk=False).ratio()
 
 
-def _extract_just_now(text: str) -> str | None:
-    """Return the first JustNow body, excluding its label and surrounding whitespace."""
+def _extract_local(text: str) -> str | None:
+    """Return the first local body, excluding its label and whitespace."""
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("【刚刚】"):
-            return stripped.removeprefix("【刚刚】").strip()
+        if stripped.startswith("【局部】"):
+            return stripped.removeprefix("【局部】").strip()
     return None
 
 
@@ -392,7 +398,7 @@ def _extract_scene(text: str) -> str | None:
 
 
 def _expected_reason(spec: ReplayFrameSpec) -> str:
-    if spec.forced:
+    if spec.forced and spec.change_ratio == 0.0:
         return "forced"
     if spec.change_ratio <= 0.25:
         return "sparse"
@@ -401,24 +407,24 @@ def _expected_reason(spec: ReplayFrameSpec) -> str:
     return "large"
 
 
-def _just_now_entries(
+def _local_entries(
     rows: Sequence[dict[str, object]],
 ) -> list[tuple[dict[str, object], str]]:
     entries: list[tuple[dict[str, object], str]] = []
     for row in rows:
         if row.get("dropped") is not None:
             continue
-        body = _extract_just_now(str(row.get("text", "")))
+        body = _extract_local(str(row.get("text", "")))
         if body is not None:
             entries.append((row, body))
     return entries
 
 
-def _just_now_statistics(
+def _local_statistics(
     rows: Sequence[dict[str, object]],
 ) -> tuple[int, int, int, int, float]:
     """Return total, only-prefixed, numeric, grid-leaked, and average length."""
-    bodies = [body for _row, body in _just_now_entries(rows)]
+    bodies = [body for _row, body in _local_entries(rows)]
     if not bodies:
         return 0, 0, 0, 0, 0.0
     only_prefixed = sum(body.startswith("仅") for body in bodies)
@@ -431,6 +437,30 @@ def _just_now_statistics(
         numeric += any(character.isdigit() for character in visible)
     average_length = statistics.mean(len("".join(body.split())) for body in bodies)
     return len(bodies), only_prefixed, numeric, grid_leaked, average_length
+
+
+def _segment_shape(values: Sequence[str]) -> tuple[float, float]:
+    if not values:
+        return 0.0, 0.0
+    sentence_counts = [
+        max(1, len([part for part in re.split(r"[。！？!?]+", value) if part.strip()]))
+        for value in values
+    ]
+    character_counts = [len("".join(value.split())) for value in values]
+    return statistics.mean(sentence_counts), statistics.mean(character_counts)
+
+
+def _echoed_metric_values(row: dict[str, object]) -> tuple[str, ...]:
+    text = str(row.get("text", ""))
+    values = [f"{float(row['global_change']):.1f}%"]
+    if row.get("region_area_ratio") is not None:
+        values.extend(
+            (
+                f"{int(row['region_area_ratio'])}%",
+                f"{int(row['region_intensity'])}%",
+            )
+        )
+    return tuple(dict.fromkeys(value for value in values if value in text))
 
 
 def _segments_for_session(path: Path, session: Path) -> tuple[tuple[str, SegmentRange], ...]:
@@ -461,13 +491,13 @@ def _write_review(
     segment_manifest: Path = DEFAULT_SEGMENTS_PATH,
 ) -> None:
     lines = [
-        "# M5-T7.7 离线观察日志复核表",
+        "# M5-T7.9 离线观察日志复核表",
         "",
         "本文件只列机器输出与机械统计，不评价模型能力。有信息复读只比较成功输出中"
-        "【刚刚】正文：先移除以“仅”开头的纯特效段，再按画面时间比较相邻的剩余正文；"
+        "【局部】正文：先移除以“仅”开头的纯特效段，再按画面时间比较相邻的剩余正文；"
         "【画面】不参与。相似度为字符级 SequenceMatcher 重合率，超过 0.6 的相邻对列为"
         "有信息复读候选，需产品负责人判读。",
-        "“仅”占比、数字占比与平均字数均只取【刚刚】标签后的观察正文，不读取时间戳或"
+        "“仅”占比、数字占比与平均字数均只取【局部】标签后的观察正文，不读取时间戳或"
         "其他日志字段；字数为去除空白后的 Unicode 字符数。",
         "",
     ]
@@ -483,48 +513,74 @@ def _write_review(
         ]
         dropped = Counter(str(row["dropped"]) for row in rows if row.get("dropped") is not None)
         successful = [row for row in rows if row.get("dropped") is None]
-        injected = sum(
-            1 for row in successful if row.get("reason") in {"sparse", "coarse"}
-        )
+        focused = [row for row in successful if row.get("region_area_ratio") is not None]
+        injected = len(focused)
         failed_region_requests = sum(
             1
             for row in rows
             if row.get("dropped") is not None
-            and row.get("reason") in {"sparse", "coarse"}
+            and row.get("region_area_ratio") is not None
         )
         reason_counts = Counter(str(row.get("reason")) for row in rows)
-        coarse_successful = [row for row in successful if row.get("reason") == "coarse"]
-        coarse_paired = sum(
-            _extract_just_now(str(row.get("text", ""))) is not None
-            for row in coarse_successful
+        focused_paired = sum(
+            _extract_local(str(row.get("text", ""))) is not None for row in focused
         )
-        large_scenes = [
-            scene
-            for row in successful
-            if row.get("reason") == "large"
-            and (scene := _extract_scene(str(row.get("text", "")))) is not None
-        ]
         input_covered = sum(
             "input" in row and isinstance(row.get("input"), str) and bool(str(row["input"]))
             for row in rows
         )
-        forbidden_just_now = sum(
-            row.get("reason") in {"large", "forced"}
-            and _extract_just_now(str(row.get("text", ""))) is not None
+        forbidden_local = sum(
+            row.get("region_area_ratio") is None
+            and _extract_local(str(row.get("text", ""))) is not None
             for row in successful
         )
         session_reason_counts = session.get("reason_counts")
-        just_now_entries = _just_now_entries(rows)
+        local_entries = _local_entries(rows)
         (
-            just_now,
-            only_just_now,
-            numeric_just_now,
+            local_count,
+            only_local,
+            numeric_local,
             grid_leaked,
-            average_just_now_length,
-        ) = _just_now_statistics(rows)
+            average_local_length,
+        ) = _local_statistics(rows)
         informative_entries = [
-            (row, body) for row, body in just_now_entries if not body.startswith("仅")
+            (row, body) for row, body in local_entries if not body.startswith("仅")
         ]
+        scenes = [
+            scene
+            for row in successful
+            if (scene := _extract_scene(str(row.get("text", "")))) is not None
+        ]
+        local_bodies = [body for _row, body in local_entries]
+        scene_sentences, scene_characters = _segment_shape(scenes)
+        local_sentences, local_characters = _segment_shape(local_bodies)
+        metrics_covered = sum(
+            "global_change" in row
+            and (
+                (row.get("region_area_ratio") is None and row.get("region_intensity") is None)
+                or (
+                    row.get("region_area_ratio") is not None
+                    and row.get("region_intensity") is not None
+                )
+            )
+            for row in rows
+        )
+        output_grid_leaked = sum(
+            GRID_REFERENCE_PATTERN.search(str(row.get("text", ""))) is not None
+            for row in successful
+        )
+        message_grid_leaked = sum(
+            GRID_REFERENCE_PATTERN.search(str(row.get("user_prompt", ""))) is not None
+            for row in rows
+            if row.get("user_prompt")
+        )
+        metric_echoes = [
+            (row, values)
+            for row in successful
+            if (values := _echoed_metric_values(row))
+        ]
+        rate_limited = sum(count for reason, count in dropped.items() if "429" in reason)
+        timed_out = dropped.get("timeout", 0)
         truncated = int(session.get("truncated_count", 0))
         average_visible_tokens = session.get("average_visible_output_tokens")
         exact_repeats = sum(
@@ -555,42 +611,43 @@ def _write_review(
                     else "- TTFT 中位 / P90：无可测流式首字"
                 ),
                 f"- 实际花费：${float(session['total_cost_usd']):.9f}",
-                f"- 区域提示注入次数（sparse + coarse 成功响应）：{injected}",
+                f"- 聚焦区域注入次数（成功响应）：{injected}",
                 f"- 失败请求中的区域提示次数：{failed_region_requests}",
                 f"- reason 分布：{dict(reason_counts)}",
                 f"- session reason 计数与 JSONL 一致："
                 f"{session_reason_counts == {reason: reason_counts[reason] for reason in ('sparse', 'coarse', 'large', 'forced')}}",
                 (
-                    f"- 粗定位帧【刚刚】配对率：{coarse_paired / len(coarse_successful):.2%} "
-                    f"（{coarse_paired}/{len(coarse_successful)}）"
-                    if coarse_successful
-                    else "- 粗定位帧【刚刚】配对率：无粗定位成功帧"
-                ),
-                (
-                    f"- 大幅变化帧【画面】平均字数："
-                    f"{statistics.mean(len(''.join(value.split())) for value in large_scenes):.3f}"
-                    if large_scenes
-                    else "- 大幅变化帧【画面】平均字数：无大幅变化成功帧"
+                    f"- 【局部】/聚焦区域配对率：{focused_paired / len(focused):.2%} "
+                    f"（{focused_paired}/{len(focused)}）"
+                    if focused
+                    else "- 【局部】/聚焦区域配对率：无聚焦区域成功帧"
                 ),
                 f"- input 字段覆盖率：{input_covered / len(rows):.2%} "
                 f"（{input_covered}/{len(rows)}）",
-                f"- 心跳/大幅变化帧违规【刚刚】条数：{forbidden_just_now}",
-                f"- 【刚刚】段出现次数：{just_now}",
+                f"- 无聚焦区域帧违规【局部】条数：{forbidden_local}",
+                f"- 【局部】段出现次数：{local_count}",
                 (
-                    f"- “仅”开头【刚刚】占比：{only_just_now / just_now:.2%} "
-                    f"（{only_just_now}/{just_now}）"
-                    if just_now
-                    else "- “仅”开头【刚刚】占比：无【刚刚】段"
+                    f"- “仅”开头【局部】占比：{only_local / local_count:.2%} "
+                    f"（{only_local}/{local_count}）"
+                    if local_count
+                    else "- “仅”开头【局部】占比：无【局部】段"
                 ),
                 (
-                    f"- 含具体数字的【刚刚】占比：{numeric_just_now / just_now:.2%} "
-                    f"（{numeric_just_now}/{just_now}）"
-                    if just_now
-                    else "- 含具体数字的【刚刚】占比：无【刚刚】段"
+                    f"- 含具体数字的【局部】占比：{numeric_local / local_count:.2%} "
+                    f"（{numeric_local}/{local_count}）"
+                    if local_count
+                    else "- 含具体数字的【局部】占比：无【局部】段"
                 ),
-                f"- 格子泄漏条数：{grid_leaked}",
-                f"- 【刚刚】平均字数：{average_just_now_length:.3f}",
-                f"- 有信息【刚刚】段数：{len(informative_entries)}",
+                f"- 格子泄漏条数（输出全文）：{output_grid_leaked}",
+                f"- 格子泄漏条数（消息体）：{message_grid_leaked}",
+                f"- 注入指标复述候选：{len(metric_echoes)}",
+                f"- 【局部】平均字数：{average_local_length:.3f}",
+                f"- 有信息【局部】段数：{len(informative_entries)}",
+                f"- 【画面】平均句数 / 字数：{scene_sentences:.3f} / {scene_characters:.3f}",
+                f"- 【局部】平均句数 / 字数：{local_sentences:.3f} / {local_characters:.3f}",
+                f"- 三指标 JSONL 覆盖率：{metrics_covered / len(rows):.2%} "
+                f"（{metrics_covered}/{len(rows)}）",
+                f"- 429 / 超时次数：{rate_limited} / {timed_out}",
                 f"- 截断条数：{truncated}",
                 f"- 有信息逐字重复条数：{exact_repeats}",
                 f"- 平均可见输出 token：{average_visible_tokens}",
@@ -607,6 +664,17 @@ def _write_review(
                 f"- 上传宽度：请求 {prepared.requested_send_width}，raw {prepared.source_width}，"
                 f"实际 {prepared.actual_send_width}；未放大，低于生产默认。",
                 "",
+                "### observations.md 新格式前 10 条",
+                "",
+            ]
+        )
+        markdown_blocks = (directory / "observations.md").read_text(
+            encoding="utf-8"
+        ).strip().split("\n\n")
+        lines.extend(markdown_blocks[2:12])
+        lines.extend(
+            [
+                "",
                 "### 全部观察",
                 "",
             ]
@@ -616,7 +684,7 @@ def _write_review(
                 lines.append(f"- {row['wall']} · {row['game']}：{row['text']}")
             else:
                 lines.append(f"- {row['wall']} · {row['game']}：[丢弃：{row['dropped']}]")
-        lines.extend(["", "### 有信息复读候选（相邻相似度 > 0.6）", ""])
+        lines.extend(["", "### 有信息【局部】复读候选（相邻相似度 > 0.6）", ""])
         repeats = []
         for (previous, previous_body), (current, current_body) in zip(
             informative_entries, informative_entries[1:]
@@ -640,6 +708,14 @@ def _write_review(
                 )
         else:
             lines.append("无。")
+        lines.extend(["", "### 注入指标复述候选", ""])
+        if metric_echoes:
+            for row, values in metric_echoes:
+                lines.append(
+                    f"- {row['frame_ts']}（{', '.join(values)}）：{row['text']}"
+                )
+        else:
+            lines.append("无。")
         specs_by_ts = {
             item.timing.monotonic_seconds: item for item in prepared.selected
         }
@@ -655,29 +731,38 @@ def _write_review(
         if metadata_samples:
             lines.extend(
                 [
-                    "| 帧单调秒 | reason 日志 / selector | change_ratio 日志 / selector | input | 一致 |",
+                    "| 帧单调秒 | 全局变化 日志/selector | 区域占比 日志/selector | 区域强度 日志/selector | 一致 |",
                     "|---:|---|---|---|---|",
                 ]
             )
             for row, spec in metadata_samples:
                 expected_reason = _expected_reason(spec)
-                logged_ratio = float(row["change_ratio"])
-                expected_ratio = spec.change_ratio
+                expected_area = (
+                    _focus_geometry(spec.confirmed_region)[1]
+                    if expected_reason != "forced" and spec.region
+                    else None
+                )
+                logged_area = row.get("region_area_ratio")
+                logged_intensity = row.get("region_intensity")
+                expected_intensity = spec.region_intensity if expected_area is not None else None
                 matches = (
                     row.get("reason") == expected_reason
-                    and logged_ratio == round(expected_ratio, 2)
+                    and float(row["global_change"]) == round(spec.global_change, 1)
+                    and logged_area == (round(expected_area) if expected_area is not None else None)
+                    and logged_intensity == (
+                        round(expected_intensity) if expected_intensity is not None else None
+                    )
                 )
-                input_text = str(row.get("input", "")).replace("|", "\\|")
                 lines.append(
-                    f"| {float(row['frame_ts']):.6f} | {row.get('reason')} / {expected_reason} | "
-                    f"{logged_ratio:.2f} / {expected_ratio:.6f} | {input_text} | {matches} |"
+                    f"| {float(row['frame_ts']):.6f} | {row.get('global_change')} / "
+                    f"{spec.global_change:.6f} | {logged_area} / {expected_area} | "
+                    f"{logged_intensity} / {expected_intensity} | {matches} |"
                 )
         prompt_rows = [row for row in successful if row.get("user_prompt")]
         sampled: list[dict[str, object]] = []
         for predicate in (
-            lambda row: row.get("reason") == "sparse",
-            lambda row: row.get("reason") == "coarse",
-            lambda row: row.get("reason") == "large",
+            lambda row: row.get("region_area_ratio") is not None,
+            lambda row: row.get("region_area_ratio") is None and row.get("reason") != "forced",
             lambda row: row.get("reason") == "forced",
             lambda row: row.get("input") != "无输入",
         ):
@@ -729,6 +814,18 @@ def _write_review(
                     lines.append("- 该机械区间没有观察条目。")
                 lines.append("")
         lines.append("")
+    lines.extend(
+        [
+            "## observation-fast.md 全文",
+            "",
+            "```text",
+            (BACKEND_DIRECTORY / "prompts" / "generic" / "observation-fast.md")
+            .read_text(encoding="utf-8")
+            .rstrip(),
+            "```",
+            "",
+        ]
+    )
     (output_root / "review.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
@@ -782,7 +879,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.send_width,
                 arguments.segment,
                 title_map,
-                generic.region_sparsity_max,
+                generic.region_focus_max,
             )
             for session in arguments.session
         )
@@ -824,7 +921,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     profile=arguments.profile,
                     max_inflight=arguments.max_inflight,
                     timeout=arguments.timeout,
-                    region_sparsity_max=generic.region_sparsity_max,
+                    region_focus_max=generic.region_focus_max,
                     cost_cap=arguments.cost_cap,
                     prior_cost=running_cost,
                     dispatch_interval=arguments.dispatch_interval,
@@ -864,7 +961,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "production_default_send_width": PRODUCTION_SEND_WIDTH,
                 "timeout_seconds": arguments.timeout,
                 "dispatch_interval_seconds": arguments.dispatch_interval,
-                "region_sparsity_max": generic.region_sparsity_max,
+                "region_focus_max": generic.region_focus_max,
                 "cost_cap_usd": arguments.cost_cap,
             },
             "price": {

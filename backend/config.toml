@@ -61,7 +61,8 @@ fast_timeout_seconds = 5.0
 max_inflight = 4
 input_context = true
 observation_log_dir = "recordings/observation"
-region_sparsity_max = 0.25
+# 待实测：吸收原 region_sparsity_max=0.25 与粗定位档，只控制是否提供聚焦区域。
+region_focus_max = 0.50
 llm_profile = "vision_fast"
 cost_warn_per_hour = 1.0
 
@@ -81,6 +82,6 @@ model = "qwen/qwen3.7-flash"
 provider = "alibaba"
 temperature = 0.0
 timeout_seconds = 5.0
-max_tokens = 80
+max_tokens = 200
 input_price_per_million_usd = 0.03
 output_price_per_million_usd = 0.13

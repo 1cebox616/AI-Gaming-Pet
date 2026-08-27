@@ -20,7 +20,7 @@ from typing import Literal, cast
 
 import httpx
 
-from pet.core.config import DEFAULT_REGION_SPARSITY_MAX, LlmConfig, load_config
+from pet.core.config import LlmConfig, load_config
 from pet.core.llm import (
     LlmError,
     LlmImage,
@@ -34,6 +34,7 @@ from pet.core.llm import (
 )
 
 BACKEND_DIRECTORY = Path(__file__).resolve().parents[5]
+DEFAULT_REGION_SPARSITY_MAX = 0.25
 FAST_PROMPT_PATH = BACKEND_DIRECTORY / "prompts" / "generic" / "observation-fast.md"
 DEEP_PROMPT_PATH = BACKEND_DIRECTORY / "prompts" / "generic" / "observation-deep.md"
 DEFAULT_OUTPUT_ROOT = BACKEND_DIRECTORY / "eval-reports"
