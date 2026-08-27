@@ -290,6 +290,7 @@ def test_sparse_confirmed_blocks_keep_exact_region_grid() -> None:
 
     assert decision.changed_block_ratio <= 0.25
     assert decision.region_grid == ("r1c1",)
+    assert decision.confirmed_region_grid == ("r1c1",)
     assert decision.region_sparsity_suppressed is False
 
 
@@ -306,6 +307,7 @@ def test_large_change_uploads_as_persistent_without_region_grid() -> None:
     assert decision.reason == "persistent_change"
     assert decision.changed_block_ratio >= 0.60
     assert decision.region_grid == ()
+    assert len(decision.confirmed_region_grid) == decision.changed_block_count
     assert decision.region_sparsity_suppressed is True
 
 

@@ -12,6 +12,7 @@ from PIL import Image
 from pet.games.generic.adapter import TitleRule, WindowTitleMap
 from pet.games.generic.eval.observation_replay import (
     SegmentRange,
+    _extract_scene,
     _extract_just_now,
     _just_now_entries,
     _just_now_statistics,
@@ -77,6 +78,9 @@ def test_prepare_replay_uses_final_selector_segment_and_never_upscales(tmp_path:
     assert prepared.selected[0].baseline_monotonic_seconds <= (
         prepared.selected[0].timing.monotonic_seconds
     )
+    assert prepared.selected[0].forced is True
+    assert prepared.selected[0].change_ratio == 0.0
+    assert prepared.selected[0].confirmed_region == ()
     assert prepared.input_csv_missing is True
     assert prepared.input_context.summarize_window(None, 200.0) == "此窗口内无玩家输入"
     assert before == after
@@ -127,6 +131,7 @@ def test_just_now_metrics_use_only_observation_body_and_exclude_effect_markers()
     ]
     assert informative[:2] == ["中央数值为42", "中央数值为43"]
     assert character_similarity(*informative[:2]) > 0.6
+    assert _extract_scene(str(rows[1]["text"])) == "状态面板"
 
 
 def test_dispatch_interval_defaults_to_zero_and_accepts_production_pacing() -> None:

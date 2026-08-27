@@ -72,6 +72,9 @@ class ReplayFrameSpec:
     timing: ReplayFrameTime
     relative_seconds: float
     region: tuple[str, ...]
+    confirmed_region: tuple[str, ...]
+    change_ratio: float
+    forced: bool
     baseline_monotonic_seconds: float
 
 
@@ -109,7 +112,7 @@ def _parse_segment(value: str) -> SegmentRange:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="M5-T7.6 离线快线观察日志重放")
+    parser = argparse.ArgumentParser(description="M5-T7.7 离线快线观察日志重放")
     parser.add_argument("--session", action="append", required=True, type=Path)
     parser.add_argument("--segment", type=_parse_segment)
     parser.add_argument("--profile", required=True)
@@ -204,6 +207,9 @@ def _prepare_replay(
                     timing,
                     relative,
                     observation.decision.region_grid,
+                    observation.decision.confirmed_region_grid,
+                    observation.decision.changed_block_ratio,
+                    observation.decision.forced,
                     observation.decision.baseline_monotonic_seconds,
                 )
             )
@@ -325,6 +331,9 @@ async def _run_prepared(
                 prepared.game,
                 item.region,
                 item.baseline_monotonic_seconds,
+                confirmed_region=item.confirmed_region,
+                change_ratio=item.change_ratio,
+                forced=item.forced,
             )
             last_dispatch = asyncio.get_running_loop().time()
             if prior_cost + adapter.total_cost_usd > cost_cap * 1.5:
@@ -371,6 +380,25 @@ def _extract_just_now(text: str) -> str | None:
         if stripped.startswith("【刚刚】"):
             return stripped.removeprefix("【刚刚】").strip()
     return None
+
+
+def _extract_scene(text: str) -> str | None:
+    """Return the first Scene body, excluding its label and whitespace."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("【画面】"):
+            return stripped.removeprefix("【画面】").strip()
+    return None
+
+
+def _expected_reason(spec: ReplayFrameSpec) -> str:
+    if spec.forced:
+        return "forced"
+    if spec.change_ratio <= 0.25:
+        return "sparse"
+    if spec.change_ratio <= 0.50:
+        return "coarse"
+    return "large"
 
 
 def _just_now_entries(
@@ -433,7 +461,7 @@ def _write_review(
     segment_manifest: Path = DEFAULT_SEGMENTS_PATH,
 ) -> None:
     lines = [
-        "# M5-T7.6 离线观察日志复核表",
+        "# M5-T7.7 离线观察日志复核表",
         "",
         "本文件只列机器输出与机械统计，不评价模型能力。有信息复读只比较成功输出中"
         "【刚刚】正文：先移除以“仅”开头的纯特效段，再按画面时间比较相邻的剩余正文；"
@@ -455,10 +483,37 @@ def _write_review(
         ]
         dropped = Counter(str(row["dropped"]) for row in rows if row.get("dropped") is not None)
         successful = [row for row in rows if row.get("dropped") is None]
-        injected = sum(1 for row in successful if row.get("region"))
-        failed_region_requests = sum(
-            1 for row in rows if row.get("dropped") is not None and row.get("region")
+        injected = sum(
+            1 for row in successful if row.get("reason") in {"sparse", "coarse"}
         )
+        failed_region_requests = sum(
+            1
+            for row in rows
+            if row.get("dropped") is not None
+            and row.get("reason") in {"sparse", "coarse"}
+        )
+        reason_counts = Counter(str(row.get("reason")) for row in rows)
+        coarse_successful = [row for row in successful if row.get("reason") == "coarse"]
+        coarse_paired = sum(
+            _extract_just_now(str(row.get("text", ""))) is not None
+            for row in coarse_successful
+        )
+        large_scenes = [
+            scene
+            for row in successful
+            if row.get("reason") == "large"
+            and (scene := _extract_scene(str(row.get("text", "")))) is not None
+        ]
+        input_covered = sum(
+            "input" in row and isinstance(row.get("input"), str) and bool(str(row["input"]))
+            for row in rows
+        )
+        forbidden_just_now = sum(
+            row.get("reason") in {"large", "forced"}
+            and _extract_just_now(str(row.get("text", ""))) is not None
+            for row in successful
+        )
+        session_reason_counts = session.get("reason_counts")
         just_now_entries = _just_now_entries(rows)
         (
             just_now,
@@ -500,8 +555,26 @@ def _write_review(
                     else "- TTFT 中位 / P90：无可测流式首字"
                 ),
                 f"- 实际花费：${float(session['total_cost_usd']):.9f}",
-                f"- 区域提示注入次数（成功响应）：{injected}",
+                f"- 区域提示注入次数（sparse + coarse 成功响应）：{injected}",
                 f"- 失败请求中的区域提示次数：{failed_region_requests}",
+                f"- reason 分布：{dict(reason_counts)}",
+                f"- session reason 计数与 JSONL 一致："
+                f"{session_reason_counts == {reason: reason_counts[reason] for reason in ('sparse', 'coarse', 'large', 'forced')}}",
+                (
+                    f"- 粗定位帧【刚刚】配对率：{coarse_paired / len(coarse_successful):.2%} "
+                    f"（{coarse_paired}/{len(coarse_successful)}）"
+                    if coarse_successful
+                    else "- 粗定位帧【刚刚】配对率：无粗定位成功帧"
+                ),
+                (
+                    f"- 大幅变化帧【画面】平均字数："
+                    f"{statistics.mean(len(''.join(value.split())) for value in large_scenes):.3f}"
+                    if large_scenes
+                    else "- 大幅变化帧【画面】平均字数：无大幅变化成功帧"
+                ),
+                f"- input 字段覆盖率：{input_covered / len(rows):.2%} "
+                f"（{input_covered}/{len(rows)}）",
+                f"- 心跳/大幅变化帧违规【刚刚】条数：{forbidden_just_now}",
                 f"- 【刚刚】段出现次数：{just_now}",
                 (
                     f"- “仅”开头【刚刚】占比：{only_just_now / just_now:.2%} "
@@ -567,12 +640,46 @@ def _write_review(
                 )
         else:
             lines.append("无。")
+        specs_by_ts = {
+            item.timing.monotonic_seconds: item for item in prepared.selected
+        }
+        lines.extend(["", "### 新字段与 selector 指标抽样比对", ""])
+        metadata_samples: list[tuple[dict[str, object], ReplayFrameSpec]] = []
+        for reason in ("sparse", "coarse", "large", "forced"):
+            row = next((item for item in rows if item.get("reason") == reason), None)
+            if row is None:
+                continue
+            spec = specs_by_ts.get(float(row["frame_ts"]))
+            if spec is not None:
+                metadata_samples.append((row, spec))
+        if metadata_samples:
+            lines.extend(
+                [
+                    "| 帧单调秒 | reason 日志 / selector | change_ratio 日志 / selector | input | 一致 |",
+                    "|---:|---|---|---|---|",
+                ]
+            )
+            for row, spec in metadata_samples:
+                expected_reason = _expected_reason(spec)
+                logged_ratio = float(row["change_ratio"])
+                expected_ratio = spec.change_ratio
+                matches = (
+                    row.get("reason") == expected_reason
+                    and logged_ratio == round(expected_ratio, 2)
+                )
+                input_text = str(row.get("input", "")).replace("|", "\\|")
+                lines.append(
+                    f"| {float(row['frame_ts']):.6f} | {row.get('reason')} / {expected_reason} | "
+                    f"{logged_ratio:.2f} / {expected_ratio:.6f} | {input_text} | {matches} |"
+                )
         prompt_rows = [row for row in successful if row.get("user_prompt")]
         sampled: list[dict[str, object]] = []
         for predicate in (
-            lambda row: not row.get("region"),
-            lambda row: bool(row.get("region")),
-            lambda row: "此窗口内无玩家输入" not in str(row.get("user_prompt", "")),
+            lambda row: row.get("reason") == "sparse",
+            lambda row: row.get("reason") == "coarse",
+            lambda row: row.get("reason") == "large",
+            lambda row: row.get("reason") == "forced",
+            lambda row: row.get("input") != "无输入",
         ):
             match = next((row for row in prompt_rows if predicate(row)), None)
             if match is not None and match not in sampled:

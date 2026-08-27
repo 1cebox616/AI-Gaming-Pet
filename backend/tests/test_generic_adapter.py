@@ -22,8 +22,13 @@ from pet.core.input_telemetry import ActionInputEvent, ActionInputTimeline
 from pet.games.generic.adapter import (
     FAST_PROMPT_PATH,
     GenericVisionAdapter,
+    ObservationLog,
+    ObservationRecord,
     TitleRule,
     WindowTitleMap,
+    _change_reason,
+    _coarse_location,
+    _user_prompt,
 )
 
 
@@ -61,7 +66,10 @@ class AlwaysSelect:
         return SimpleNamespace(
             decision=SimpleNamespace(
                 should_save=True,
+                forced=False,
                 region_grid=self.region,
+                confirmed_region_grid=self.region,
+                changed_block_ratio=len(self.region) / 144.0,
                 baseline_monotonic_seconds=_now - 1.26,
             )
         )
@@ -278,6 +286,9 @@ def test_frames_call_model_and_are_logged_in_frame_order(tmp_path: Path) -> None
     assert all("ttft_ms" in row for row in rows)
     assert [row["text"] for row in rows] == ["观察 1", "观察 2"]
     assert rows[0]["region"] == ["r2c3"]
+    assert rows[0]["reason"] == "sparse"
+    assert rows[0]["change_ratio"] == 0.01
+    assert rows[0]["input"] == "W 按住 0.5 秒"
     first_prompt = str(client.calls[0]["user_prompt"])
     second_prompt = str(client.calls[1]["user_prompt"])
     assert "最近观察" not in first_prompt
@@ -294,6 +305,16 @@ def test_frames_call_model_and_are_logged_in_frame_order(tmp_path: Path) -> None
     assert "对象本身没有出现、消失或移动" in first_prompt
     assert "以“仅”开头且总长四到六个字" in first_prompt
     assert rows[0]["user_prompt"] == first_prompt
+    markdown = (session / "observations.md").read_text(encoding="utf-8")
+    assert "（变化 1%）" in markdown
+    assert "｜输入：W 按住 0.5 秒" in markdown
+    summary = json.loads((session / "session.json").read_text(encoding="utf-8"))
+    assert summary["reason_counts"] == {
+        "sparse": 2,
+        "coarse": 0,
+        "large": 0,
+        "forced": 0,
+    }
     assert statuses[-1].summary["game"] == "Grey Zone Warfare"  # type: ignore[union-attr]
     assert statuses[-1].summary["input_context"] == "yes"  # type: ignore[union-attr]
     assert backend.closed and client.closed
@@ -416,12 +437,18 @@ def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
             "Grey Zone Warfare",
             ("r2c3",),
             0.0,
+            confirmed_region=("r2c3",),
+            change_ratio=1 / 144,
+            forced=False,
         )
         await adapter.submit_replay_frame(
             _frame(2),
             "Grey Zone Warfare",
             (),
             1.0,
+            confirmed_region=(),
+            change_ratio=0.0,
+            forced=True,
         )
         await adapter.finish_replay()
 
@@ -434,7 +461,7 @@ def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
     assert "观察 1" not in str(client.calls[1]["user_prompt"])
     assert "最近观察" not in str(client.calls[1]["user_prompt"])
     assert "玩家输入：\n左键点击 1 次" in str(client.calls[1]["user_prompt"])
-    assert "必须恰好输出一行" in str(
+    assert "本帧为定时快照，此前约 1.0 秒未检测到显著变化" in str(
         client.calls[1]["user_prompt"]
     )
     assert "禁止输出【刚刚】" in str(client.calls[1]["user_prompt"])
@@ -444,6 +471,15 @@ def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
     assert session["truncated_count"] == 0
     assert session["average_visible_output_tokens"] == 20.0
     assert session["parameters"]["input_context"] is True
+    assert session["reason_counts"] == {
+        "sparse": 1,
+        "coarse": 0,
+        "large": 0,
+        "forced": 1,
+    }
+    markdown = (output / "observations.md").read_text(encoding="utf-8")
+    assert "（心跳）" in markdown
+    assert "｜输入：左键点击 1 次" in markdown
 
 
 def test_input_context_false_has_no_listener_message_segment_or_status_flag(
@@ -481,6 +517,7 @@ def test_input_context_false_has_no_listener_message_segment_or_status_flag(
     assert input_listener_created is False
     assert "玩家输入" not in str(client.calls[0]["user_prompt"])
     assert "玩家输入" not in str(rows[0]["user_prompt"])
+    assert rows[0]["input"] == "无输入"
     payload = json.loads((session / "session.json").read_text(encoding="utf-8"))
     assert payload["parameters"]["input_context"] is False
     assert statuses[-1].summary["input_context"] == "no"  # type: ignore[union-attr]
@@ -490,7 +527,7 @@ def test_fast_prompt_contains_two_part_contract_without_concrete_examples() -> N
     prompt = FAST_PROMPT_PATH.read_text(encoding="utf-8")
     assert "固定先输出【画面】" in prompt
     assert "不超过 25 个汉字" in prompt
-    assert "仅当用户消息提供了变化区域信息时，再输出【刚刚】" in prompt
+    assert "格子清单与粗定位同样属于变化区域信息" in prompt
     assert "不超过 40 个汉字" in prompt
     assert "变化区域的报告优先级（高者优先占用字数）" in prompt
     assert "可读出的文字与数字" in prompt
@@ -503,12 +540,16 @@ def test_fast_prompt_contains_two_part_contract_without_concrete_examples() -> N
     assert "读不清必须说“读不清”" in prompt
     assert "悬浮信息框或状态面板是画面主体" in prompt
     assert "场景没有改变时" in prompt and "相似是正常的" in prompt
-    assert "只描述所指区域现在是什么" in prompt
+    assert "只描述所指格子或方位现在是什么" in prompt
     assert "较上一帧" in prompt and "此前" in prompt and "原本" in prompt
-    assert "没有变化区域信息时，必须省略【刚刚】" in prompt
+    assert "大范围画面变化或定时心跳快照时，必须省略【刚刚】" in prompt
     assert "玩家输入" in prompt
     assert "“玩家输入”不能触发这一段" in prompt
     assert "不得复述任何键名、按键次数或时间间隔" in prompt
+    assert "鼠标大幅移动时，当前帧可能是视角转动后的新朝向" in prompt
+    assert "窗口内无输入而画面有变化时，该变化并非玩家操作所致" in prompt
+    assert "不得写出任何归因判断" in prompt
+    assert "上限放宽到 40 个汉字" in prompt
     assert "自然方位" in prompt
     assert "表明玩家" in prompt
     assert "不得编造" in prompt
@@ -526,3 +567,135 @@ def test_fast_prompt_contains_two_part_contract_without_concrete_examples() -> N
         "r8c1",
     )
     assert not [value for value in forbidden_concrete_examples if value in prompt]
+
+
+def test_coarse_location_maps_nine_grid_and_bbox_boundaries() -> None:
+    assert _coarse_location(("r1c1",)) == "左上"
+    assert _coarse_location(("r5c3",)) == "左上"
+    assert _coarse_location(("r5c4",)) == "上方"
+    assert _coarse_location(("r6c3",)) == "左侧"
+    assert _coarse_location(("r6c4",)) == "中央"
+    assert _coarse_location(("r11c7",)) == "右下"
+    assert _coarse_location(("r16c9",)) == "右下"
+    assert _coarse_location(("r1c1", "r16c9")) == "中央"
+
+
+def test_prompt_ladder_has_sparse_coarse_large_and_forced_templates() -> None:
+    assert _change_reason(False, 0.25) == "sparse"
+    assert _change_reason(False, 0.250001) == "coarse"
+    assert _change_reason(False, 0.50) == "coarse"
+    assert _change_reason(False, 0.500001) == "large"
+    assert _change_reason(True, 0.0) == "forced"
+    assert _change_reason(True, 0.80) == "large"
+    sparse = _user_prompt(
+        "Fixture",
+        "此窗口内无玩家输入",
+        ("r2c3",),
+        reason="sparse",
+        change_ratio=0.24,
+        coarse_location=None,
+        baseline_seconds_ago=1.26,
+    )
+    assert "与 1.3 秒前的变化基线相比" in sparse
+    assert "r2c3" in sparse
+    assert "必须恰好输出两行" in sparse
+
+    coarse = _user_prompt(
+        "Fixture",
+        None,
+        (),
+        reason="coarse",
+        change_ratio=0.38,
+        coarse_location="左上",
+        baseline_seconds_ago=2.0,
+    )
+    assert "画面变化集中于左上，约 38% 区域" in coarse
+    assert "r2c3" not in coarse
+    assert "必须恰好输出两行" in coarse
+
+    large = _user_prompt(
+        "Fixture",
+        None,
+        (),
+        reason="large",
+        change_ratio=0.62,
+        coarse_location=None,
+        baseline_seconds_ago=3.0,
+    )
+    assert "本帧存在大范围画面变化（约 62% 区域），未提供具体位置" in large
+    assert "40个为硬上限" in large
+    assert "禁止输出【刚刚】" in large
+
+    forced = _user_prompt(
+        "Fixture",
+        None,
+        (),
+        reason="forced",
+        change_ratio=0.0,
+        coarse_location=None,
+        baseline_seconds_ago=60.04,
+    )
+    assert "本帧为定时快照，此前约 60.0 秒未检测到显著变化" in forced
+    assert "25个为硬上限" in forced
+    assert "禁止输出【刚刚】" in forced
+
+
+def test_observation_log_writes_mechanical_fields_markers_and_reason_counts(
+    tmp_path: Path,
+) -> None:
+    log = ObservationLog(tmp_path / "mechanical-log", {}, exact_directory=True)
+    fixtures = (
+        ("sparse", 0.12, None, "W 按住 0.5 秒"),
+        ("coarse", 0.38, "左上", "无输入"),
+        ("large", 0.62, None, "无输入"),
+        ("forced", 0.0, None, "无输入"),
+    )
+    for sequence, (reason, ratio, location, input_text) in enumerate(fixtures, start=1):
+        log.append(
+            ObservationRecord(
+                seq=sequence,
+                frame_ts=float(sequence),
+                wall=f"2026-08-26T12:00:0{sequence}+00:00",
+                game="Fixture",
+                text="【画面】当前场景",
+                region=("r2c3",) if reason == "sparse" else None,
+                reason=reason,  # type: ignore[arg-type]
+                change_ratio=ratio,
+                input=input_text,
+                coarse_location=location,
+                latency_ms=10.0,
+                ttft_ms=5.0,
+                dropped=None,
+                cost_usd=0.0,
+                model_called=True,
+                visible_output_tokens=4,
+                truncated=False,
+            )
+        )
+    log.close()
+
+    directory = tmp_path / "mechanical-log"
+    rows = [
+        json.loads(line)
+        for line in (directory / "observations.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [(row["reason"], row["change_ratio"], row["input"]) for row in rows] == [
+        ("sparse", 0.12, "W 按住 0.5 秒"),
+        ("coarse", 0.38, "无输入"),
+        ("large", 0.62, "无输入"),
+        ("forced", 0.0, "无输入"),
+    ]
+    markdown = (directory / "observations.md").read_text(encoding="utf-8")
+    assert "（变化 12%）" in markdown
+    assert "（变化 38%·左上）" in markdown
+    assert "（大幅变化 62%）" in markdown
+    assert "（心跳）" in markdown
+    assert "｜输入：W 按住 0.5 秒" in markdown
+    assert markdown.count("｜无输入") == 3
+    session = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+    assert session["reason_counts"] == {
+        "sparse": 1,
+        "coarse": 1,
+        "large": 1,
+        "forced": 1,
+    }

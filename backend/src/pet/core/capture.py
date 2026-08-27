@@ -875,6 +875,7 @@ class SelectionDecision:
     changed_block_count: int
     changed_block_ratio: float
     region_grid: tuple[str, ...]
+    confirmed_region_grid: tuple[str, ...]
     region_sparsity_suppressed: bool
     floor_median: float
     baseline_monotonic_seconds: float = field(compare=False)
@@ -997,16 +998,17 @@ class AdaptiveFrameSelector:
 
         changed_count = int(np.count_nonzero(confirmed))
         changed_ratio = changed_count / confirmed.size
+        confirmed_region_grid = tuple(
+            f"r{row + 1}c{column + 1}"
+            for row, column in np.argwhere(confirmed)
+        )
         if changed_count:
             candidate_reason: DecisionReason = "persistent_change"
             region_sparsity_suppressed = changed_ratio > self.region_sparsity_max
             region_grid = (
                 ()
                 if region_sparsity_suppressed
-                else tuple(
-                    f"r{row + 1}c{column + 1}"
-                    for row, column in np.argwhere(confirmed)
-                )
+                else confirmed_region_grid
             )
         else:
             candidate_reason = "no_change"
@@ -1022,6 +1024,7 @@ class AdaptiveFrameSelector:
                 "forced",
                 0,
                 0.0,
+                (),
                 (),
                 False,
                 float(np.median(floors)),
@@ -1041,6 +1044,7 @@ class AdaptiveFrameSelector:
                     changed_count,
                     changed_ratio,
                     region_grid,
+                    confirmed_region_grid,
                     region_sparsity_suppressed,
                     float(np.median(floors)),
                     baseline_at,
@@ -1054,6 +1058,7 @@ class AdaptiveFrameSelector:
                     changed_count,
                     changed_ratio,
                     region_grid,
+                    confirmed_region_grid,
                     region_sparsity_suppressed,
                     float(np.median(floors)),
                     baseline_at,
@@ -1066,6 +1071,7 @@ class AdaptiveFrameSelector:
                     changed_count,
                     changed_ratio,
                     region_grid,
+                    confirmed_region_grid,
                     region_sparsity_suppressed,
                     float(np.median(floors)),
                     baseline_at,
@@ -1081,6 +1087,7 @@ class AdaptiveFrameSelector:
                     "no_change",
                     0,
                     0.0,
+                    (),
                     (),
                     False,
                     float(np.median(floors)),
