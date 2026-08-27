@@ -275,6 +275,7 @@ def test_frames_call_model_and_are_logged_in_frame_order(tmp_path: Path) -> None
 
     session, rows = asyncio.run(scenario())
     assert [row["frame_ts"] for row in rows] == [1.0, 2.0]
+    assert all("ttft_ms" in row for row in rows)
     assert [row["text"] for row in rows] == ["观察 1", "观察 2"]
     assert rows[0]["region"] == ["r2c3"]
     first_prompt = str(client.calls[0]["user_prompt"])
@@ -289,6 +290,8 @@ def test_frames_call_model_and_are_logged_in_frame_order(tmp_path: Path) -> None
     assert "必须恰好输出两行" in first_prompt
     assert "25个为硬上限" in first_prompt
     assert "40个为硬上限" in first_prompt
+    assert "格子编号只是定位信息，输出中不得出现" in first_prompt
+    assert "对象本身没有出现、消失或移动" in first_prompt
     assert "以“仅”开头且总长四到六个字" in first_prompt
     assert rows[0]["user_prompt"] == first_prompt
     assert statuses[-1].summary["game"] == "Grey Zone Warfare"  # type: ignore[union-attr]
@@ -493,8 +496,10 @@ def test_fast_prompt_contains_two_part_contract_without_concrete_examples() -> N
     assert "可读出的文字与数字" in prompt
     assert "对象的出现、消失、移动" in prompt
     assert "界面结构与状态图标变化" in prompt
-    assert "仅当区域内没有上述任何内容时才报告" in prompt
     assert "四到六个字结束" in prompt
+    assert "格子编号（形如 r3c5）是系统的定位信息" in prompt
+    assert "判断依据是“发生变化的是什么”" in prompt
+    assert "是否出现格子编号" in prompt
     assert "读不清必须说“读不清”" in prompt
     assert "悬浮信息框或状态面板是画面主体" in prompt
     assert "场景没有改变时" in prompt and "相似是正常的" in prompt

@@ -9,7 +9,13 @@ import httpx
 import pytest
 
 from pet.core.config import LlmConfig, LlmProfileConfig, resolve_llm_profile
-from pet.core.llm import LlmError, OpenRouterClient, probe_llm_profile
+from pet.core.llm import (
+    LlmError,
+    OpenRouterClient,
+    ReasoningProbeAttempt,
+    _select_reasoning_mode,
+    probe_llm_profile,
+)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "vision-exam-frame-a.ppm"
@@ -209,11 +215,23 @@ def test_probe_measures_reasoning_image_and_stream_without_provider_extension(
         client.close()
     rendered = "\n".join(lines)
     assert result.passed
-    assert result.selected_reasoning_mode == "omitted"
+    assert result.selected_reasoning_mode == "effort_none"
     assert result.ttft_ms is not None
     assert all("provider" not in body for body in bodies)
     assert any(body.get("reasoning") == {"effort": "none"} for body in bodies)
     assert any(body.get("reasoning") == {"enabled": False} for body in bodies)
+    image_bodies = [body for body in bodies if isinstance(body.get("messages"), list)]
+    assert all(body["max_tokens"] == 80 for body in image_bodies[-2:])
     assert "图像调用：通过" in rendered
     assert "流式调用：通过" in rendered
     assert secret not in rendered
+
+
+def test_reasoning_probe_prefers_explicit_disable_when_usage_is_ambiguous() -> None:
+    attempts = (
+        ReasoningProbeAttempt("effort_none", True, None, None),
+        ReasoningProbeAttempt("enabled_false", True, None, None),
+        ReasoningProbeAttempt("omitted", True, None, None),
+    )
+
+    assert _select_reasoning_mode(attempts) == "enabled_false"

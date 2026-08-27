@@ -134,6 +134,7 @@ class ObservationRecord:
     text: str
     region: tuple[str, ...] | None
     latency_ms: float
+    ttft_ms: float | None
     dropped: str | None
     cost_usd: float
     model_called: bool
@@ -150,6 +151,7 @@ class ObservationRecord:
             "text": self.text,
             "region": list(self.region) if self.region else None,
             "latency_ms": round(self.latency_ms, 3),
+            "ttft_ms": round(self.ttft_ms, 3) if self.ttft_ms is not None else None,
             "dropped": self.dropped,
             "user_prompt": self.user_prompt,
         }
@@ -613,6 +615,7 @@ class GenericVisionAdapter:
             "",
             pending.region or None,
             0.0,
+            None,
             reason,
             0.0,
             False,
@@ -633,6 +636,7 @@ class GenericVisionAdapter:
         text = ""
         cost = 0.0
         visible_output_tokens: int | None = None
+        ttft_ms: float | None = None
         truncated = False
         try:
             assert self._client is not None
@@ -663,6 +667,11 @@ class GenericVisionAdapter:
                 raise RuntimeError("模型返回空观察")
             cost = self._price(result)
             visible_output_tokens = _visible_output_tokens(result)
+            ttft_ms = (
+                result.ttft_seconds * 1000.0
+                if result.ttft_seconds is not None
+                else None
+            )
             truncated = result.finish_reason in {"length", "max_tokens"} or (
                 visible_output_tokens is not None
                 and visible_output_tokens >= self._effective.max_tokens
@@ -689,6 +698,7 @@ class GenericVisionAdapter:
                 text,
                 region or None,
                 (self._clock() - started) * 1000.0,
+                ttft_ms,
                 dropped,
                 cost,
                 True,
@@ -797,7 +807,9 @@ def _user_prompt(
             "本条提供了变化区域信息；必须恰好输出两行：第一行以【画面】开头，"
             "标签后以15个汉字为目标、25个为硬上限，只保留主体和关键状态；"
             "第二行以【刚刚】开头，标签后以30个汉字为目标、40个为硬上限。"
-            "若只有纯光照或特效，标签后必须以“仅”开头且总长四到六个字。"
+            "格子编号只是定位信息，输出中不得出现。"
+            "若发生变化的只是亮度、颜色、光效或粒子，而对象本身没有出现、消失或移动，"
+            "标签后必须以“仅”开头且总长四到六个字。"
             "两行都不得复述游戏名。"
         )
     else:

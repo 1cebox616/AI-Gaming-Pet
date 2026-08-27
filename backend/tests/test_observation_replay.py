@@ -110,7 +110,7 @@ def test_just_now_metrics_use_only_observation_body_and_exclude_effect_markers()
         {
             "frame_ts": 126.4,
             "wall": "2026-08-26T12:34:59Z",
-            "text": "【画面】没有数字的观察",
+            "text": "【画面】没有数字的观察\n【刚刚】r3c5区域时间12:34",
             "dropped": None,
         },
         {
@@ -121,12 +121,12 @@ def test_just_now_metrics_use_only_observation_body_and_exclude_effect_markers()
         },
     ]
     assert _extract_just_now(str(rows[0]["text"])) == "仅亮度变化"
-    assert _just_now_statistics(rows) == (3, 1, 2, 19 / 3)
+    assert _just_now_statistics(rows) == (4, 1, 2, 1, 8.0)
     informative = [
         body for _row, body in _just_now_entries(rows) if not body.startswith("仅")
     ]
-    assert informative == ["中央数值为42", "中央数值为43"]
-    assert character_similarity(*informative) > 0.6
+    assert informative[:2] == ["中央数值为42", "中央数值为43"]
+    assert character_similarity(*informative[:2]) > 0.6
 
 
 def test_dispatch_interval_defaults_to_zero_and_accepts_production_pacing() -> None:

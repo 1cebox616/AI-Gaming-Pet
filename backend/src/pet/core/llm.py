@@ -1205,7 +1205,7 @@ def probe_llm_profile(
                 user_prompt="图像连通性检查。",
                 images=(LlmImage(image_path, "合成测试图", max_edge=64),),
                 max_image_edge=64,
-                max_tokens=16,
+                max_tokens=80,
                 temperature=0.0,
                 **reasoning_arguments,
             )
@@ -1232,7 +1232,7 @@ def probe_llm_profile(
                 user_prompt="流式图像连通性检查。",
                 images=(LlmImage(image_path, "合成测试图", max_edge=64),),
                 max_image_edge=64,
-                max_tokens=16,
+                max_tokens=80,
                 temperature=0.0,
                 **reasoning_arguments,
             )
@@ -1339,7 +1339,10 @@ def _select_reasoning_mode(
     accepted = [attempt for attempt in attempts if attempt.accepted]
     if not accepted:
         raise LlmError("三种推理参数写法均被拒绝")
-    order = {"omitted": 0, "enabled_false": 1, "effort_none": 2}
+    # When usage metadata cannot prove how many hidden reasoning tokens were used,
+    # prefer an accepted explicit disable spelling over silently omitting the field.
+    # This also makes the probe exercise the same setting used by production calls.
+    order = {"enabled_false": 0, "effort_none": 1, "omitted": 2}
     selected = min(
         accepted,
         key=lambda attempt: (

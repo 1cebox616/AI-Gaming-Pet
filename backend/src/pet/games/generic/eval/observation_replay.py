@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import statistics
 import sys
 import tomllib
@@ -42,8 +43,14 @@ BACKEND_DIRECTORY = Path(__file__).resolve().parents[5]
 DEFAULT_OUTPUT_ROOT = BACKEND_DIRECTORY / "eval-reports"
 DEFAULT_SEGMENTS_PATH = BACKEND_DIRECTORY / "audit" / "m5-t6-segments.toml"
 PRODUCTION_SEND_WIDTH = 896
-DEFAULT_COST_CAP_USD = 5.0
+DEFAULT_COST_CAP_USD = 1.0
 ESTIMATED_INPUT_TOKENS_PER_CALL = 4_000
+GRID_REFERENCE_PATTERN = re.compile(r"(?i)r\d+c\d+")
+TIMESTAMP_PATTERN = re.compile(
+    r"(?<!\d)(?:\d{4}-\d{2}-\d{2}[T ]?)?"
+    r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?(?!\d)"
+)
+DATE_PATTERN = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
 
 
 class ObservationReplayError(Exception):
@@ -102,7 +109,7 @@ def _parse_segment(value: str) -> SegmentRange:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="M5-T7.5 离线快线观察日志重放")
+    parser = argparse.ArgumentParser(description="M5-T7.6 离线快线观察日志重放")
     parser.add_argument("--session", action="append", required=True, type=Path)
     parser.add_argument("--segment", type=_parse_segment)
     parser.add_argument("--profile", required=True)
@@ -381,15 +388,21 @@ def _just_now_entries(
 
 def _just_now_statistics(
     rows: Sequence[dict[str, object]],
-) -> tuple[int, int, int, float]:
-    """Return total, only-prefixed, numeric, and average visible character count."""
+) -> tuple[int, int, int, int, float]:
+    """Return total, only-prefixed, numeric, grid-leaked, and average length."""
     bodies = [body for _row, body in _just_now_entries(rows)]
     if not bodies:
-        return 0, 0, 0, 0.0
+        return 0, 0, 0, 0, 0.0
     only_prefixed = sum(body.startswith("仅") for body in bodies)
-    numeric = sum(any(character.isdigit() for character in body) for body in bodies)
+    grid_leaked = sum(GRID_REFERENCE_PATTERN.search(body) is not None for body in bodies)
+    numeric = 0
+    for body in bodies:
+        visible = GRID_REFERENCE_PATTERN.sub("", body)
+        visible = TIMESTAMP_PATTERN.sub("", visible)
+        visible = DATE_PATTERN.sub("", visible)
+        numeric += any(character.isdigit() for character in visible)
     average_length = statistics.mean(len("".join(body.split())) for body in bodies)
-    return len(bodies), only_prefixed, numeric, average_length
+    return len(bodies), only_prefixed, numeric, grid_leaked, average_length
 
 
 def _segments_for_session(path: Path, session: Path) -> tuple[tuple[str, SegmentRange], ...]:
@@ -420,7 +433,7 @@ def _write_review(
     segment_manifest: Path = DEFAULT_SEGMENTS_PATH,
 ) -> None:
     lines = [
-        "# M5-T7.5 离线观察日志复核表",
+        "# M5-T7.6 离线观察日志复核表",
         "",
         "本文件只列机器输出与机械统计，不评价模型能力。有信息复读只比较成功输出中"
         "【刚刚】正文：先移除以“仅”开头的纯特效段，再按画面时间比较相邻的剩余正文；"
@@ -435,6 +448,11 @@ def _write_review(
         rows = _read_rows(directory)
         session = json.loads((directory / "session.json").read_text(encoding="utf-8"))
         latencies = [float(row["latency_ms"]) for row in rows if row.get("dropped") is None]
+        ttfts = [
+            float(row["ttft_ms"])
+            for row in rows
+            if row.get("dropped") is None and row.get("ttft_ms") is not None
+        ]
         dropped = Counter(str(row["dropped"]) for row in rows if row.get("dropped") is not None)
         successful = [row for row in rows if row.get("dropped") is None]
         injected = sum(1 for row in successful if row.get("region"))
@@ -442,9 +460,13 @@ def _write_review(
             1 for row in rows if row.get("dropped") is not None and row.get("region")
         )
         just_now_entries = _just_now_entries(rows)
-        just_now, only_just_now, numeric_just_now, average_just_now_length = (
-            _just_now_statistics(rows)
-        )
+        (
+            just_now,
+            only_just_now,
+            numeric_just_now,
+            grid_leaked,
+            average_just_now_length,
+        ) = _just_now_statistics(rows)
         informative_entries = [
             (row, body) for row, body in just_now_entries if not body.startswith("仅")
         ]
@@ -471,6 +493,12 @@ def _write_review(
                     if latencies
                     else "- 往返中位 / P90：无成功调用"
                 ),
+                (
+                    f"- TTFT 中位 / P90：{statistics.median(ttfts):.3f} / "
+                    f"{(_percentile(ttfts, 0.90) or 0.0):.3f} ms"
+                    if ttfts
+                    else "- TTFT 中位 / P90：无可测流式首字"
+                ),
                 f"- 实际花费：${float(session['total_cost_usd']):.9f}",
                 f"- 区域提示注入次数（成功响应）：{injected}",
                 f"- 失败请求中的区域提示次数：{failed_region_requests}",
@@ -487,6 +515,7 @@ def _write_review(
                     if just_now
                     else "- 含具体数字的【刚刚】占比：无【刚刚】段"
                 ),
+                f"- 格子泄漏条数：{grid_leaked}",
                 f"- 【刚刚】平均字数：{average_just_now_length:.3f}",
                 f"- 有信息【刚刚】段数：{len(informative_entries)}",
                 f"- 截断条数：{truncated}",
