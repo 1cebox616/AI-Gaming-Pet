@@ -288,7 +288,8 @@ def test_frames_call_model_and_are_logged_in_frame_order(tmp_path: Path) -> None
     assert "r2c3" in first_prompt
     assert "必须恰好输出两行" in first_prompt
     assert "25个为硬上限" in first_prompt
-    assert "30个为硬上限" in first_prompt
+    assert "40个为硬上限" in first_prompt
+    assert "以“仅”开头且总长四到六个字" in first_prompt
     assert rows[0]["user_prompt"] == first_prompt
     assert statuses[-1].summary["game"] == "Grey Zone Warfare"  # type: ignore[union-attr]
     assert statuses[-1].summary["input_context"] == "yes"  # type: ignore[union-attr]
@@ -487,7 +488,15 @@ def test_fast_prompt_contains_two_part_contract_without_concrete_examples() -> N
     assert "固定先输出【画面】" in prompt
     assert "不超过 25 个汉字" in prompt
     assert "仅当用户消息提供了变化区域信息时，再输出【刚刚】" in prompt
-    assert "不超过 30 个汉字" in prompt
+    assert "不超过 40 个汉字" in prompt
+    assert "变化区域的报告优先级（高者优先占用字数）" in prompt
+    assert "可读出的文字与数字" in prompt
+    assert "对象的出现、消失、移动" in prompt
+    assert "界面结构与状态图标变化" in prompt
+    assert "仅当区域内没有上述任何内容时才报告" in prompt
+    assert "四到六个字结束" in prompt
+    assert "读不清必须说“读不清”" in prompt
+    assert "悬浮信息框或状态面板是画面主体" in prompt
     assert "场景没有改变时" in prompt and "相似是正常的" in prompt
     assert "只描述所指区域现在是什么" in prompt
     assert "较上一帧" in prompt and "此前" in prompt and "原本" in prompt
@@ -507,7 +516,6 @@ def test_fast_prompt_contains_two_part_contract_without_concrete_examples() -> N
         "直升机",
         "卡牌",
         "枪械",
-        "载具",
         "Slay the Spire",
         "Grey Zone Warfare",
         "r8c1",

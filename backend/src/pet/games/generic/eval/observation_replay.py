@@ -102,7 +102,7 @@ def _parse_segment(value: str) -> SegmentRange:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="M5-T7.4 离线快线观察日志重放")
+    parser = argparse.ArgumentParser(description="M5-T7.5 离线快线观察日志重放")
     parser.add_argument("--session", action="append", required=True, type=Path)
     parser.add_argument("--segment", type=_parse_segment)
     parser.add_argument("--profile", required=True)
@@ -357,6 +357,41 @@ def character_similarity(left: str, right: str) -> float:
     return difflib.SequenceMatcher(None, left, right, autojunk=False).ratio()
 
 
+def _extract_just_now(text: str) -> str | None:
+    """Return the first JustNow body, excluding its label and surrounding whitespace."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("【刚刚】"):
+            return stripped.removeprefix("【刚刚】").strip()
+    return None
+
+
+def _just_now_entries(
+    rows: Sequence[dict[str, object]],
+) -> list[tuple[dict[str, object], str]]:
+    entries: list[tuple[dict[str, object], str]] = []
+    for row in rows:
+        if row.get("dropped") is not None:
+            continue
+        body = _extract_just_now(str(row.get("text", "")))
+        if body is not None:
+            entries.append((row, body))
+    return entries
+
+
+def _just_now_statistics(
+    rows: Sequence[dict[str, object]],
+) -> tuple[int, int, int, float]:
+    """Return total, only-prefixed, numeric, and average visible character count."""
+    bodies = [body for _row, body in _just_now_entries(rows)]
+    if not bodies:
+        return 0, 0, 0, 0.0
+    only_prefixed = sum(body.startswith("仅") for body in bodies)
+    numeric = sum(any(character.isdigit() for character in body) for body in bodies)
+    average_length = statistics.mean(len("".join(body.split())) for body in bodies)
+    return len(bodies), only_prefixed, numeric, average_length
+
+
 def _segments_for_session(path: Path, session: Path) -> tuple[tuple[str, SegmentRange], ...]:
     if not path.is_file():
         return ()
@@ -385,10 +420,14 @@ def _write_review(
     segment_manifest: Path = DEFAULT_SEGMENTS_PATH,
 ) -> None:
     lines = [
-        "# M5-T7.4 离线观察日志复核表",
+        "# M5-T7.5 离线观察日志复核表",
         "",
-        "本文件只列机器输出与机械统计，不评价模型能力。相似度为相邻文本的字符级 "
-        "SequenceMatcher 重合率；超过 0.6 的相邻对列为复读候选，需产品负责人判读。",
+        "本文件只列机器输出与机械统计，不评价模型能力。有信息复读只比较成功输出中"
+        "【刚刚】正文：先移除以“仅”开头的纯特效段，再按画面时间比较相邻的剩余正文；"
+        "【画面】不参与。相似度为字符级 SequenceMatcher 重合率，超过 0.6 的相邻对列为"
+        "有信息复读候选，需产品负责人判读。",
+        "“仅”占比、数字占比与平均字数均只取【刚刚】标签后的观察正文，不读取时间戳或"
+        "其他日志字段；字数为去除空白后的 Unicode 字符数。",
         "",
     ]
     for prepared in prepared_items:
@@ -402,16 +441,20 @@ def _write_review(
         failed_region_requests = sum(
             1 for row in rows if row.get("dropped") is not None and row.get("region")
         )
-        just_now = sum(
-            1
-            for row in rows
-            if row.get("dropped") is None and "【刚刚】" in str(row.get("text", ""))
+        just_now_entries = _just_now_entries(rows)
+        just_now, only_just_now, numeric_just_now, average_just_now_length = (
+            _just_now_statistics(rows)
         )
+        informative_entries = [
+            (row, body) for row, body in just_now_entries if not body.startswith("仅")
+        ]
         truncated = int(session.get("truncated_count", 0))
         average_visible_tokens = session.get("average_visible_output_tokens")
         exact_repeats = sum(
-            str(previous["text"]) == str(current["text"])
-            for previous, current in zip(successful, successful[1:])
+            previous_body == current_body
+            for (_previous, previous_body), (_current, current_body) in zip(
+                informative_entries, informative_entries[1:]
+            )
         )
         lines.extend(
             [
@@ -432,8 +475,22 @@ def _write_review(
                 f"- 区域提示注入次数（成功响应）：{injected}",
                 f"- 失败请求中的区域提示次数：{failed_region_requests}",
                 f"- 【刚刚】段出现次数：{just_now}",
+                (
+                    f"- “仅”开头【刚刚】占比：{only_just_now / just_now:.2%} "
+                    f"（{only_just_now}/{just_now}）"
+                    if just_now
+                    else "- “仅”开头【刚刚】占比：无【刚刚】段"
+                ),
+                (
+                    f"- 含具体数字的【刚刚】占比：{numeric_just_now / just_now:.2%} "
+                    f"（{numeric_just_now}/{just_now}）"
+                    if just_now
+                    else "- 含具体数字的【刚刚】占比：无【刚刚】段"
+                ),
+                f"- 【刚刚】平均字数：{average_just_now_length:.3f}",
+                f"- 有信息【刚刚】段数：{len(informative_entries)}",
                 f"- 截断条数：{truncated}",
-                f"- 逐字重复条数：{exact_repeats}",
+                f"- 有信息逐字重复条数：{exact_repeats}",
                 f"- 平均可见输出 token：{average_visible_tokens}",
                 (
                     "- 输入 CSV：缺失，所有窗口按无输入处理并已标注。"
@@ -457,12 +514,14 @@ def _write_review(
                 lines.append(f"- {row['wall']} · {row['game']}：{row['text']}")
             else:
                 lines.append(f"- {row['wall']} · {row['game']}：[丢弃：{row['dropped']}]")
-        lines.extend(["", "### 复读候选（相邻相似度 > 0.6）", ""])
+        lines.extend(["", "### 有信息复读候选（相邻相似度 > 0.6）", ""])
         repeats = []
-        for previous, current in zip(successful, successful[1:]):
-            similarity = character_similarity(str(previous["text"]), str(current["text"]))
+        for (previous, previous_body), (current, current_body) in zip(
+            informative_entries, informative_entries[1:]
+        ):
+            similarity = character_similarity(previous_body, current_body)
             if similarity > 0.6:
-                repeats.append((previous, current, similarity))
+                repeats.append((previous, current, previous_body, current_body, similarity))
         if repeats:
             lines.extend(
                 [
@@ -470,9 +529,9 @@ def _write_review(
                     "|---|---|---:|---|---|",
                 ]
             )
-            for previous, current, similarity in repeats:
-                left = str(previous["text"]).replace("|", "\\|")
-                right = str(current["text"]).replace("|", "\\|")
+            for previous, current, previous_body, current_body, similarity in repeats:
+                left = previous_body.replace("|", "\\|")
+                right = current_body.replace("|", "\\|")
                 lines.append(
                     f"| {previous['frame_ts']} | {current['frame_ts']} | "
                     f"{similarity:.3f} | {left} | {right} |"
