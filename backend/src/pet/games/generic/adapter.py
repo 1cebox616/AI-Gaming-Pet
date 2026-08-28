@@ -7,6 +7,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import functools
 import json
 import logging
 from pathlib import Path
@@ -649,14 +650,22 @@ class GenericVisionAdapter:
             self._log = None
 
     async def _run(self) -> None:
-        try:
-            while True:
-                started = self._clock()
+        while True:
+            started = self._clock()
+            try:
                 await self._poll_once()
-                delay = max(0.0, self._settings.poll_interval_seconds - (self._clock() - started))
-                await asyncio.sleep(delay)
-        except asyncio.CancelledError:
-            raise
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("通用视觉单轮观察失败，将继续下一轮")
+                try:
+                    await self._publish_status("error", self._current_game)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("通用视觉单轮异常后的状态发布失败")
+            delay = max(0.0, self._settings.poll_interval_seconds - (self._clock() - started))
+            await asyncio.sleep(delay)
 
     async def _poll_once(self) -> None:
         if self._backend is None:
@@ -684,23 +693,33 @@ class GenericVisionAdapter:
             await self._publish_status("watching", self._current_game)
             return
 
-        game = self._title_map.identify(frame.metadata.window_title, frame.metadata.process_name)
-        self._current_game = game
-        observation = self._selector.observe(frame.bitmap, frame.metadata.monotonic_seconds)
-        if observation.decision.should_save:
-            await self._schedule(
-                frame,
-                game,
-                observation.decision.region_grid,
-                observation.decision.baseline_monotonic_seconds,
-                confirmed_region=observation.decision.confirmed_region_grid,
-                change_ratio=observation.decision.changed_block_ratio,
-                global_change=observation.comparisons.vs_baseline.mean_amplitude * 100.0,
-                region_intensity=observation.decision.confirmed_region_intensity * 100.0,
-                forced=observation.decision.forced,
+        ownership_transferred = False
+        try:
+            game = self._title_map.identify(
+                frame.metadata.window_title,
+                frame.metadata.process_name,
             )
-        else:
-            frame.bitmap.close()
+            self._current_game = game
+            observation = self._selector.observe(
+                frame.bitmap,
+                frame.metadata.monotonic_seconds,
+            )
+            if observation.decision.should_save:
+                await self._schedule(
+                    frame,
+                    game,
+                    observation.decision.region_grid,
+                    observation.decision.baseline_monotonic_seconds,
+                    confirmed_region=observation.decision.confirmed_region_grid,
+                    change_ratio=observation.decision.changed_block_ratio,
+                    global_change=observation.comparisons.vs_baseline.mean_amplitude * 100.0,
+                    region_intensity=observation.decision.confirmed_region_intensity * 100.0,
+                    forced=observation.decision.forced,
+                )
+                ownership_transferred = True
+        finally:
+            if not ownership_transferred:
+                frame.bitmap.close()
         await self._publish_status("watching", game)
 
     async def _schedule(
@@ -883,8 +902,10 @@ class GenericVisionAdapter:
         actual_provider: str | None = None
         try:
             assert self._client is not None
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
+            loop = asyncio.get_running_loop()
+            future = loop.run_in_executor(
+                None,
+                functools.partial(
                     self._client.complete_with_images_stream,
                     model=self._effective.model,
                     provider=self._effective.provider or None,
@@ -903,6 +924,10 @@ class GenericVisionAdapter:
                     temperature=self._effective.temperature,
                     reasoning_enabled=False,
                 ),
+            )
+            future.add_done_callback(lambda _future: frame.bitmap.close())
+            result = await asyncio.wait_for(
+                asyncio.shield(future),
                 timeout=self._settings.fast_timeout_seconds,
             )
             text = result.text.strip()
@@ -934,8 +959,6 @@ class GenericVisionAdapter:
         except Exception as error:
             dropped = f"error:{_one_line(error)}"
             self._register_failure(str(error))
-        finally:
-            frame.bitmap.close()
 
         self._complete_record(
             ObservationRecord(

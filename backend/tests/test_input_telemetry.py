@@ -6,6 +6,7 @@ import csv
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import threading
 
 import numpy as np
 import pytest
@@ -385,4 +386,72 @@ def test_non_windows_backend_has_human_readable_error(
         with pytest.raises(InputTelemetryError, match="只支持 Windows"):
             WindowsRawInputBackend(123, recorder)
     finally:
+        recorder.close(STARTED)
+
+
+# 锁住初始化超时后构造失败对象遗留 Raw Input 监听线程的故障。
+def test_windows_backend_timeout_stops_late_initialization_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    recorder = InputTelemetryRecorder(tmp_path)
+    backends: list[WindowsRawInputBackend] = []
+
+    class FakeUser32:
+        def PostMessageW(self, _handle: int, _message: int, _wparam: int, _lparam: int) -> None:
+            return None
+
+    def delayed_message_loop(self: WindowsRawInputBackend) -> None:
+        backends.append(self)
+        self._user32 = FakeUser32()
+        self._window_handle = 123
+        self._stop_requested.wait()
+
+    monkeypatch.setattr(input_telemetry.sys, "platform", "win32")
+    monkeypatch.setattr(
+        WindowsRawInputBackend,
+        "_message_loop",
+        delayed_message_loop,
+    )
+    try:
+        with pytest.raises(InputTelemetryError, match="超时"):
+            WindowsRawInputBackend(123, recorder, ready_timeout_seconds=0.2)
+        assert len(backends) == 1
+        assert backends[0]._thread.is_alive() is False
+    finally:
+        recorder.close(STARTED)
+
+
+# 锁住初始化超时且线程拒绝停止时错误信息未暴露隐私监听仍存活的故障。
+def test_windows_backend_timeout_reports_listener_thread_still_running(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    recorder = InputTelemetryRecorder(tmp_path)
+    release = threading.Event()
+    backends: list[WindowsRawInputBackend] = []
+
+    class FakeUser32:
+        def PostMessageW(self, _handle: int, _message: int, _wparam: int, _lparam: int) -> None:
+            return None
+
+    def blocked_message_loop(self: WindowsRawInputBackend) -> None:
+        backends.append(self)
+        self._user32 = FakeUser32()
+        self._window_handle = 456
+        release.wait()
+
+    monkeypatch.setattr(input_telemetry.sys, "platform", "win32")
+    monkeypatch.setattr(
+        WindowsRawInputBackend,
+        "_message_loop",
+        blocked_message_loop,
+    )
+    try:
+        with pytest.raises(InputTelemetryError, match="监听线程仍在运行"):
+            WindowsRawInputBackend(123, recorder, ready_timeout_seconds=0.2)
+    finally:
+        release.set()
+        if backends:
+            backends[0]._thread.join(timeout=1.0)
         recorder.close(STARTED)

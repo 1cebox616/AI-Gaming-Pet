@@ -6,10 +6,12 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import threading
 from types import SimpleNamespace
 import time
 
 from PIL import Image
+import pytest
 
 from pet.core.adapter_api import CoreServices
 from pet.core.config import (
@@ -124,6 +126,29 @@ class FakeClient:
 
     def close(self) -> None:
         self.closed = True
+
+
+class DelayedBitmapClient(FakeClient):
+    def __init__(self, delay: float) -> None:
+        super().__init__()
+        self.delay = delay
+        self.bitmap_bytes: bytes | None = None
+        self.bitmap_read = threading.Event()
+
+    def complete_with_images_stream(self, **kwargs: object) -> LlmResult:
+        self.calls.append(kwargs)
+        time.sleep(self.delay)
+        image = kwargs["images"][0]  # type: ignore[index]
+        self.bitmap_bytes = image.path.tobytes()
+        self.bitmap_read.set()
+        return LlmResult(
+            text="【画面】延迟观察",
+            usage=LlmUsage(100, 20, None),
+            latency_seconds=self.delay,
+            model="fixture-model",
+            provider="fixture-provider",
+            finish_reason="stop",
+        )
 
 
 def _configuration(
@@ -364,6 +389,91 @@ def test_timeout_is_recorded_and_loop_continues(tmp_path: Path) -> None:
     _, rows = asyncio.run(scenario())
     row = rows[0]
     assert row["dropped"] == "timeout"
+
+
+# 锁住选择器单轮异常会终止观察循环并泄漏当轮位图的故障。
+def test_poll_exception_isolated_and_failed_frame_bitmap_closed(tmp_path: Path) -> None:
+    adapter_config, llm_config = _configuration(tmp_path)
+    first_frame = _frame(1)
+    second_frame = _frame(2)
+    backend = FakeBackend([first_frame, second_frame])
+    client = FakeClient()
+    statuses: list[object] = []
+
+    class FailOnceSelector(AlwaysSelect):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def observe(self, frame: Image.Image, now: float) -> object:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("selector failed once")
+            return super().observe(frame, now)
+
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: backend,
+        selector_factory=lambda _sparsity: FailOnceSelector(),
+        client_factory=lambda *_args: client,
+        title_map=_title_map(),
+    )
+
+    async def scenario() -> list[dict[str, object]]:
+        await adapter.start(_core(statuses))
+        try:
+            _, rows = await _wait_for_observation_rows(tmp_path, 1)
+            return rows
+        finally:
+            await adapter.stop()
+
+    rows = asyncio.run(scenario())
+    assert rows[0]["frame_ts"] == 2.0
+    assert any(status.state == "error" for status in statuses)  # type: ignore[union-attr]
+    with pytest.raises(ValueError, match="Operation on closed image"):
+        first_frame.bitmap.tobytes()
+
+
+# 锁住等待方超时后在线程仍编码时过早关闭位图的故障。
+def test_timeout_keeps_bitmap_alive_until_worker_finishes(tmp_path: Path) -> None:
+    adapter_config, llm_config = _configuration(tmp_path, timeout=0.01)
+    frame = _frame(1)
+    backend = FakeBackend([frame])
+    client = DelayedBitmapClient(0.08)
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: backend,
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: client,
+        title_map=_title_map(),
+    )
+
+    async def scenario() -> list[dict[str, object]]:
+        await adapter.start(_core([]))
+        try:
+            _, rows = await _wait_for_observation_rows(tmp_path, 1)
+            read_succeeded = await asyncio.to_thread(client.bitmap_read.wait, 2.0)
+            assert read_succeeded is True
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while True:
+                try:
+                    frame.bitmap.tobytes()
+                except ValueError:
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("worker completed but bitmap remained open")
+                await asyncio.sleep(0.005)
+            return rows
+        finally:
+            await adapter.stop()
+
+    rows = asyncio.run(scenario())
+    assert rows[0]["dropped"] == "timeout"
+    assert client.bitmap_bytes is not None
+    with pytest.raises(ValueError, match="Operation on closed image"):
+        frame.bitmap.tobytes()
 
 
 def test_latest_wins_keeps_one_pending_frame_and_marks_replacements(tmp_path: Path) -> None:

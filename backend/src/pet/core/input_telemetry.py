@@ -895,6 +895,7 @@ class WindowsRawInputBackend:
         self._thread_error: Exception | None = None
         self._window_handle = 0
         self._user32: object | None = None
+        self._stop_requested = threading.Event()
         self._thread = threading.Thread(
             target=self._run,
             name="pet-raw-input",
@@ -902,25 +903,40 @@ class WindowsRawInputBackend:
         )
         self._thread.start()
         if not self._ready.wait(ready_timeout_seconds):
+            stopped = self._stop_and_join(5.0)
+            outcome = "监听线程已停止" if stopped else "监听线程仍在运行"
             raise InputTelemetryError(
-                "Windows Raw Input 初始化超时；未安装钩子，也未降级为静默失败"
+                f"Windows Raw Input 初始化超时；{outcome}；未安装钩子，也未降级为静默失败"
             )
         if self._thread_error is not None:
+            error = self._thread_error
+            stopped = self._stop_and_join(5.0)
+            outcome = "监听线程已停止" if stopped else "监听线程仍在运行"
             raise InputTelemetryError(
-                f"Windows Raw Input 初始化失败：{self._thread_error}"
-            ) from self._thread_error
+                f"Windows Raw Input 初始化失败：{error}；{outcome}"
+            ) from error
 
     def close(self) -> None:
-        user32 = self._user32
-        if user32 is not None and self._window_handle:
-            user32.PostMessageW(self._window_handle, _WM_CLOSE, 0, 0)
-        self._thread.join(timeout=5.0)
-        if self._thread.is_alive():
+        if not self._stop_and_join(5.0):
             raise InputTelemetryError("Windows Raw Input 消息线程未能在 5 秒内退出")
         if self._thread_error is not None:
             raise InputTelemetryError(
                 f"Windows Raw Input 运行失败：{self._thread_error}"
             ) from self._thread_error
+
+    def _stop_and_join(self, timeout_seconds: float) -> bool:
+        self._stop_requested.set()
+        deadline = time.monotonic() + timeout_seconds
+        while self._thread.is_alive():
+            handle = self._window_handle
+            user32 = self._user32
+            if handle and user32 is not None:
+                user32.PostMessageW(handle, _WM_CLOSE, 0, 0)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self._thread.join(min(0.1, remaining))
+        return not self._thread.is_alive()
 
     def _run(self) -> None:
         try:
@@ -1003,6 +1019,8 @@ class WindowsRawInputBackend:
                 raise _last_windows_error("创建 Raw Input 消息窗口")
             created_hwnd = int(hwnd)
             self._window_handle = created_hwnd
+            if self._stop_requested.is_set():
+                return
             self._register_devices(user32, self._window_handle)
             devices_registered = True
             if not user32.SetTimer(self._window_handle, 1, 10, None):
@@ -1010,6 +1028,8 @@ class WindowsRawInputBackend:
             now = datetime.now(timezone.utc)
             self._update_focus(user32, now, time.perf_counter())
             self._ready.set()
+            if self._stop_requested.is_set():
+                return
             message = _MSG()
             while True:
                 result = user32.GetMessageW(ctypes.byref(message), None, 0, 0)
