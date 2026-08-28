@@ -1467,7 +1467,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if callable(reconfigure):
             reconfigure(encoding="utf-8", errors="replace")
     arguments = build_probe_parser().parse_args(argv)
-    configuration = load_config(arguments.config, arguments.local_config)
+    configuration = load_config(
+        arguments.config,
+        arguments.local_config,
+        strict=True,
+    )
     result = probe_llm_profile(
         configuration.llm,
         arguments.profile,

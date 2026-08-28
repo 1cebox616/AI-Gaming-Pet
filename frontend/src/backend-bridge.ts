@@ -44,14 +44,7 @@ let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
 let bridgeStarted = false;
 let lastUtteranceId: string | undefined;
 
-function setPetDisconnected(): void {
-  setPetExpression("speechless");
-  setPetDimmed(true);
-  setWatchStatus(null);
-  updatePetMenuState(false, false, false, "", "后端：未连接", "—", "—");
-}
-
-function updatePetMenuState(
+type BackendMenuState = readonly [
   connected: boolean,
   speechEnabled: boolean,
   muted: boolean,
@@ -59,16 +52,17 @@ function updatePetMenuState(
   gameStatus: string,
   llmMode: string,
   llmCost: string,
-): void {
-  void invoke("update_pet_menu_state", {
-    connected,
-    speechEnabled,
-    muted,
-    gameId,
-    gameStatus,
-    llmMode,
-    llmCost,
-  }).catch((error: unknown) => {
+];
+
+function setPetDisconnected(): void {
+  setPetExpression("speechless");
+  setPetDimmed(true);
+  setWatchStatus(null);
+  updatePetMenuState([false, false, false, "", "后端：未连接", "—", "—"]);
+}
+
+function updatePetMenuState(state: BackendMenuState): void {
+  void invoke("update_pet_menu_state", { state }).catch((error: unknown) => {
     console.error("failed to synchronize pet menu state", error);
   });
 }
@@ -248,7 +242,7 @@ function handleMessage(event: MessageEvent<unknown>): void {
         ? summaryString(message.game, "game")
         : null,
     );
-    updatePetMenuState(
+    updatePetMenuState([
       true,
       message.speech_enabled,
       message.muted,
@@ -256,7 +250,7 @@ function handleMessage(event: MessageEvent<unknown>): void {
       formatGameStatus(message.game),
       formatLlmMode(message.llm),
       formatLlmCost(message.llm),
-    );
+    ]);
     return;
   }
 

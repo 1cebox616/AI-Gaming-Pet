@@ -269,7 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("宽度、并发、超时与花费参数无效", file=sys.stderr)
         return 2
     try:
-        configuration = load_config()
+        configuration = load_config(strict=True)
         generic = configuration.games.get("generic", AdapterConfig()).generic
         roles = _load_roles(arguments.manifest, arguments.role)
         lives = tuple(_live_profile(configuration.llm, name) for name in arguments.profile)

@@ -48,7 +48,7 @@ _MULTI_KILL_CASE_IDS = frozenset(
 
 def collect_fact_sentence_audit_cases() -> tuple[FactSentenceAuditCase, ...]:
     """Replay all frozen cases and render their deterministic fact sentences."""
-    configuration = load_config()
+    configuration = load_config(strict=True)
     old_keys = load_event_answer_keys(OLD_ANSWER_KEY).cases
     old_replay = replay_commentary(
         load_recording(OLD_RECORDING),

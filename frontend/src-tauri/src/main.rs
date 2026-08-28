@@ -175,9 +175,12 @@ struct BackendMenuState {
     speech_enabled: bool,
     muted: bool,
     game_id: String,
+    game_status: String,
     llm_mode: String,
     llm_cost: String,
 }
+
+type BackendMenuStateInput = (bool, bool, bool, String, String, String, String);
 
 struct PetMenu {
     menu: Menu<Wry>,
@@ -192,24 +195,7 @@ struct PetMenu {
 }
 
 impl PetMenu {
-    fn update_backend_state(
-        &self,
-        connected: bool,
-        speech_enabled: bool,
-        muted: bool,
-        game_id: &str,
-        game_status: &str,
-        llm_mode: &str,
-        llm_cost: &str,
-    ) -> Result<(), String> {
-        let state = BackendMenuState {
-            connected,
-            speech_enabled,
-            muted,
-            game_id: game_id.to_owned(),
-            llm_mode: llm_mode.to_owned(),
-            llm_cost: llm_cost.to_owned(),
-        };
+    fn update_backend_state(&self, state: &BackendMenuState) -> Result<(), String> {
         let mut current_state = self
             .backend_state
             .lock()
@@ -218,7 +204,7 @@ impl PetMenu {
         drop(current_state);
 
         self.game_status_item
-            .set_text(game_status)
+            .set_text(&state.game_status)
             .map_err(|error| error.to_string())?;
         self.llm_mode_item
             .set_text(&state.llm_mode)
@@ -227,10 +213,10 @@ impl PetMenu {
             .set_enabled(false)
             .map_err(|error| error.to_string())?;
         self.current_game_cs2_item
-            .set_checked(connected && game_id == "cs2")
+            .set_checked(state.connected && state.game_id == "cs2")
             .map_err(|error| error.to_string())?;
         self.current_game_generic_item
-            .set_checked(connected && game_id == "generic")
+            .set_checked(state.connected && state.game_id == "generic")
             .map_err(|error| error.to_string())?;
         self.llm_cost_item
             .set_text(&state.llm_cost)
@@ -242,16 +228,16 @@ impl PetMenu {
             .set_enabled(false)
             .map_err(|error| error.to_string())?;
         self.speech_item
-            .set_enabled(connected)
+            .set_enabled(state.connected)
             .map_err(|error| error.to_string())?;
         self.auto_speak_item
-            .set_enabled(connected)
+            .set_enabled(state.connected)
             .map_err(|error| error.to_string())?;
         self.speech_item
-            .set_checked(connected && speech_enabled)
+            .set_checked(state.connected && state.speech_enabled)
             .map_err(|error| error.to_string())?;
         self.auto_speak_item
-            .set_checked(connected && !muted)
+            .set_checked(state.connected && !state.muted)
             .map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -471,24 +457,20 @@ fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
 
 #[tauri::command]
 fn update_pet_menu_state(
-    connected: bool,
-    speech_enabled: bool,
-    muted: bool,
-    game_id: String,
-    game_status: String,
-    llm_mode: String,
-    llm_cost: String,
+    state: BackendMenuStateInput,
     menu: State<'_, PetMenu>,
 ) -> Result<(), String> {
-    menu.update_backend_state(
+    let (connected, speech_enabled, muted, game_id, game_status, llm_mode, llm_cost) = state;
+    let state = BackendMenuState {
         connected,
         speech_enabled,
         muted,
-        &game_id,
-        &game_status,
-        &llm_mode,
-        &llm_cost,
-    )
+        game_id,
+        game_status,
+        llm_mode,
+        llm_cost,
+    };
+    menu.update_backend_state(&state)
 }
 
 #[tauri::command]
@@ -845,10 +827,13 @@ mod tests {
             connected: true,
             speech_enabled: true,
             muted: false,
+            game_id: "generic".into(),
+            game_status: "正在观看".into(),
             llm_mode: "当前：AI 模式".into(),
             llm_cost: "本次花费：$0.0123".into(),
         };
 
+        assert_eq!(state.game_id, "generic");
         assert_eq!(state.llm_mode, "当前：AI 模式");
         assert_eq!(state.llm_cost, "本次花费：$0.0123");
     }

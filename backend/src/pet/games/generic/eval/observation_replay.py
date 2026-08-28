@@ -985,7 +985,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     try:
-        configuration = load_config()
+        configuration = load_config(strict=True)
         effective = resolve_llm_profile(configuration.llm, arguments.profile)
         profile = configuration.llm.profiles.get(arguments.profile)
         if profile is None:

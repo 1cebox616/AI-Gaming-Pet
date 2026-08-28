@@ -974,7 +974,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--out can only be used with --data-inventory")
     if args.replay is None:
         parser.error("--replay is required")
-    configuration = load_config()
+    configuration = load_config(strict=True)
     if args.with_policy or args.with_commentary:
         snapshots = load_recording(args.replay)
         commentary_result = replay_commentary(

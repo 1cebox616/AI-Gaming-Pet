@@ -21,6 +21,10 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[3] / "config.toml"
 LOCAL_CONFIG_PATH = DEFAULT_CONFIG_PATH.with_name("config.local.toml")
 
 
+class ConfigError(ValueError):
+    """One or more configuration problems rejected by strict loading."""
+
+
 class SpeechConfig(BaseModel):
     """Speech behavior selected once when the backend starts."""
 
@@ -234,19 +238,28 @@ ConfigSection = TypeVar(
 def load_config(
     default_path: Path = DEFAULT_CONFIG_PATH,
     local_path: Path = LOCAL_CONFIG_PATH,
+    *,
+    strict: bool = False,
 ) -> PetConfig:
     """Load defaults, optionally overlay local settings, and recover safely on errors."""
     default_data = _read_toml(default_path, required=True)
     local_data = _read_toml(local_path, required=False)
     merged_data = _merge_sections(default_data, local_data)
-    _warn_for_unknown_sections(merged_data)
+    problems: list[str] = []
+    _collect_unknown_sections(merged_data, problems)
     _warn_for_missing_fields(merged_data)
 
-    active = _validate_section("active", ActiveConfig, merged_data.get("active", {}))
-    speech = _validate_section("speech", SpeechConfig, merged_data.get("speech", {}))
-    idle = _validate_section("idle", IdleConfig, merged_data.get("idle", {}))
-    llm = _validate_section("llm", LlmConfig, merged_data.get("llm", {}))
-    games = _load_games(merged_data, active)
+    active = _validate_section(
+        "active", ActiveConfig, merged_data.get("active", {}), problems
+    )
+    speech = _validate_section(
+        "speech", SpeechConfig, merged_data.get("speech", {}), problems
+    )
+    idle = _validate_section(
+        "idle", IdleConfig, merged_data.get("idle", {}), problems
+    )
+    llm = _validate_section("llm", LlmConfig, merged_data.get("llm", {}), problems)
+    games = _load_games(merged_data, active, problems)
     configuration = PetConfig(
         active=active,
         speech=speech,
@@ -254,6 +267,15 @@ def load_config(
         llm=llm,
         games=games,
     )
+
+    if problems:
+        if strict:
+            detail = "\n".join(problems)
+            raise ConfigError(
+                f"配置文件存在 {len(problems)} 处问题，严格模式下拒绝加载\n{detail}"
+            )
+        for problem in problems:
+            logger.warning("%s", problem)
 
     if configuration.idle.max_interval_seconds < configuration.idle.min_interval_seconds:
         logger.warning(
@@ -267,8 +289,10 @@ def load_config(
     return configuration
 
 
-def _warn_for_unknown_sections(configuration_data: Mapping[str, Any]) -> None:
-    """Expose misspelled root tables without discarding valid known tables."""
+def _collect_unknown_sections(
+    configuration_data: Mapping[str, Any], problems: list[str]
+) -> None:
+    """Collect misspelled root tables without discarding valid known tables."""
     known_sections = set(PetConfig.model_fields) | {
         "gsi",
         "events",
@@ -276,9 +300,9 @@ def _warn_for_unknown_sections(configuration_data: Mapping[str, Any]) -> None:
         "personality",
     }
     for section_name in sorted(set(configuration_data) - known_sections):
-        logger.warning(
-            "unknown backend configuration top-level section %s; ignoring it",
-            section_name,
+        problems.append(
+            f"{section_name}: 未知顶层配置小节；"
+            f"unknown backend configuration top-level section {section_name}; ignoring it"
         )
 
 
@@ -286,52 +310,85 @@ def _validate_section(
     section_name: str,
     model_type: type[ConfigSection],
     section_data: Any,
+    problems: list[str],
 ) -> ConfigSection:
     """Validate one section without discarding valid settings in the other section."""
     try:
         return model_type.model_validate(section_data)
     except ValidationError as error:
         defaults = model_type()
-        invalid_fields = ", ".join(
-            f"{section_name}.{'.'.join(str(part) for part in item['loc'])}"
-            if item["loc"]
-            else section_name
-            for item in error.errors()
-        )
-        logger.warning(
-            "invalid backend configuration section %s at %s; "
-            "using section defaults: %s",
-            section_name,
-            invalid_fields,
-            defaults.model_dump(),
-        )
+        for item in error.errors():
+            path = (
+                f"{section_name}.{'.'.join(str(part) for part in item['loc'])}"
+                if item["loc"]
+                else section_name
+            )
+            reason = (
+                "未知配置键"
+                if item["type"] == "extra_forbidden"
+                else f"配置值无效：{item['msg']}"
+            )
+            problems.append(
+                f"{path}: {reason}; invalid backend configuration section "
+                f"{section_name} at {path}; using section defaults: "
+                f"{defaults.model_dump()}"
+            )
     return defaults
 
 
 def _load_games(
-    configuration_data: Mapping[str, Any], active: ActiveConfig
+    configuration_data: Mapping[str, Any],
+    active: ActiveConfig,
+    problems: list[str],
 ) -> dict[str, AdapterConfig]:
     games_data = configuration_data.get("games")
     if isinstance(games_data, Mapping) and games_data:
         games: dict[str, AdapterConfig] = {}
         for game_id, game_data in games_data.items():
             if not isinstance(game_id, str) or not isinstance(game_data, Mapping):
-                logger.warning("invalid backend game configuration %r; ignoring it", game_id)
+                if not isinstance(game_id, str):
+                    path = f"games.{game_id!r}"
+                    reason = "游戏 ID 必须是字符串"
+                else:
+                    path = f"games.{game_id}"
+                    reason = "游戏配置必须是表"
+                problems.append(
+                    f"{path}: {reason}; invalid backend game configuration "
+                    f"{game_id!r}; ignoring it"
+                )
                 continue
+            allowed_fields = {
+                "gsi",
+                "events",
+                "policy",
+                "personality",
+            } | GENERIC_VISION_FIELDS
+            for field_name in sorted(set(game_data) - allowed_fields):
+                problems.append(f"games.{game_id}.{field_name}: 未知配置键")
             games[game_id] = AdapterConfig(
                 gsi=_validate_section(
-                    f"games.{game_id}.gsi", GsiConfig, game_data.get("gsi", {})
+                    f"games.{game_id}.gsi",
+                    GsiConfig,
+                    game_data.get("gsi", {}),
+                    problems,
                 ),
                 events=_validate_section(
-                    f"games.{game_id}.events", EventsConfig, game_data.get("events", {})
+                    f"games.{game_id}.events",
+                    EventsConfig,
+                    game_data.get("events", {}),
+                    problems,
                 ),
                 policy=_validate_section(
-                    f"games.{game_id}.policy", PolicyConfig, game_data.get("policy", {})
+                    f"games.{game_id}.policy",
+                    PolicyConfig,
+                    game_data.get("policy", {}),
+                    problems,
                 ),
                 personality=_validate_section(
                     f"games.{game_id}.personality",
                     PersonalityConfig,
                     game_data.get("personality", {}),
+                    problems,
                 ),
                 generic=_validate_section(
                     f"games.{game_id}",
@@ -341,23 +398,27 @@ def _load_games(
                         for field_name in GENERIC_VISION_FIELDS
                         if field_name in game_data
                     },
+                    problems,
                 ),
             )
         return games
 
     return {
         active.game: AdapterConfig(
-            gsi=_validate_section("gsi", GsiConfig, configuration_data.get("gsi", {})),
+            gsi=_validate_section(
+                "gsi", GsiConfig, configuration_data.get("gsi", {}), problems
+            ),
             events=_validate_section(
-                "events", EventsConfig, configuration_data.get("events", {})
+                "events", EventsConfig, configuration_data.get("events", {}), problems
             ),
             policy=_validate_section(
-                "policy", PolicyConfig, configuration_data.get("policy", {})
+                "policy", PolicyConfig, configuration_data.get("policy", {}), problems
             ),
             personality=_validate_section(
                 "personality",
                 PersonalityConfig,
                 configuration_data.get("personality", {}),
+                problems,
             ),
             generic=GenericVisionConfig(),
         )

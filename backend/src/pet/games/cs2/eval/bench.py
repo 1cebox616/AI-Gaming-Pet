@@ -455,7 +455,7 @@ def run_bench(
 
     template_personality = TEMPLATE_PERSONALITY_BY_PROMPT[personality_style]
     snapshots = load_recording(recording_path)
-    configuration = load_config()
+    configuration = load_config(strict=True)
     replay = replay_commentary(
         snapshots,
         configuration.events,
@@ -750,7 +750,7 @@ def run_stream_analysis(
         max_chars=ANALYSIS_MAX_EVENT_CHARS,
         prompts_directory=prompts_directory,
     )
-    configuration = load_config()
+    configuration = load_config(strict=True)
     events: list[AnalysisBenchEvent] = []
     snapshot_count = 0
     detected_event_count = 0
