@@ -43,6 +43,13 @@ def test_card_game_exemption_and_numeric_truth_are_explicit() -> None:
         assert value in text
 
 
+def test_survival_fog_uses_latest_input_linked_correction() -> None:
+    text = (TRUTH / "survival-2d-answer-key.md").read_text(encoding="utf-8")
+    assert "滑动滚轮提高视角" in text
+    assert "玩家输入关联的视角变化" in text
+    assert "世界自发变化”判卷样本" not in text
+
+
 def test_judging_glossary_is_not_referenced_by_model_input_sources() -> None:
     glossary = (TRUTH / "judging-glossary.md").read_text(encoding="utf-8")
     assert "只用于判卷，绝不注入任何模型" in glossary
