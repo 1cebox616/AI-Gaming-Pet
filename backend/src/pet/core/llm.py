@@ -47,6 +47,17 @@ class LlmResult:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmModelEndpoint:
+    """One live catalog entry used by offline evaluation tooling."""
+
+    name: str
+    provider: str
+    prompt_price_per_token: float
+    completion_price_per_token: float
+    context_length: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class LlmImage:
     """One image attachment and its human-readable position label.
 
@@ -365,6 +376,58 @@ class OpenRouterClient:
             for item in payload["data"]
             if isinstance(item, Mapping) and isinstance(item.get("id"), str)
         )
+
+    def list_model_endpoints(self, model: str) -> tuple[LlmModelEndpoint, ...] | None:
+        """Return live provider and price entries when the endpoint advertises them."""
+        try:
+            response = self._client.get(f"models/{model}/endpoints")
+        except httpx.TimeoutException as error:
+            raise LlmError(f"{self._endpoint_label}模型端点目录请求超时：{error}") from error
+        except httpx.RequestError as error:
+            raise LlmError(f"{self._endpoint_label}模型端点目录网络失败：{error}") from error
+        if response.status_code in {404, 405, 501}:
+            return None
+        if not response.is_success:
+            raise LlmError(
+                _response_error_message(response, service_label=self._endpoint_label),
+                status_code=response.status_code,
+            )
+        try:
+            payload: object = response.json()
+        except ValueError as error:
+            raise LlmError(f"{self._endpoint_label}模型端点目录不是合法 JSON") from error
+        if not isinstance(payload, Mapping):
+            raise LlmError(f"{self._endpoint_label}模型端点目录顶层不是对象")
+        data = payload.get("data")
+        endpoints = data.get("endpoints") if isinstance(data, Mapping) else None
+        if not isinstance(endpoints, list):
+            raise LlmError(f"{self._endpoint_label}模型端点目录缺少 data.endpoints 数组")
+        parsed: list[LlmModelEndpoint] = []
+        for item in endpoints:
+            if not isinstance(item, Mapping):
+                continue
+            pricing = item.get("pricing")
+            provider = item.get("provider_name")
+            if not isinstance(pricing, Mapping) or not isinstance(provider, str):
+                continue
+            try:
+                prompt_price = float(pricing["prompt"])
+                completion_price = float(pricing["completion"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            name = item.get("name")
+            context = item.get("context_length")
+            parsed.append(
+                LlmModelEndpoint(
+                    name if isinstance(name, str) else "",
+                    provider,
+                    prompt_price,
+                    completion_price,
+                    context if isinstance(context, int) else None,
+                )
+            )
+        return tuple(parsed)
+
 
     def complete_with_images(
         self,
@@ -798,6 +861,27 @@ class OpenRouterClient:
     def close(self) -> None:
         """Release the underlying connection pool."""
         self._client.close()
+
+
+def fetch_model_endpoints(
+    *,
+    profile_name: str,
+    base_url: str | None,
+    api_key_env: str,
+    timeout_seconds: float,
+    model: str,
+) -> tuple[LlmModelEndpoint, ...] | None:
+    """Fetch one profile's live catalog without exposing its concrete client to callers."""
+    client = OpenRouterClient.from_profile(
+        profile_name=profile_name,
+        base_url=base_url,
+        api_key_env=api_key_env,
+        timeout_seconds=timeout_seconds,
+    )
+    try:
+        return client.list_model_endpoints(model)
+    finally:
+        client.close()
 
 
 def _parse_result(payload: object, *, latency_seconds: float) -> LlmResult:

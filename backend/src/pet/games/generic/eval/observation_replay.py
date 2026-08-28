@@ -43,7 +43,7 @@ BACKEND_DIRECTORY = Path(__file__).resolve().parents[5]
 DEFAULT_OUTPUT_ROOT = BACKEND_DIRECTORY / "eval-reports"
 DEFAULT_SEGMENTS_PATH = BACKEND_DIRECTORY / "audit" / "m5-t6-segments.toml"
 PRODUCTION_SEND_WIDTH = 896
-DEFAULT_COST_CAP_USD = 1.0
+DEFAULT_COST_CAP_USD = 3.0
 ESTIMATED_INPUT_TOKENS_PER_CALL = 4_000
 GRID_REFERENCE_PATTERN = re.compile(r"(?i)r\d+c\d+")
 TIMESTAMP_PATTERN = re.compile(
@@ -51,6 +51,22 @@ TIMESTAMP_PATTERN = re.compile(
     r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?(?!\d)"
 )
 DATE_PATTERN = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
+STRICT_ONLY_PATTERN = re.compile(r"仅[\u3400-\u4dbf\u4e00-\u9fff]{3,5}\Z")
+RETROSPECTIVE_TERMS = ("出现了", "较上一帧", "比之前", "此前", "原本")
+# This fixed list detects purpose or intent language, not direct input/scene facts
+# such as a turning view or repeated clicking. It is intentionally conservative.
+PURPOSE_INFERENCE_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"表明玩家|说明玩家",
+        r"(?:玩家|操作者).{0,8}(?:似乎|可能|试图|想要|打算|意图|准备)",
+        r"(?:似乎|可能|试图|想要|打算|意图|准备)(?:在|要)?"
+        r"(?:浏览|寻找|选择|查看|切换|确认|测试|退出|进入|攻击|躲避|前往)",
+        r"正在(?:浏览|寻找|选择|查看|切换|确认|测试)"
+        r"(?:界面|列表|菜单|选项|模式|物品|目标|路线)",
+        r"为了|以便|从而",
+    )
+)
 
 
 class ObservationReplayError(Exception):
@@ -95,8 +111,20 @@ class PreparedReplay:
     actual_send_width: int
     recording_hash: str
     input_context: ActionInputTimeline
+    input_window_start_monotonic: float | None
     input_csv_missing: bool
     input_direction_available: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LocalStatistics:
+    total: int
+    only_prefix_old: int
+    only_compliant: int
+    only_expanded: int
+    numeric: int
+    grid_leaked: int
+    average_length: float
 
 
 def _parse_segment(value: str) -> SegmentRange:
@@ -114,7 +142,7 @@ def _parse_segment(value: str) -> SegmentRange:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="M5-T7.9 离线快线观察日志重放")
+    parser = argparse.ArgumentParser(description="通用视觉离线快线观察日志重放")
     parser.add_argument("--session", action="append", required=True, type=Path)
     parser.add_argument("--segment", type=_parse_segment)
     parser.add_argument("--profile", required=True)
@@ -235,6 +263,7 @@ def _prepare_replay(
         actual_send_width=actual_width,
         recording_hash=_recording_hash(session),
         input_context=loaded_input.timeline,
+        input_window_start_monotonic=(origin + segment.start if segment is not None else None),
         input_csv_missing=loaded_input.csv_missing,
         input_direction_available=loaded_input.direction_available,
     )
@@ -292,6 +321,7 @@ async def _run_prepared(
     adapter.start_replay(
         output_directory,
         input_context=prepared.input_context,
+        input_window_start_monotonic=prepared.input_window_start_monotonic,
         extra_parameters={
             "mode": "offline_replay",
             "source_session": str(prepared.session),
@@ -397,6 +427,15 @@ def _extract_scene(text: str) -> str | None:
     return None
 
 
+def _extract_speculation(text: str) -> str | None:
+    """Return the first optional speculation body."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("【推测】"):
+            return stripped.removeprefix("【推测】").strip()
+    return None
+
+
 def _expected_reason(spec: ReplayFrameSpec) -> str:
     if spec.forced and spec.change_ratio == 0.0:
         return "forced"
@@ -422,12 +461,15 @@ def _local_entries(
 
 def _local_statistics(
     rows: Sequence[dict[str, object]],
-) -> tuple[int, int, int, int, float]:
-    """Return total, only-prefixed, numeric, grid-leaked, and average length."""
+) -> LocalStatistics:
+    """Measure local bodies without reading timestamps or renderer fields."""
     bodies = [body for _row, body in _local_entries(rows)]
     if not bodies:
-        return 0, 0, 0, 0, 0.0
-    only_prefixed = sum(body.startswith("仅") for body in bodies)
+        return LocalStatistics(0, 0, 0, 0, 0, 0, 0.0)
+    compact = ["".join(body.split()) for body in bodies]
+    only_prefixed = sum(body.startswith("仅") for body in compact)
+    only_compliant = sum(STRICT_ONLY_PATTERN.fullmatch(body) is not None for body in compact)
+    only_expanded = sum(body.startswith("仅") and len(body) > 6 for body in compact)
     grid_leaked = sum(GRID_REFERENCE_PATTERN.search(body) is not None for body in bodies)
     numeric = 0
     for body in bodies:
@@ -436,7 +478,32 @@ def _local_statistics(
         visible = DATE_PATTERN.sub("", visible)
         numeric += any(character.isdigit() for character in visible)
     average_length = statistics.mean(len("".join(body.split())) for body in bodies)
-    return len(bodies), only_prefixed, numeric, grid_leaked, average_length
+    return LocalStatistics(
+        len(bodies),
+        only_prefixed,
+        only_compliant,
+        only_expanded,
+        numeric,
+        grid_leaked,
+        average_length,
+    )
+
+
+def _testimony_text(row: dict[str, object]) -> str:
+    """Return only testimony segments; speculation is deliberately excluded."""
+    text = str(row.get("text", ""))
+    return "\n".join(
+        body for body in (_extract_scene(text), _extract_local(text)) if body is not None
+    )
+
+
+def _input_attribution_violation(row: dict[str, object]) -> bool:
+    testimony = _testimony_text(row)
+    return any(pattern.search(testimony) is not None for pattern in PURPOSE_INFERENCE_PATTERNS)
+
+
+def _retrospective_violation(row: dict[str, object]) -> bool:
+    return any(term in str(row.get("text", "")) for term in RETROSPECTIVE_TERMS)
 
 
 def _segment_shape(values: Sequence[str]) -> tuple[float, float]:
@@ -491,14 +558,17 @@ def _write_review(
     segment_manifest: Path = DEFAULT_SEGMENTS_PATH,
 ) -> None:
     lines = [
-        "# M5-T7.9 离线观察日志复核表",
+        "# 通用视觉离线观察日志复核表",
         "",
         "本文件只列机器输出与机械统计，不评价模型能力。有信息复读只比较成功输出中"
-        "【局部】正文：先移除以“仅”开头的纯特效段，再按画面时间比较相邻的剩余正文；"
+        "【局部】正文：先移除同时满足‘仅开头且全文 4–6 个汉字’的合规纯特效段，"
+        "再按画面时间比较相邻的剩余正文；"
         "【画面】不参与。相似度为字符级 SequenceMatcher 重合率，超过 0.6 的相邻对列为"
         "有信息复读候选，需产品负责人判读。",
-        "“仅”占比、数字占比与平均字数均只取【局部】标签后的观察正文，不读取时间戳或"
-        "其他日志字段；字数为去除空白后的 Unicode 字符数。",
+        "旧‘仅’口径保留为仅判前缀；新口径要求全文匹配 4–6 个汉字，超出 6 字另计"
+        "展开。数字占比与平均字数均只取【局部】正文，不读取时间戳或其他日志字段。",
+        "输入归因违约只扫描【画面】与【局部】内的目的性推断；直接陈述视角转动或连续"
+        "点击不计，【推测】段内推断另行统计。三类违约均列机械命中原文供人工复核。",
         "",
     ]
     for prepared in prepared_items:
@@ -536,15 +606,11 @@ def _write_review(
         )
         session_reason_counts = session.get("reason_counts")
         local_entries = _local_entries(rows)
-        (
-            local_count,
-            only_local,
-            numeric_local,
-            grid_leaked,
-            average_local_length,
-        ) = _local_statistics(rows)
+        local_stats = _local_statistics(rows)
         informative_entries = [
-            (row, body) for row, body in local_entries if not body.startswith("仅")
+            (row, body)
+            for row, body in local_entries
+            if STRICT_ONLY_PATTERN.fullmatch("".join(body.split())) is None
         ]
         scenes = [
             scene
@@ -578,6 +644,22 @@ def _write_review(
             (row, values)
             for row in successful
             if (values := _echoed_metric_values(row))
+        ]
+        attribution_violations = [
+            row for row in successful if _input_attribution_violation(row)
+        ]
+        retrospective_violations = [
+            row for row in successful if _retrospective_violation(row)
+        ]
+        speculation_rows = [
+            row
+            for row in successful
+            if _extract_speculation(str(row.get("text", ""))) is not None
+        ]
+        input_token_values = [
+            int(row["input_tokens"])
+            for row in successful
+            if row.get("input_tokens") is not None
         ]
         rate_limited = sum(count for reason, count in dropped.items() if "429" in reason)
         timed_out = dropped.get("timeout", 0)
@@ -625,29 +707,67 @@ def _write_review(
                 f"- input 字段覆盖率：{input_covered / len(rows):.2%} "
                 f"（{input_covered}/{len(rows)}）",
                 f"- 无聚焦区域帧违规【局部】条数：{forbidden_local}",
-                f"- 【局部】段出现次数：{local_count}",
+                f"- 【局部】段出现次数：{local_stats.total}",
                 (
-                    f"- “仅”开头【局部】占比：{only_local / local_count:.2%} "
-                    f"（{only_local}/{local_count}）"
-                    if local_count
-                    else "- “仅”开头【局部】占比：无【局部】段"
+                    f"- 旧“仅”口径（仅判前缀）："
+                    f"{local_stats.only_prefix_old / local_stats.total:.2%} "
+                    f"（{local_stats.only_prefix_old}/{local_stats.total}）"
+                    if local_stats.total
+                    else "- 旧“仅”口径（仅判前缀）：无【局部】段"
                 ),
                 (
-                    f"- 含具体数字的【局部】占比：{numeric_local / local_count:.2%} "
-                    f"（{numeric_local}/{local_count}）"
-                    if local_count
+                    f"- “仅”严格合规数：{local_stats.only_compliant}；"
+                    f"展开数（超长）：{local_stats.only_expanded}；合规率："
+                    f"{local_stats.only_compliant / local_stats.only_prefix_old:.2%}"
+                    if local_stats.only_prefix_old
+                    else "- “仅”严格合规数：0；展开数（超长）：0；合规率：无“仅”段"
+                ),
+                (
+                    f"- 含具体数字的【局部】占比："
+                    f"{local_stats.numeric / local_stats.total:.2%} "
+                    f"（{local_stats.numeric}/{local_stats.total}）"
+                    if local_stats.total
                     else "- 含具体数字的【局部】占比：无【局部】段"
                 ),
                 f"- 格子泄漏条数（输出全文）：{output_grid_leaked}",
                 f"- 格子泄漏条数（消息体）：{message_grid_leaked}",
                 f"- 注入指标复述候选：{len(metric_echoes)}",
-                f"- 【局部】平均字数：{average_local_length:.3f}",
+                f"- 【局部】平均字数：{local_stats.average_length:.3f}",
                 f"- 有信息【局部】段数：{len(informative_entries)}",
                 f"- 【画面】平均句数 / 字数：{scene_sentences:.3f} / {scene_characters:.3f}",
                 f"- 【局部】平均句数 / 字数：{local_sentences:.3f} / {local_characters:.3f}",
                 f"- 三指标 JSONL 覆盖率：{metrics_covered / len(rows):.2%} "
                 f"（{metrics_covered}/{len(rows)}）",
                 f"- 429 / 超时次数：{rate_limited} / {timed_out}",
+                (
+                    f"- 输入归因违约：{len(attribution_violations)} / {len(successful)} "
+                    f"（{len(attribution_violations) / len(successful):.2%}）"
+                    if successful
+                    else "- 输入归因违约：无成功输出"
+                ),
+                (
+                    f"- 回溯措辞违约：{len(retrospective_violations)} / {len(successful)} "
+                    f"（{len(retrospective_violations) / len(successful):.2%}）"
+                    if successful
+                    else "- 回溯措辞违约：无成功输出"
+                ),
+                (
+                    f"- 机械指标复述：{len(metric_echoes)} / {len(successful)} "
+                    f"（{len(metric_echoes) / len(successful):.2%}）"
+                    if successful
+                    else "- 机械指标复述：无成功输出"
+                ),
+                (
+                    f"- 【推测】段：{len(speculation_rows)} / {len(successful)} "
+                    f"（{len(speculation_rows) / len(successful):.2%}）"
+                    if successful
+                    else "- 【推测】段：无成功输出"
+                ),
+                (
+                    f"- 平均输入 token：{statistics.mean(input_token_values):.3f}"
+                    if input_token_values
+                    else "- 平均输入 token：历史日志未记录"
+                ),
                 f"- 截断条数：{truncated}",
                 f"- 有信息逐字重复条数：{exact_repeats}",
                 f"- 平均可见输出 token：{average_visible_tokens}",
@@ -708,9 +828,19 @@ def _write_review(
                 )
         else:
             lines.append("无。")
+        for heading, violations in (
+            ("输入归因违约命中原文", attribution_violations),
+            ("回溯措辞违约命中原文", retrospective_violations),
+        ):
+            lines.extend(["", f"### {heading}（最多 20 条）", ""])
+            if violations:
+                for row in violations[:20]:
+                    lines.append(f"- {row['frame_ts']}：{row['text']}")
+            else:
+                lines.append("无。")
         lines.extend(["", "### 注入指标复述候选", ""])
         if metric_echoes:
-            for row, values in metric_echoes:
+            for row, values in metric_echoes[:20]:
                 lines.append(
                     f"- {row['frame_ts']}（{', '.join(values)}）：{row['text']}"
                 )

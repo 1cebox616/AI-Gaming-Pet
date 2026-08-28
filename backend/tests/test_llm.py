@@ -21,6 +21,37 @@ class _StepClock:
         return self._value
 
 
+def test_live_model_endpoint_catalog_parses_provider_prices() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/models/vendor/model-under-test/endpoints")
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "endpoints": [
+                        {
+                            "name": "locked endpoint",
+                            "provider_name": "locked provider",
+                            "context_length": 123456,
+                            "pricing": {"prompt": "0.0000002", "completion": "0.0000004"},
+                        }
+                    ]
+                }
+            },
+        )
+
+    client = OpenRouterClient("test-api-key", transport=httpx.MockTransport(handler))
+    try:
+        endpoints = client.list_model_endpoints("vendor/model-under-test")
+    finally:
+        client.close()
+    assert endpoints is not None and len(endpoints) == 1
+    assert endpoints[0].provider == "locked provider"
+    assert endpoints[0].prompt_price_per_token == pytest.approx(0.0000002)
+    assert endpoints[0].completion_price_per_token == pytest.approx(0.0000004)
+    assert endpoints[0].context_length == 123456
+
+
 def test_complete_parses_text_usage_cost_and_actual_routing() -> None:
     requests: list[httpx.Request] = []
 

@@ -1,0 +1,35 @@
+# M5-T8 standing replay roles. Paths are relative to this file and recordings
+# remain read-only. Segment bounds use the session monotonic origin and [start, end).
+
+[[segments]]
+role = "fast-fps"
+category = "fast"
+session = "../../../recordings/capture/20260827-171815"
+start = 300.0
+end = 450.0
+
+[[segments]]
+role = "survival-2d"
+category = "text-heavy"
+session = "../../../recordings/capture/20260827-203925"
+start = 120.0
+end = 270.0
+
+[[segments]]
+role = "simulation-fps"
+category = "simulation"
+session = "../../../recordings/capture/20260827-215554"
+start = 60.0
+end = 210.0
+
+[[segments]]
+role = "card-game"
+category = "text-heavy"
+session = "../../../recordings/capture/20260827-220206"
+start = 30.0
+end = 180.0
+
+[[segments]]
+role = "frozen-regression"
+category = "regression"
+session = "../../../recordings/capture/20260825-200156"

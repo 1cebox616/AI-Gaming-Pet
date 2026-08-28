@@ -72,10 +72,15 @@ DEFAULT_PERSISTENCE_POLLS = 1
 # they measure misses and do not alter the production selector's decision.
 DEFAULT_STRONG_BLOCK_DELTA = 40.0 / 255.0
 DEFAULT_INPUT_MOTION_THRESHOLD = 20.0
-DEFAULT_RAW_WIDTH = 640
+# 640 is below the production upload width, so recordings at that width cannot
+# support text-recognition comparisons.  Retain full-HD probe material instead.
+DEFAULT_RAW_WIDTH = 1920
 DEFAULT_RAW_JPEG_QUALITY = 70
 DEFAULT_RAW_MAX_FILES = 5_000
-DEFAULT_RAW_MAX_BYTES = 1024 * 1024 * 1024
+DEFAULT_RAW_MAX_BYTES = 4096 * 1024 * 1024
+# Measured on the four M5-T8 full-HD captures at JPEG quality 70.  This is only
+# a startup planning estimate; scene complexity determines the actual rate.
+ESTIMATED_RAW_JPEG_BYTES_PER_FRAME = 170_000
 FOREGROUND_SELECTION_DELAY_SECONDS = 3
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 # zbl 0.7.1 buffers 32 source frames and drops newly arrived frames when that
@@ -1474,9 +1479,19 @@ def _print_banner(options: ProbeOptions) -> None:
     )
     print(f"WGC 光标合成：{'开启' if options.capture_cursor else '关闭'}")
     if options.record_all:
+        estimated_mib_per_hour = (
+            ESTIMATED_RAW_JPEG_BYTES_PER_FRAME
+            * 3600.0
+            / max(options.interval, 1e-9)
+            / (1024 * 1024)
+        )
         print(
             "【全量录制已开启】每次成功轮询都会保存到 raw/："
             f"宽 {options.raw_width}px、JPEG 质量 {DEFAULT_RAW_JPEG_QUALITY}"
+        )
+        print(
+            f"预计磁盘占用速率：约 {estimated_mib_per_hour:.0f} MiB/小时"
+            "（按 1080p 实测均值估算，实际随画面复杂度变化）"
         )
     if options.record_input:
         print("【键鼠输入记录已开启】仅在目标游戏窗口位于前台时记录")

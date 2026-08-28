@@ -13,12 +13,15 @@ from pet.games.generic.adapter import TitleRule, WindowTitleMap
 from pet.games.generic.eval.observation_replay import (
     SegmentRange,
     _extract_scene,
+    _extract_speculation,
     _echoed_metric_values,
     _extract_local,
+    _input_attribution_violation,
     _local_entries,
     _local_statistics,
     _prepare_replay,
     _recording_hash,
+    _retrospective_violation,
     build_parser,
     character_similarity,
 )
@@ -128,13 +131,53 @@ def test_local_metrics_use_only_observation_body_and_exclude_effect_markers() ->
         },
     ]
     assert _extract_local(str(rows[0]["text"])) == "仅亮度变化"
-    assert _local_statistics(rows) == (4, 1, 2, 1, 8.0)
+    metrics = _local_statistics(rows)
+    assert metrics.total == 4
+    assert metrics.only_prefix_old == 1
+    assert metrics.only_compliant == 1
+    assert metrics.only_expanded == 0
+    assert metrics.numeric == 2
+    assert metrics.grid_leaked == 1
+    assert metrics.average_length == 8.0
     informative = [
         body for _row, body in _local_entries(rows) if not body.startswith("仅")
     ]
     assert informative[:2] == ["中央数值为42", "中央数值为43"]
     assert character_similarity(*informative[:2]) > 0.6
     assert _extract_scene(str(rows[1]["text"])) == "状态面板"
+
+
+def test_only_compliance_requires_prefix_and_four_to_six_chinese_characters() -> None:
+    rows: list[dict[str, object]] = [
+        {"text": "【局部】仅亮度变化", "dropped": None},
+        {"text": "【局部】仅光效", "dropped": None},
+        {"text": "【局部】仅区域内亮度正在发生变化", "dropped": None},
+        {"text": "【局部】亮度变化", "dropped": None},
+    ]
+    result = _local_statistics(rows)
+    assert result.only_prefix_old == 3
+    assert result.only_compliant == 1
+    assert result.only_expanded == 1
+
+
+def test_violation_metrics_separate_testimony_from_speculation() -> None:
+    allowed_direct: dict[str, object] = {
+        "text": "【画面】视角正在向右转动，正在连续点击。",
+    }
+    misplaced_intent: dict[str, object] = {
+        "text": "【画面】玩家似乎想要浏览模式列表。",
+    }
+    separated_intent: dict[str, object] = {
+        "text": "【画面】选择界面占据画面。\n【推测】似乎正在浏览模式列表。",
+    }
+    retrospective: dict[str, object] = {
+        "text": "【画面】某界面元素出现了。",
+    }
+    assert not _input_attribution_violation(allowed_direct)
+    assert _input_attribution_violation(misplaced_intent)
+    assert not _input_attribution_violation(separated_intent)
+    assert _extract_speculation(str(separated_intent["text"])) == "似乎正在浏览模式列表。"
+    assert _retrospective_violation(retrospective)
 
 
 def test_dispatch_interval_defaults_to_zero_and_accepts_production_pacing() -> None:

@@ -171,6 +171,11 @@ class ObservationRecord:
     visible_output_tokens: int | None
     truncated: bool
     user_prompt: str | None = None
+    speculation: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    actual_model: str | None = None
+    actual_provider: str | None = None
 
     def json_value(self) -> dict[str, object]:
         return {
@@ -198,6 +203,11 @@ class ObservationRecord:
             "ttft_ms": round(self.ttft_ms, 3) if self.ttft_ms is not None else None,
             "dropped": self.dropped,
             "user_prompt": self.user_prompt,
+            "speculation": self.speculation,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "actual_model": self.actual_model,
+            "actual_provider": self.actual_provider,
         }
 
 
@@ -280,7 +290,7 @@ def _logged_input(input_summary: str | None) -> str:
 
 def _model_segment(text: str, label: str) -> str | None:
     match = re.search(
-        rf"{re.escape(label)}\s*(.*?)(?=【(?:画面|局部)】|\Z)",
+        rf"{re.escape(label)}\s*(.*?)(?=【(?:画面|局部|推测)】|\Z)",
         text,
         flags=re.DOTALL,
     )
@@ -356,6 +366,9 @@ class ObservationLog:
                         f"【局部｜区域占比{record.region_area_ratio:.0f}%】"
                         f"（区域像素变化{record.region_intensity:.0f}%）{local}\n"
                     )
+            speculation = record.speculation or _model_segment(record.text, "【推测】")
+            if speculation:
+                self._markdown.write(f"【推测】{speculation}\n")
         self._markdown.write(f"【玩家输入】{record.input}\n\n")
         self._markdown.flush()
         self.records += 1
@@ -543,6 +556,7 @@ class GenericVisionAdapter:
         output_directory: Path,
         *,
         input_context: InputContextLike | None,
+        input_window_start_monotonic: float | None = None,
         extra_parameters: dict[str, object] | None = None,
     ) -> None:
         """Start the production observation path without a live capture loop."""
@@ -551,6 +565,7 @@ class GenericVisionAdapter:
         if self._settings.input_context and input_context is None:
             raise ValueError("input_context is required when replay input context is enabled")
         self._input_context = input_context if self._settings.input_context else None
+        self._last_dispatched_frame_ts = input_window_start_monotonic
         self._initialize_observer(
             log_root=output_directory,
             exact_directory=True,
@@ -817,26 +832,26 @@ class GenericVisionAdapter:
     @staticmethod
     def _dropped_record(pending: PendingFrame, reason: str) -> ObservationRecord:
         return ObservationRecord(
-            pending.seq,
-            pending.frame.metadata.monotonic_seconds,
-            pending.frame.metadata.captured_at.astimezone(timezone.utc).isoformat(),
-            pending.game,
-            "",
-            pending.region or None,
-            pending.reason,
-            pending.change_ratio,
-            pending.global_change,
-            pending.region_area_ratio,
-            pending.region_intensity,
-            LOG_NO_INPUT_SUMMARY,
-            pending.focus_location,
-            0.0,
-            None,
-            reason,
-            0.0,
-            False,
-            None,
-            False,
+            seq=pending.seq,
+            frame_ts=pending.frame.metadata.monotonic_seconds,
+            wall=pending.frame.metadata.captured_at.astimezone(timezone.utc).isoformat(),
+            game=pending.game,
+            text="",
+            region=pending.region or None,
+            reason=pending.reason,
+            change_ratio=pending.change_ratio,
+            global_change=pending.global_change,
+            region_area_ratio=pending.region_area_ratio,
+            region_intensity=pending.region_intensity,
+            input=LOG_NO_INPUT_SUMMARY,
+            focus_location=pending.focus_location,
+            latency_ms=0.0,
+            ttft_ms=None,
+            dropped=reason,
+            cost_usd=0.0,
+            model_called=False,
+            visible_output_tokens=None,
+            truncated=False,
         )
 
     async def _observe_frame(
@@ -861,6 +876,11 @@ class GenericVisionAdapter:
         visible_output_tokens: int | None = None
         ttft_ms: float | None = None
         truncated = False
+        speculation: str | None = None
+        input_tokens: int | None = None
+        output_tokens: int | None = None
+        actual_model: str | None = None
+        actual_provider: str | None = None
         try:
             assert self._client is not None
             result = await asyncio.wait_for(
@@ -899,6 +919,11 @@ class GenericVisionAdapter:
                 visible_output_tokens is not None
                 and visible_output_tokens >= self._effective.max_tokens
             )
+            speculation = _model_segment(text, "【推测】")
+            input_tokens = result.usage.prompt_tokens
+            output_tokens = result.usage.completion_tokens
+            actual_model = result.model
+            actual_provider = result.provider
             self._consecutive_failures = 0
         except asyncio.TimeoutError:
             dropped = "timeout"
@@ -914,27 +939,32 @@ class GenericVisionAdapter:
 
         self._complete_record(
             ObservationRecord(
-                sequence,
-                frame.metadata.monotonic_seconds,
-                frame.metadata.captured_at.astimezone(timezone.utc).isoformat(),
-                game,
-                text,
-                region or None,
-                reason,
-                change_ratio,
-                global_change,
-                region_area_ratio,
-                region_intensity,
-                logged_input,
-                focus_location,
-                (self._clock() - started) * 1000.0,
-                ttft_ms,
-                dropped,
-                cost,
-                True,
-                visible_output_tokens,
-                truncated,
-                user_prompt,
+                seq=sequence,
+                frame_ts=frame.metadata.monotonic_seconds,
+                wall=frame.metadata.captured_at.astimezone(timezone.utc).isoformat(),
+                game=game,
+                text=text,
+                region=region or None,
+                reason=reason,
+                change_ratio=change_ratio,
+                global_change=global_change,
+                region_area_ratio=region_area_ratio,
+                region_intensity=region_intensity,
+                input=logged_input,
+                focus_location=focus_location,
+                latency_ms=(self._clock() - started) * 1000.0,
+                ttft_ms=ttft_ms,
+                dropped=dropped,
+                cost_usd=cost,
+                model_called=True,
+                visible_output_tokens=visible_output_tokens,
+                truncated=truncated,
+                user_prompt=user_prompt,
+                speculation=speculation,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                actual_model=actual_model,
+                actual_provider=actual_provider,
             )
         )
 
@@ -948,6 +978,8 @@ class GenericVisionAdapter:
         self._refresh_cost_warning()
 
     def _price(self, result: LlmResult) -> float:
+        if result.usage.cost_usd is not None:
+            return result.usage.cost_usd
         prompt = result.usage.prompt_tokens or 0
         completion = result.usage.completion_tokens or 0
         return (prompt * self._input_price + completion * self._output_price) / 1_000_000.0
@@ -1051,16 +1083,20 @@ def _user_prompt(
     elif reason == "forced":
         lines.append(FORCED_TEMPLATE.format(seconds=baseline_seconds_ago))
         lines.append(
-            "本条是定时心跳快照；只输出【画面】，用一到两句描述当前场景与正在发生的事；"
+            "本条是定时心跳快照；输出【画面】，用一到两句描述当前场景与正在发生的事；"
             "不要输出【局部】，不得复述游戏名。"
         )
     else:
         lines.append(WIDE_CHANGE_TEMPLATE.format(global_change=global_change))
         lines.append(
-            "本条没有聚焦区域；只输出【画面】，用一到两句按当前新场景完整定场；"
+            "本条没有聚焦区域；输出【画面】，用一到两句按当前新场景完整定场；"
             f"不要输出【局部】；{global_change:.1f}%是系统定位数值，严禁在输出中写出或改写，"
             "日志会机械添加；不得复述游戏名。"
         )
+    lines.append(
+        "可以把键鼠输入与画面连起来陈述当前可直接确认的事实。若有证据支持目的性推断，"
+        "只能另加【推测】一段并写一句；无把握时省略【推测】。"
+    )
     return "\n".join(lines)
 
 

@@ -577,7 +577,8 @@ def test_cli_defaults_and_removed_strategy() -> None:
     assert arguments.interval == 1.0
     assert arguments.record_all is False
     assert arguments.record_input is False
-    assert arguments.raw_width == 640
+    assert arguments.raw_width == 1920
+    assert arguments.raw_max_bytes == 4096 * 1024 * 1024
     assert arguments.persistence_polls == 1
     assert arguments.region_sparsity_max == 0.25
     assert not hasattr(arguments, "strategy")
@@ -603,6 +604,9 @@ def test_record_input_banner_discloses_scope_and_destination(
     capture._print_banner(options)
 
     output = capsys.readouterr().out
+    assert "宽 1920px" in output
+    assert "预计磁盘占用速率" in output
+    assert "MiB/小时" in output
     assert "【键鼠输入记录已开启】" in output
     assert "W、A、S、D" in output
     assert "MouseLeft、MouseRight" in output

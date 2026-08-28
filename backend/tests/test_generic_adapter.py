@@ -436,6 +436,8 @@ def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
     )
     client = FakeClient([0.02, 0.0])
     input_timeline = ActionInputTimeline(retention_seconds=None)
+    input_timeline.append(ActionInputEvent(0.5, "按下", "KeyW"))
+    input_timeline.append(ActionInputEvent(0.6, "抬起", "KeyW"))
     input_timeline.append(ActionInputEvent(1.5, "按下", "MouseLeft"))
     input_timeline.append(ActionInputEvent(1.6, "抬起", "MouseLeft"))
     adapter = GenericVisionAdapter(
@@ -451,7 +453,11 @@ def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
     output = tmp_path / "exact-replay"
 
     async def scenario() -> None:
-        adapter.start_replay(output, input_context=input_timeline)
+        adapter.start_replay(
+            output,
+            input_context=input_timeline,
+            input_window_start_monotonic=1.0,
+        )
         await adapter.submit_replay_frame(
             _frame(1),
             "Grey Zone Warfare",
@@ -482,6 +488,8 @@ def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
         for line in (output / "observations.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert [row["frame_ts"] for row in rows] == [1.0, 2.0]
+    assert "此窗口内无玩家输入" in str(client.calls[0]["user_prompt"])
+    assert "玩家输入：\nW" not in str(client.calls[0]["user_prompt"])
     assert "观察 1" not in str(client.calls[1]["user_prompt"])
     assert "最近观察" not in str(client.calls[1]["user_prompt"])
     assert "玩家输入：\n左键点击 1 次" in str(client.calls[1]["user_prompt"])
@@ -570,7 +578,11 @@ def test_fast_prompt_contains_two_part_contract_without_concrete_examples() -> N
     assert "不得复述任何键名、按键次数或时间间隔" in prompt
     assert "鼠标大幅移动时，当前帧可能是视角转动后的新朝向" in prompt
     assert "窗口内无输入而画面有变化时，该变化并非玩家操作所致" in prompt
-    assert "不得写出任何归因判断" in prompt
+    assert "允许把输入与画面连起来陈述当下可直接确认的事实" in prompt
+    assert "目的性推断只能放在可选的【推测】段" in prompt
+    assert "必须有键鼠输入或画面证据支撑" in prompt
+    assert "无把握时省略【推测】" in prompt
+    assert "禁止在【画面】或【局部】中写目的性推断" in prompt
     assert "表明玩家" in prompt
     assert "不得编造" in prompt
     assert "硬上限" not in prompt
@@ -675,7 +687,7 @@ def test_observation_log_writes_mechanical_fields_markers_and_reason_counts(
                 wall=f"2026-08-26T12:00:0{sequence}+00:00",
                 game="Fixture",
                 text=(
-                    "【画面】当前场景\n【局部】对象正在移动"
+                    "【画面】当前场景\n【局部】对象正在移动\n【推测】似乎正在查看某界面"
                     if reason in {"sparse", "coarse"}
                     else "【画面】当前场景"
                 ),
@@ -694,6 +706,13 @@ def test_observation_log_writes_mechanical_fields_markers_and_reason_counts(
                 model_called=True,
                 visible_output_tokens=4,
                 truncated=False,
+                speculation=(
+                    "似乎正在查看某界面" if reason in {"sparse", "coarse"} else None
+                ),
+                input_tokens=100,
+                output_tokens=20,
+                actual_model="fixture-model",
+                actual_provider="fixture-provider",
             )
         )
     log.close()
@@ -712,11 +731,19 @@ def test_observation_log_writes_mechanical_fields_markers_and_reason_counts(
     assert all(row["global_change"] == 6.2 for row in rows)
     assert [row["region_area_ratio"] for row in rows] == [30, 30, None, None]
     assert [row["region_intensity"] for row in rows] == [60, 60, None, None]
+    assert [row["speculation"] for row in rows] == [
+        "似乎正在查看某界面",
+        "似乎正在查看某界面",
+        None,
+        None,
+    ]
+    assert rows[0]["input_tokens"] == 100 and rows[0]["output_tokens"] == 20
     markdown = (directory / "observations.md").read_text(encoding="utf-8")
     assert "本会话始于 " in markdown
     assert "T+0：" in markdown and "T+3（心跳）：" in markdown
     assert "【全局画面】（全局像素变化6.2%）当前场景" in markdown
     assert markdown.count("【局部｜区域占比30%】（区域像素变化60%）对象正在移动") == 2
+    assert markdown.count("【推测】似乎正在查看某界面") == 2
     assert "【玩家输入】W 按住 0.5 秒" in markdown
     assert markdown.count("【玩家输入】无输入") == 3
     session = json.loads((directory / "session.json").read_text(encoding="utf-8"))
