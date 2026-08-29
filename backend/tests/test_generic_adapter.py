@@ -23,6 +23,7 @@ from pet.core.config import (
 )
 from pet.core.llm import LlmResult, LlmUsage, image_upload_metadata
 from pet.core.input_telemetry import ActionInputEvent, ActionInputTimeline
+import pet.games.generic.adapter as generic_adapter_module
 from pet.games.generic.adapter import (
     FAST_PROMPT_PATH,
     GenericVisionAdapter,
@@ -910,3 +911,116 @@ def test_observation_log_writes_mechanical_fields_markers_and_reason_counts(
         "large": 1,
         "forced": 1,
     }
+
+
+def test_b_t1_old_fake_client_scenario_covers_markdown_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixed_started_at = datetime(2026, 8, 29, 12, 34, 56, tzinfo=timezone.utc)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            if tz is None:
+                return fixed_started_at.replace(tzinfo=None)
+            return fixed_started_at
+
+    monkeypatch.setattr(generic_adapter_module, "datetime", FixedDatetime)
+    adapter_config, llm_config = _configuration(
+        tmp_path,
+        timeout=0.15,
+        max_inflight=1,
+        input_context=True,
+    )
+    client = FakeClient(
+        delays=[0.01, 0.30, 0.0],
+        texts=[
+            "【画面】主区域保持清晰\n【局部】左上对象正在移动\n【推测】似乎正在查看界面",
+            "【画面】这条迟到结果不得进入日志",
+            "【画面】定时快照保持稳定",
+        ],
+    )
+    input_timeline = ActionInputTimeline(retention_seconds=None)
+    input_timeline.append(ActionInputEvent(0.2, "按下", "W"))
+    input_timeline.append(ActionInputEvent(0.8, "抬起", "W"))
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("baseline replay must not initialize capture")
+        ),
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: client,
+        title_map=_title_map(),
+    )
+    output = tmp_path / "b-t1-baseline"
+
+    async def scenario() -> None:
+        adapter.start_replay(
+            output,
+            input_context=input_timeline,
+            input_window_start_monotonic=0.0,
+        )
+        await adapter._schedule(
+            _frame(1),
+            "Grey Zone Warfare",
+            ("r2c3", "r3c3"),
+            0.0,
+            confirmed_region=("r2c3", "r3c3"),
+            change_ratio=2 / 144,
+            global_change=6.25,
+            region_intensity=60.4,
+            forced=False,
+        )
+        await adapter._schedule(
+            _frame(2),
+            "Grey Zone Warfare",
+            (),
+            1.0,
+            confirmed_region=(),
+            change_ratio=0.38,
+            global_change=18.75,
+            region_intensity=0.0,
+            forced=False,
+        )
+        await adapter._schedule(
+            _frame(3),
+            "Grey Zone Warfare",
+            (),
+            2.0,
+            confirmed_region=(),
+            change_ratio=0.62,
+            global_change=31.25,
+            region_intensity=0.0,
+            forced=False,
+        )
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while adapter._inflight or adapter._queued_frame is not None or client.active:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("baseline timeout and late worker did not drain")
+            await asyncio.sleep(0.005)
+        await adapter._schedule(
+            _frame(4),
+            "Grey Zone Warfare",
+            (),
+            -56.0,
+            confirmed_region=(),
+            change_ratio=0.0,
+            global_change=0.0,
+            region_intensity=0.0,
+            forced=True,
+        )
+        await adapter.finish_replay()
+
+    asyncio.run(scenario())
+    markdown = (output / "observations.md").read_text(encoding="utf-8")
+    assert "本会话始于 2026-08-29T12:34:56+00:00" in markdown
+    assert "[丢弃：superseded]" in markdown
+    assert "[丢弃：timeout]" in markdown
+    assert "T+3（心跳）：" in markdown
+    assert "【局部｜区域占比1%】（区域像素变化60%）左上对象正在移动" in markdown
+    assert "【推测】似乎正在查看界面" in markdown
+    assert "【全局画面】（全局像素变化0.0%）定时快照保持稳定" in markdown
+    assert "【玩家输入】W 按住 0.6 秒" in markdown
+    assert len(client.calls) == 3
