@@ -8,7 +8,18 @@ from pathlib import Path
 PET_ROOT = Path(__file__).parents[1] / "src" / "pet"
 CORE_ROOT = PET_ROOT / "core"
 GAMES_ROOT = PET_ROOT / "games"
+BELIEF_ROOT = CORE_ROOT / "belief"
 ALLOWED_CORE_MODULES = {"adapter_api", "config", "llm", "prompt"}
+NETWORK_MODULES = {
+    "aiohttp",
+    "fastapi",
+    "http",
+    "httpx",
+    "requests",
+    "socket",
+    "urllib",
+    "websockets",
+}
 
 
 def _imports(path: Path) -> tuple[tuple[str, int], ...]:
@@ -76,6 +87,8 @@ def test_game_packages_do_not_cross_import_or_reach_eval_from_production() -> No
             if module == "pet.core" or module.startswith("pet.core."):
                 imported_core = module.split(".")[2] if module.count(".") >= 2 else ""
                 allowed = set(ALLOWED_CORE_MODULES)
+                if game_id == "generic":
+                    allowed.add("belief")
                 if in_eval:
                     allowed.add("gate")
                 if relative.as_posix() in {
@@ -93,6 +106,16 @@ def test_game_packages_do_not_cross_import_or_reach_eval_from_production() -> No
                             f"game module imports forbidden core module {module}",
                         )
                     )
+    assert not failures, "\n".join(failures)
+
+
+def test_belief_package_has_no_network_imports() -> None:
+    failures = [
+        _failure(path, line, f"belief imports network module {module}")
+        for path in BELIEF_ROOT.rglob("*.py")
+        for module, line in _imports(path)
+        if module.split(".", maxsplit=1)[0] in NETWORK_MODULES
+    ]
     assert not failures, "\n".join(failures)
 
 

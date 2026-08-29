@@ -16,6 +16,13 @@ from PIL import Image
 import pytest
 
 from pet.core.adapter_api import CoreServices
+from pet.core.belief import (
+    EvidenceStore,
+    FastObservationPayload,
+    FrameMetricsPayload,
+    KeyWindowPayload,
+    render_observations_markdown,
+)
 from pet.core.config import (
     AdapterConfig,
     GenericVisionConfig,
@@ -35,6 +42,8 @@ from pet.games.generic.adapter import (
     _change_reason,
     _coarse_location,
     _focus_geometry,
+    _focus_scope,
+    _fast_outcome,
     _user_prompt,
 )
 
@@ -244,26 +253,83 @@ async def _wait_for_observation_rows(
     *,
     timeout_seconds: float = 10.0,
 ) -> tuple[Path, list[dict[str, object]]]:
-    """Wait for flushed JSONL rows instead of assuming scheduler timing."""
+    """Wait for complete fast evidence groups instead of assuming scheduler timing."""
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while True:
         sessions = tuple(path for path in log_root.iterdir() if path.is_dir())
         if len(sessions) == 1:
             session = sessions[0]
-            path = session / "observations.jsonl"
+            path = session / "evidence.jsonl"
             if path.is_file():
-                rows = [
-                    json.loads(line)
-                    for line in path.read_text(encoding="utf-8").splitlines()
-                ]
+                rows = _legacy_observation_rows(session)
                 if len(rows) >= expected_count:
                     return session, rows
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(
-                f"observations.jsonl did not reach {expected_count} rows within "
+                f"evidence.jsonl did not reach {expected_count} fast rows within "
                 f"{timeout_seconds:.1f} seconds"
             )
         await asyncio.sleep(0.005)
+
+
+def _legacy_observation_rows(directory: Path) -> list[dict[str, object]]:
+    """Project evidence into the former row shape for unchanged report assertions."""
+    session = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+    if session["origin_monotonic"] is None:
+        return []
+    origin = float(session["origin_monotonic"])
+    grouped: dict[str, dict[str, object]] = {}
+    for event in EvidenceStore.read(directory / "evidence.jsonl"):
+        assert event.root_capture_id is not None
+        grouped.setdefault(event.root_capture_id, {})[event.kind] = event
+    rows: list[dict[str, object]] = []
+    for root_capture_id in sorted(grouped, key=lambda value: int(value[1:])):
+        frame = grouped[root_capture_id]
+        if "fast_observation" not in frame:
+            continue
+        fast_event = frame["fast_observation"]
+        metrics_event = frame["frame_metrics"]
+        key_event = frame["key_window"]
+        fast = fast_event.payload  # type: ignore[union-attr]
+        metrics = metrics_event.payload  # type: ignore[union-attr]
+        key = key_event.payload  # type: ignore[union-attr]
+        assert isinstance(fast, FastObservationPayload)
+        assert isinstance(metrics, FrameMetricsPayload)
+        assert isinstance(key, KeyWindowPayload)
+        rows.append(
+            {
+                "seq": int(root_capture_id[1:]),
+                "frame_ts": origin + fast_event.observed_at,  # type: ignore[union-attr]
+                "wall": metrics.wall,
+                "game": fast.game,
+                "text": fast.text,
+                "region": fast_event.scope.cells if fast_event.scope else None,  # type: ignore[union-attr]
+                "reason": metrics.reason,
+                "change_ratio": round(metrics.change_ratio, 2),
+                "global_change": round(metrics.global_change, 1),
+                "region_area_ratio": (
+                    round(metrics.region_area_ratio)
+                    if metrics.region_area_ratio is not None
+                    else None
+                ),
+                "region_intensity": (
+                    round(metrics.region_intensity)
+                    if metrics.region_intensity is not None
+                    else None
+                ),
+                "input": key.summary,
+                "latency_ms": round(fast.latency_ms, 3),
+                "ttft_ms": round(fast.ttft_ms, 3) if fast.ttft_ms is not None else None,
+                "dropped": fast.drop_reason,
+                "user_prompt": fast.user_prompt,
+                "speculation": fast.speculation,
+                "input_tokens": fast.input_tokens,
+                "output_tokens": fast.output_tokens,
+                "actual_model": fast.actual_model,
+                "actual_provider": fast.actual_provider,
+            }
+        )
+    return rows
 
 
 def test_disabled_adapter_never_initializes_capture(tmp_path: Path) -> None:
@@ -526,9 +592,9 @@ def test_timeout_retrieves_late_worker_exception_without_asyncio_error(
 
 
 def test_latest_wins_keeps_one_pending_frame_and_marks_replacements(tmp_path: Path) -> None:
-    adapter_config, llm_config = _configuration(tmp_path, max_inflight=2)
+    adapter_config, llm_config = _configuration(tmp_path, timeout=1.0, max_inflight=2)
     backend = FakeBackend([_frame(value) for value in range(1, 8)])
-    client = FakeClient([0.06] * 7)
+    client = FakeClient([0.20] * 7)
     adapter = GenericVisionAdapter(
         adapter_config,
         llm_config,
@@ -642,10 +708,7 @@ def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
         await adapter.finish_replay()
 
     asyncio.run(scenario())
-    rows = [
-        json.loads(line)
-        for line in (output / "observations.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
+    rows = _legacy_observation_rows(output)
     assert [row["frame_ts"] for row in rows] == [1.0, 2.0]
     assert "此窗口内无玩家输入" in str(client.calls[0]["user_prompt"])
     assert "玩家输入：\nW" not in str(client.calls[0]["user_prompt"])
@@ -839,6 +902,24 @@ def test_observation_log_writes_mechanical_fields_markers_and_reason_counts(
         ("forced", 0.0, None, "无输入"),
     )
     for sequence, (reason, ratio, location, input_text) in enumerate(fixtures, start=1):
+        scope = _focus_scope(("r2c3",)) if reason == "sparse" else None
+        log.append_frame_metrics(
+            sequence=sequence,
+            frame_ts=float(sequence),
+            wall=f"2026-08-26T12:00:0{sequence}+00:00",
+            reason=reason,  # type: ignore[arg-type]
+            change_ratio=ratio,
+            global_change=6.2,
+            region_area_ratio=30.0 if reason in {"sparse", "coarse"} else None,
+            region_intensity=60.0 if reason in {"sparse", "coarse"} else None,
+            scope=scope,
+        )
+        log.append_key_window(
+            sequence=sequence,
+            frame_ts=float(sequence),
+            summary=input_text,
+            window_start=float(sequence - 1),
+        )
         log.append(
             ObservationRecord(
                 seq=sequence,
@@ -858,6 +939,7 @@ def test_observation_log_writes_mechanical_fields_markers_and_reason_counts(
                 region_intensity=60.0 if reason in {"sparse", "coarse"} else None,
                 input=input_text,
                 focus_location=location,
+                scope=scope,
                 latency_ms=10.0,
                 ttft_ms=5.0,
                 dropped=None,
@@ -872,15 +954,13 @@ def test_observation_log_writes_mechanical_fields_markers_and_reason_counts(
                 output_tokens=20,
                 actual_model="fixture-model",
                 actual_provider="fixture-provider",
+                learned_at=float(sequence) + 0.01,
             )
         )
     log.close()
 
     directory = tmp_path / "mechanical-log"
-    rows = [
-        json.loads(line)
-        for line in (directory / "observations.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
+    rows = _legacy_observation_rows(directory)
     assert [(row["reason"], row["change_ratio"], row["input"]) for row in rows] == [
         ("sparse", 0.12, "W 按住 0.5 秒"),
         ("coarse", 0.38, "无输入"),
@@ -1071,3 +1151,61 @@ def test_b_t1_old_fake_client_scenario_covers_markdown_contract(
         / "observations-baseline-b-t1.md"
     )
     assert markdown_path.read_bytes() == baseline_path.read_bytes()
+    events = list(EvidenceStore.read(output / "evidence.jsonl"))
+    grouped: dict[str, dict[str, object]] = {}
+    for event in events:
+        assert event.root_capture_id is not None
+        grouped.setdefault(event.root_capture_id, {})[event.kind] = event
+    assert set(grouped) == {"f1", "f2", "f3", "f4"}
+    assert all(
+        set(frame) == {"frame_metrics", "key_window", "fast_observation"}
+        for frame in grouped.values()
+    )
+    # ROOT CAUSE: concurrent replacement once discarded every mechanical fact for
+    # that frame; belief must still advance when a model result never exists.
+    for root_capture_id in ("f2", "f3"):
+        assert "frame_metrics" in grouped[root_capture_id]
+        assert "key_window" in grouped[root_capture_id]
+    fast_outcomes = {
+        root: frame["fast_observation"].outcome  # type: ignore[union-attr]
+        for root, frame in grouped.items()
+    }
+    assert fast_outcomes == {
+        "f1": "ok",
+        "f2": "superseded",
+        "f3": "dropped",
+        "f4": "ok",
+    }
+    for event in events:
+        if event.kind in {"frame_metrics", "key_window"}:
+            assert event.learned_at == event.observed_at
+        if event.kind == "fast_observation":
+            payload = event.payload
+            assert isinstance(payload, FastObservationPayload)
+            # Both values derive from the same monotonic elapsed duration; 1 ns
+            # only absorbs binary floating-point multiply/divide roundoff.
+            assert event.learned_at - event.observed_at == pytest.approx(
+                payload.latency_ms / 1000.0,
+                abs=1e-9,
+            )
+    session = json.loads((output / "session.json").read_text(encoding="utf-8"))
+    assert session["origin_monotonic"] == 1.0
+    regenerated = render_observations_markdown(events, fixed_started_at)
+    assert regenerated.encode("utf-8") == markdown_path.read_bytes()
+    assert not (output / "observations.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    ("drop_reason", "outcome"),
+    [
+        (None, "ok"),
+        ("timeout", "dropped"),
+        ("error:HTTP 429 rate limited", "dropped"),
+        ("error:stopped", "dropped"),
+        ("superseded", "superseded"),
+        ("error:模型返回空观察", "failed"),
+        ("error:provider disconnected", "failed"),
+    ],
+)
+def test_fast_outcome_mapping(drop_reason: str | None, outcome: str) -> None:
+    assert _fast_outcome(drop_reason) == outcome

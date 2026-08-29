@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
-from pet.games.generic.adapter import TitleRule, WindowTitleMap
+from pet.core.belief import EvidenceStore
+from pet.core.capture import CapturedFrame, FrameMetadata
+from pet.core.config import LlmConfig, LlmProfileConfig
+from pet.core.llm import LlmResult, LlmUsage
+from pet.games.generic.adapter import GenericVisionAdapter, TitleRule, WindowTitleMap
 from pet.games.generic.eval.observation_replay import (
     SegmentRange,
+    _adapter_configuration,
     _extract_scene,
     _extract_speculation,
     _echoed_metric_values,
@@ -25,6 +32,25 @@ from pet.games.generic.eval.observation_replay import (
     build_parser,
     character_similarity,
 )
+
+
+class LocalReplayFakeClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete_with_images_stream(self, **_kwargs: object) -> LlmResult:
+        self.calls += 1
+        return LlmResult(
+            text="【画面】本地假客户端观察",
+            usage=LlmUsage(100, 20, None),
+            latency_seconds=0.001,
+            model="fixture-model",
+            provider="fixture-provider",
+            finish_reason="stop",
+        )
+
+    def close(self) -> None:
+        return None
 
 
 def _write_session(root: Path) -> None:
@@ -197,3 +223,107 @@ def test_metric_echo_detection_only_matches_renderer_values() -> None:
         "region_intensity": 5,
     }
     assert _echoed_metric_values(row) == ("38%",)
+
+
+def test_local_1080p_replay_emits_three_evidence_kinds_per_selected_frame(
+    tmp_path: Path,
+) -> None:
+    session = (
+        Path(__file__).parents[1]
+        / "recordings"
+        / "capture"
+        / "20260827-220206"
+    )
+    if not session.is_dir():
+        pytest.skip("local 1080p acceptance recording is not present")
+    prepared = _prepare_replay(
+        session,
+        896,
+        SegmentRange(0.0, 60.0),
+        WindowTitleMap.load(),
+        0.50,
+    )
+    # WGC records the borderless Full-HD client area as 1920x1079 on this fixture.
+    assert (prepared.source_width, prepared.source_height) == (1920, 1079)
+    client = LocalReplayFakeClient()
+    llm = LlmConfig(
+        profiles={
+            "vision_fast": LlmProfileConfig(
+                enabled=True,
+                model="fixture-model",
+                provider="fixture-provider",
+                temperature=0.0,
+                max_tokens=200,
+                input_price_per_million_usd=1.0,
+                output_price_per_million_usd=2.0,
+            )
+        }
+    )
+    adapter = GenericVisionAdapter(
+        _adapter_configuration(
+            profile="vision_fast",
+            send_width=896,
+            timeout=1.0,
+            max_inflight=4,
+            region_focus_max=0.50,
+        ),
+        llm,
+        capture_backend_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("local replay must not initialize capture")
+        ),
+        selector_factory=lambda _sparsity: (_ for _ in ()).throw(
+            AssertionError("local replay selection was already prepared")
+        ),
+        client_factory=lambda *_args: client,
+        title_map=WindowTitleMap.load(),
+    )
+    output = tmp_path / "local-1080p"
+
+    async def scenario() -> None:
+        adapter.start_replay(
+            output,
+            input_context=prepared.input_context,
+            input_window_start_monotonic=prepared.input_window_start_monotonic,
+        )
+        for item in prepared.selected:
+            with Image.open(item.path) as source:
+                bitmap = source.convert("RGB")
+            frame = CapturedFrame(
+                bitmap,
+                FrameMetadata(
+                    prepared.title,
+                    prepared.process_name,
+                    item.timing.wall_time,
+                    bitmap.width,
+                    bitmap.height,
+                    item.timing.monotonic_seconds,
+                    item.timing.source,
+                ),
+            )
+            await adapter.submit_replay_frame(
+                frame,
+                prepared.game,
+                item.region,
+                item.baseline_monotonic_seconds,
+                confirmed_region=item.confirmed_region,
+                change_ratio=item.change_ratio,
+                global_change=item.global_change,
+                region_intensity=item.region_intensity,
+                forced=item.forced,
+            )
+        await adapter.finish_replay()
+
+    asyncio.run(scenario())
+    events = list(EvidenceStore.read(output / "evidence.jsonl"))
+    assert len(events) == len(prepared.selected) * 3
+    roots: dict[str, set[str]] = {}
+    for event in events:
+        assert event.root_capture_id is not None
+        roots.setdefault(event.root_capture_id, set()).add(event.kind)
+    assert all(
+        kinds == {"frame_metrics", "key_window", "fast_observation"}
+        for kinds in roots.values()
+    )
+    assert client.calls == len(prepared.selected)
+    assert (output / "observations.md").is_file()
+    assert not (output / "observations.jsonl").exists()

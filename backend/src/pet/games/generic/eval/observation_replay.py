@@ -21,6 +21,12 @@ import tomllib
 
 from PIL import Image
 
+from pet.core.belief import (
+    EvidenceStore,
+    FastObservationPayload,
+    FrameMetricsPayload,
+    KeyWindowPayload,
+)
 from pet.core.capture import (
     AdaptiveFrameSelector,
     CapturedFrame,
@@ -397,11 +403,67 @@ def _percentile(values: Sequence[float], percentile: float) -> float | None:
 
 
 def _read_rows(directory: Path) -> list[dict[str, object]]:
-    return [
-        json.loads(line)
-        for line in (directory / "observations.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    session = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+    origin_value = session.get("origin_monotonic")
+    if origin_value is None:
+        return []
+    origin = float(origin_value)
+    grouped: dict[str, dict[str, object]] = {}
+    for event in EvidenceStore.read(directory / "evidence.jsonl"):
+        if event.root_capture_id is None:
+            continue
+        grouped.setdefault(event.root_capture_id, {})[event.kind] = event
+    rows: list[dict[str, object]] = []
+    for root_capture_id in sorted(grouped, key=lambda value: int(value[1:])):
+        frame = grouped[root_capture_id]
+        if not {"fast_observation", "frame_metrics", "key_window"}.issubset(frame):
+            continue
+        fast_event = frame["fast_observation"]
+        metrics_event = frame["frame_metrics"]
+        key_event = frame["key_window"]
+        fast = fast_event.payload  # type: ignore[union-attr]
+        metrics = metrics_event.payload  # type: ignore[union-attr]
+        key = key_event.payload  # type: ignore[union-attr]
+        if not isinstance(fast, FastObservationPayload):
+            raise ObservationReplayError(f"{root_capture_id} 的 fast payload 类型错误")
+        if not isinstance(metrics, FrameMetricsPayload):
+            raise ObservationReplayError(f"{root_capture_id} 的 detector payload 类型错误")
+        if not isinstance(key, KeyWindowPayload):
+            raise ObservationReplayError(f"{root_capture_id} 的 input payload 类型错误")
+        rows.append(
+            {
+                "seq": int(root_capture_id[1:]),
+                "frame_ts": origin + fast_event.observed_at,  # type: ignore[union-attr]
+                "wall": metrics.wall,
+                "game": fast.game,
+                "text": fast.text,
+                "region": fast_event.scope.cells if fast_event.scope else None,  # type: ignore[union-attr]
+                "reason": metrics.reason,
+                "change_ratio": round(metrics.change_ratio, 2),
+                "global_change": round(metrics.global_change, 1),
+                "region_area_ratio": (
+                    round(metrics.region_area_ratio)
+                    if metrics.region_area_ratio is not None
+                    else None
+                ),
+                "region_intensity": (
+                    round(metrics.region_intensity)
+                    if metrics.region_intensity is not None
+                    else None
+                ),
+                "input": key.summary,
+                "latency_ms": round(fast.latency_ms, 3),
+                "ttft_ms": round(fast.ttft_ms, 3) if fast.ttft_ms is not None else None,
+                "dropped": fast.drop_reason,
+                "user_prompt": fast.user_prompt,
+                "speculation": fast.speculation,
+                "input_tokens": fast.input_tokens,
+                "output_tokens": fast.output_tokens,
+                "actual_model": fast.actual_model,
+                "actual_provider": fast.actual_provider,
+            }
+        )
+    return rows
 
 
 def character_similarity(left: str, right: str) -> float:

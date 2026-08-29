@@ -14,12 +14,23 @@ from pathlib import Path
 import re
 import time
 import tomllib
-from typing import Literal, Protocol
+from typing import Protocol
 
 from fastapi import APIRouter
 from PIL import Image
 
 from pet.core.adapter_api import CoreServices, GameStatus, PORT_VERSION
+from pet.core.belief import (
+    ChangeReason,
+    EvidenceEvent,
+    EvidenceOutcome,
+    EvidenceStore,
+    FastObservationPayload,
+    FrameMetricsPayload,
+    KeyWindowPayload,
+    ObservationsMarkdownWriter,
+    Scope,
+)
 from pet.core.config import AdapterConfig, LlmConfig, resolve_llm_profile
 from pet.core.llm import (
     LlmImage,
@@ -45,7 +56,6 @@ FORCED_TEMPLATE = "本帧为定时快照，此前约 {seconds:.1f} 秒未检测�
 MODEL_NO_INPUT_SUMMARY = "此窗口内无玩家输入"
 LOG_NO_INPUT_SUMMARY = "无输入"
 GRID_COORDINATE_PATTERN = re.compile(r"(?i)r\d+c\d+")
-ChangeReason = Literal["sparse", "coarse", "large", "forced"]
 CHANGE_REASONS: tuple[ChangeReason, ...] = ("sparse", "coarse", "large", "forced")
 
 
@@ -164,6 +174,7 @@ class ObservationRecord:
     region_intensity: float | None
     input: str
     focus_location: str | None
+    scope: Scope | None
     latency_ms: float
     ttft_ms: float | None
     dropped: str | None
@@ -177,39 +188,7 @@ class ObservationRecord:
     output_tokens: int | None = None
     actual_model: str | None = None
     actual_provider: str | None = None
-
-    def json_value(self) -> dict[str, object]:
-        return {
-            "seq": self.seq,
-            "frame_ts": self.frame_ts,
-            "wall": self.wall,
-            "game": self.game,
-            "text": self.text,
-            "region": list(self.region) if self.region else None,
-            "reason": self.reason,
-            "change_ratio": round(self.change_ratio, 2),
-            "global_change": round(self.global_change, 1),
-            "region_area_ratio": (
-                round(self.region_area_ratio)
-                if self.region_area_ratio is not None
-                else None
-            ),
-            "region_intensity": (
-                round(self.region_intensity)
-                if self.region_intensity is not None
-                else None
-            ),
-            "input": self.input,
-            "latency_ms": round(self.latency_ms, 3),
-            "ttft_ms": round(self.ttft_ms, 3) if self.ttft_ms is not None else None,
-            "dropped": self.dropped,
-            "user_prompt": self.user_prompt,
-            "speculation": self.speculation,
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "actual_model": self.actual_model,
-            "actual_provider": self.actual_provider,
-        }
+    learned_at: float = 0.0
 
 
 @dataclass(slots=True)
@@ -226,6 +205,9 @@ class PendingFrame:
     region_intensity: float | None
     focus_location: str | None
     baseline_monotonic_seconds: float
+    scope: Scope | None
+    scheduled_at_clock: float
+    key_window_recorded: bool = False
 
 
 def _change_reason(forced: bool, change_ratio: float) -> ChangeReason:
@@ -283,6 +265,29 @@ def _focus_geometry(region: Sequence[str]) -> tuple[str, float]:
     return location, bbox_cells / (16 * 9) * 100.0
 
 
+def _focus_scope(region: Sequence[str]) -> Scope:
+    """Convert the detector's 16-row by 9-column cells to normalized x/y bounds."""
+    location, area_ratio = _focus_geometry(region)
+    rows: list[int] = []
+    columns: list[int] = []
+    for cell in region:
+        row_text, column_text = cell.removeprefix("r").split("c", maxsplit=1)
+        rows.append(int(row_text))
+        columns.append(int(column_text))
+    return Scope(
+        cells=list(region),
+        grid=(16, 9),
+        bbox=(
+            (min(columns) - 1) / 9.0,
+            (min(rows) - 1) / 16.0,
+            max(columns) / 9.0,
+            max(rows) / 16.0,
+        ),
+        location=location,
+        area_ratio=area_ratio,
+    )
+
+
 def _logged_input(input_summary: str | None) -> str:
     if input_summary is None or input_summary.strip() == MODEL_NO_INPUT_SUMMARY:
         return LOG_NO_INPUT_SUMMARY
@@ -300,8 +305,18 @@ def _model_segment(text: str, label: str) -> str | None:
     return " ".join(match.group(1).split())
 
 
+def _fast_outcome(drop_reason: str | None) -> EvidenceOutcome:
+    if drop_reason is None:
+        return "ok"
+    if drop_reason == "superseded":
+        return "superseded"
+    if drop_reason in {"timeout", "error:stopped"} or "429" in drop_reason:
+        return "dropped"
+    return "failed"
+
+
 class ObservationLog:
-    """Frame-ordered machine and human logs; screenshots never enter this class."""
+    """Session summary around append-only evidence and its regenerable view."""
 
     def __init__(
         self,
@@ -323,13 +338,11 @@ class ObservationLog:
             self.directory.mkdir(parents=True)
         self.started_at = datetime.now(timezone.utc)
         self._first_frame_ts: float | None = None
-        self._jsonl = (self.directory / "observations.jsonl").open("w", encoding="utf-8", newline="\n")
-        self._markdown = (self.directory / "observations.md").open("w", encoding="utf-8", newline="\n")
-        self._markdown.write(
-            "# 通用视觉观察日志\n\n"
-            f"本会话始于 {self.started_at.isoformat()}\n\n"
+        self._evidence = EvidenceStore.open(self.directory)
+        self._markdown = ObservationsMarkdownWriter(
+            self.directory / "observations.md",
+            self.started_at,
         )
-        self._markdown.flush()
         self.parameters = parameters
         self.records = 0
         self.calls = 0
@@ -342,36 +355,121 @@ class ObservationLog:
         self.reason_counts: Counter[str] = Counter()
         self._write_session(None)
 
+    def append_frame_metrics(
+        self,
+        *,
+        sequence: int,
+        frame_ts: float,
+        wall: str,
+        reason: ChangeReason,
+        change_ratio: float,
+        global_change: float,
+        region_area_ratio: float | None,
+        region_intensity: float | None,
+        scope: Scope | None,
+    ) -> None:
+        observed_at = self._relative(frame_ts)
+        root_capture_id = f"f{sequence}"
+        event = EvidenceEvent(
+            evidence_id=self._evidence.new_evidence_id(root_capture_id, "detector"),
+            source="detector",
+            kind="frame_metrics",
+            root_capture_id=root_capture_id,
+            observed_at=observed_at,
+            learned_at=observed_at,
+            scope=scope,
+            payload=FrameMetricsPayload(
+                reason=reason,
+                change_ratio=change_ratio,
+                global_change=global_change,
+                region_area_ratio=region_area_ratio,
+                region_intensity=region_intensity,
+                heartbeat=reason == "forced",
+                wall=wall,
+            ),
+            derived_from=[],
+            context_version=None,
+            outcome="ok",
+        )
+        self._append_event(event)
+        self.reason_counts[reason] += 1
+        self._write_session(None)
+
+    def append_key_window(
+        self,
+        *,
+        sequence: int,
+        frame_ts: float,
+        summary: str,
+        window_start: float | None,
+    ) -> None:
+        observed_at = self._relative(frame_ts)
+        relative_start = (
+            max(0.0, window_start - self._origin())
+            if window_start is not None
+            else None
+        )
+        root_capture_id = f"f{sequence}"
+        event = EvidenceEvent(
+            evidence_id=self._evidence.new_evidence_id(root_capture_id, "input"),
+            source="input",
+            kind="key_window",
+            root_capture_id=root_capture_id,
+            observed_at=observed_at,
+            learned_at=observed_at,
+            scope=None,
+            payload=KeyWindowPayload(
+                summary=summary,
+                window_start=relative_start,
+                window_end=observed_at,
+            ),
+            derived_from=[],
+            context_version=None,
+            outcome="ok",
+        )
+        self._append_event(event)
+
     def append(self, record: ObservationRecord) -> None:
-        self._jsonl.write(json.dumps(record.json_value(), ensure_ascii=False) + "\n")
-        self._jsonl.flush()
-        if self._first_frame_ts is None:
-            self._first_frame_ts = record.frame_ts
-        relative_seconds = max(0, round(record.frame_ts - self._first_frame_ts))
-        heartbeat = "（心跳）" if record.reason == "forced" else ""
-        self._markdown.write(f"T+{relative_seconds}{heartbeat}：\n")
-        if record.dropped is not None:
-            self._markdown.write(f"[丢弃：{record.dropped}]\n")
-        else:
-            scene = _model_segment(record.text, "【画面】")
-            if scene is None:
-                scene = " ".join(record.text.split())
-            self._markdown.write(
-                f"【全局画面】（全局像素变化{record.global_change:.1f}%）{scene}\n"
-            )
-            if record.region_area_ratio is not None:
-                local = _model_segment(record.text, "【局部】")
-                if local is not None:
-                    assert record.region_intensity is not None
-                    self._markdown.write(
-                        f"【局部｜区域占比{record.region_area_ratio:.0f}%】"
-                        f"（区域像素变化{record.region_intensity:.0f}%）{local}\n"
-                    )
-            speculation = record.speculation or _model_segment(record.text, "【推测】")
-            if speculation:
-                self._markdown.write(f"【推测】{speculation}\n")
-        self._markdown.write(f"【玩家输入】{record.input}\n\n")
-        self._markdown.flush()
+        observed_at = self._relative(record.frame_ts)
+        learned_at = max(observed_at, record.learned_at - self._origin())
+        root_capture_id = f"f{record.seq}"
+        outcome = _fast_outcome(record.dropped)
+        text = record.text if outcome == "ok" else ""
+        event = EvidenceEvent(
+            evidence_id=self._evidence.new_evidence_id(root_capture_id, "fast"),
+            source="fast",
+            kind="fast_observation",
+            root_capture_id=root_capture_id,
+            observed_at=observed_at,
+            learned_at=learned_at,
+            scope=record.scope,
+            payload=FastObservationPayload(
+                text=text,
+                scene=_model_segment(text, "【画面】"),
+                local=_model_segment(text, "【局部】"),
+                speculation=(
+                    record.speculation or _model_segment(text, "【推测】")
+                    if outcome == "ok"
+                    else None
+                ),
+                game=record.game,
+                latency_ms=record.latency_ms,
+                ttft_ms=record.ttft_ms,
+                visible_output_tokens=record.visible_output_tokens,
+                input_tokens=record.input_tokens,
+                output_tokens=record.output_tokens,
+                truncated=record.truncated,
+                cost_usd=record.cost_usd,
+                actual_model=record.actual_model,
+                actual_provider=record.actual_provider,
+                user_prompt=record.user_prompt,
+                drop_reason=record.dropped,
+            ),
+            derived_from=[],
+            context_version=None,
+            outcome=outcome,
+        )
+        self._append_event(event)
         self.records += 1
         if record.model_called:
             self.calls += 1
@@ -385,18 +483,33 @@ class ObservationLog:
             self.visible_output_token_count += 1
         if record.truncated:
             self.truncated += 1
-        self.reason_counts[record.reason] += 1
         self._write_session(None)
 
     def close(self) -> None:
         self._write_session(datetime.now(timezone.utc))
-        self._jsonl.close()
         self._markdown.close()
+        self._evidence.close()
+
+    def _relative(self, frame_ts: float) -> float:
+        if self._first_frame_ts is None:
+            self._first_frame_ts = frame_ts
+            self._write_session(None)
+        return max(0.0, frame_ts - self._origin())
+
+    def _origin(self) -> float:
+        if self._first_frame_ts is None:
+            raise RuntimeError("evidence origin is unavailable before the first frame")
+        return self._first_frame_ts
+
+    def _append_event(self, event: EvidenceEvent) -> None:
+        self._evidence.append(event)
+        self._markdown.append(event)
 
     def _write_session(self, ended_at: datetime | None) -> None:
         value = {
             "started_at": self.started_at.isoformat(),
             "ended_at": ended_at.isoformat() if ended_at else None,
+            "origin_monotonic": self._first_frame_ts,
             "parameters": self.parameters,
             "observation_attempt_count": self.records,
             "call_count": self.calls,
@@ -470,10 +583,10 @@ class GenericVisionAdapter:
         self._client: LlmVisionClientProtocol | None = None
         self._log: ObservationLog | None = None
         self._inflight: set[asyncio.Task[None]] = set()
+        self._task_frames: dict[asyncio.Task[None], PendingFrame] = {}
+        self._completed_sequences: set[int] = set()
         self._queued_frame: PendingFrame | None = None
-        self._pending: dict[int, ObservationRecord] = {}
         self._next_sequence = 1
-        self._next_write_sequence = 1
         self._input_context: InputContextLike | None = None
         self._last_dispatched_frame_ts: float | None = None
         self._last_status: tuple[str, str, bool, bool] | None = None
@@ -634,6 +747,11 @@ class GenericVisionAdapter:
             queued = self._queued_frame
             self._queued_frame = None
             queued.frame.bitmap.close()
+            self._record_key_window(
+                queued,
+                LOG_NO_INPUT_SUMMARY,
+                self._last_dispatched_frame_ts,
+            )
             self._complete_record(
                 self._dropped_record(queued, "error:stopped")
             )
@@ -753,22 +871,39 @@ class GenericVisionAdapter:
         focus_location: str | None = None
         region_area_ratio: float | None = None
         focused_intensity: float | None = None
+        scope: Scope | None = None
         if has_focus:
-            focus_location, region_area_ratio = _focus_geometry(confirmed_region)
+            scope = _focus_scope(confirmed_region)
+            focus_location = scope.location
+            region_area_ratio = scope.area_ratio
             focused_intensity = region_intensity
         pending = PendingFrame(
-            sequence,
-            frame,
-            game,
-            region,
-            confirmed_region,
-            reason,
-            change_ratio,
-            global_change,
-            region_area_ratio,
-            focused_intensity,
-            focus_location,
-            baseline_monotonic_seconds,
+            seq=sequence,
+            frame=frame,
+            game=game,
+            region=region,
+            confirmed_region=confirmed_region,
+            reason=reason,
+            change_ratio=change_ratio,
+            global_change=global_change,
+            region_area_ratio=region_area_ratio,
+            region_intensity=focused_intensity,
+            focus_location=focus_location,
+            baseline_monotonic_seconds=baseline_monotonic_seconds,
+            scope=scope,
+            scheduled_at_clock=self._clock(),
+        )
+        assert self._log is not None
+        self._log.append_frame_metrics(
+            sequence=sequence,
+            frame_ts=frame.metadata.monotonic_seconds,
+            wall=frame.metadata.captured_at.astimezone(timezone.utc).isoformat(),
+            reason=reason,
+            change_ratio=change_ratio,
+            global_change=global_change,
+            region_area_ratio=region_area_ratio,
+            region_intensity=focused_intensity,
+            scope=scope,
         )
         while wait_for_capacity and len(self._inflight) >= self._settings.max_inflight:
             done, _ = await asyncio.wait(
@@ -781,6 +916,11 @@ class GenericVisionAdapter:
             self._queued_frame = pending
             if replaced is not None:
                 replaced.frame.bitmap.close()
+                self._record_key_window(
+                    replaced,
+                    LOG_NO_INPUT_SUMMARY,
+                    self._last_dispatched_frame_ts,
+                )
                 self._complete_record(self._dropped_record(replaced, "superseded"))
             return
         self._launch_frame(pending)
@@ -788,6 +928,7 @@ class GenericVisionAdapter:
     def _launch_frame(self, pending: PendingFrame) -> None:
         frame_ts = pending.frame.metadata.monotonic_seconds
         input_summary: str | None = None
+        window_start = self._last_dispatched_frame_ts
         if self._settings.input_context:
             if self._input_context is None:
                 raise RuntimeError("输入上下文已启用但监听器未初始化")
@@ -797,6 +938,7 @@ class GenericVisionAdapter:
             )
             self._last_dispatched_frame_ts = frame_ts
         logged_input = _logged_input(input_summary)
+        self._record_key_window(pending, logged_input, window_start)
         baseline_seconds_ago = frame_ts - pending.baseline_monotonic_seconds
         if baseline_seconds_ago < -1e-6:
             raise ValueError("变化基线时间晚于当前帧")
@@ -814,27 +956,35 @@ class GenericVisionAdapter:
         if GRID_COORDINATE_PATTERN.search(user_prompt):
             raise AssertionError("模型消息不得包含格子坐标")
         task = asyncio.create_task(
-            self._observe_frame(
-                pending.seq,
-                pending.frame,
-                pending.game,
-                pending.region,
-                pending.reason,
-                pending.change_ratio,
-                pending.global_change,
-                pending.region_area_ratio,
-                pending.region_intensity,
-                logged_input,
-                pending.focus_location,
-                user_prompt,
-            ),
+            self._observe_frame(pending, logged_input, user_prompt),
             name=f"generic-vision-call-{pending.seq}",
         )
         self._inflight.add(task)
+        self._task_frames[task] = pending
         task.add_done_callback(self._observation_done)
+
+    def _record_key_window(
+        self,
+        pending: PendingFrame,
+        summary: str,
+        window_start: float | None,
+    ) -> None:
+        if pending.key_window_recorded:
+            raise RuntimeError(f"key window already recorded for frame f{pending.seq}")
+        assert self._log is not None
+        self._log.append_key_window(
+            sequence=pending.seq,
+            frame_ts=pending.frame.metadata.monotonic_seconds,
+            summary=summary,
+            window_start=window_start,
+        )
+        pending.key_window_recorded = True
 
     def _observation_done(self, task: asyncio.Task[None]) -> None:
         self._inflight.discard(task)
+        pending = self._task_frames.pop(task)
+        if task.cancelled() and pending.seq not in self._completed_sequences:
+            self._complete_record(self._dropped_record(pending, "error:stopped"))
         self._launch_queued_frame()
 
     def _launch_queued_frame(self) -> None:
@@ -848,8 +998,8 @@ class GenericVisionAdapter:
         self._queued_frame = None
         self._launch_frame(pending)
 
-    @staticmethod
-    def _dropped_record(pending: PendingFrame, reason: str) -> ObservationRecord:
+    def _dropped_record(self, pending: PendingFrame, reason: str) -> ObservationRecord:
+        elapsed = max(0.0, self._clock() - pending.scheduled_at_clock)
         return ObservationRecord(
             seq=pending.seq,
             frame_ts=pending.frame.metadata.monotonic_seconds,
@@ -864,31 +1014,23 @@ class GenericVisionAdapter:
             region_intensity=pending.region_intensity,
             input=LOG_NO_INPUT_SUMMARY,
             focus_location=pending.focus_location,
-            latency_ms=0.0,
+            scope=pending.scope,
+            latency_ms=elapsed * 1000.0,
             ttft_ms=None,
             dropped=reason,
             cost_usd=0.0,
             model_called=False,
             visible_output_tokens=None,
             truncated=False,
+            learned_at=pending.frame.metadata.monotonic_seconds + elapsed,
         )
 
     async def _observe_frame(
         self,
-        sequence: int,
-        frame: CapturedFrameLike,
-        game: str,
-        region: tuple[str, ...],
-        reason: ChangeReason,
-        change_ratio: float,
-        global_change: float,
-        region_area_ratio: float | None,
-        region_intensity: float | None,
+        pending: PendingFrame,
         logged_input: str,
-        focus_location: str | None,
         user_prompt: str,
     ) -> None:
-        started = self._clock()
         dropped: str | None = None
         text = ""
         cost = 0.0
@@ -900,6 +1042,7 @@ class GenericVisionAdapter:
         output_tokens: int | None = None
         actual_model: str | None = None
         actual_provider: str | None = None
+        cancelled = False
         try:
             assert self._client is not None
             loop = asyncio.get_running_loop()
@@ -913,7 +1056,7 @@ class GenericVisionAdapter:
                     user_prompt=user_prompt,
                     images=(
                         LlmImage(
-                            frame.bitmap,
+                            pending.frame.bitmap,
                             "当前画面",
                             target_width=self._settings.send_width,
                             encoding="jpeg",
@@ -929,7 +1072,7 @@ class GenericVisionAdapter:
             # dropped 已承载产品层事实；每秒一帧下 warning 会在上游抖动时刷屏，
             # 所以迟到异常在取回后刻意只记 debug，而不是静默吞掉或重复告警。
             def release_bitmap(completed: asyncio.Future[LlmResult]) -> None:
-                frame.bitmap.close()
+                pending.frame.bitmap.close()
                 if completed.cancelled():
                     return
                 late_error = completed.exception()
@@ -966,27 +1109,28 @@ class GenericVisionAdapter:
             self._register_failure("timeout")
         except asyncio.CancelledError:
             dropped = "error:stopped"
-            raise
+            cancelled = True
         except Exception as error:
             dropped = f"error:{_one_line(error)}"
             self._register_failure(str(error))
-
+        elapsed = max(0.0, self._clock() - pending.scheduled_at_clock)
         self._complete_record(
             ObservationRecord(
-                seq=sequence,
-                frame_ts=frame.metadata.monotonic_seconds,
-                wall=frame.metadata.captured_at.astimezone(timezone.utc).isoformat(),
-                game=game,
+                seq=pending.seq,
+                frame_ts=pending.frame.metadata.monotonic_seconds,
+                wall=pending.frame.metadata.captured_at.astimezone(timezone.utc).isoformat(),
+                game=pending.game,
                 text=text,
-                region=region or None,
-                reason=reason,
-                change_ratio=change_ratio,
-                global_change=global_change,
-                region_area_ratio=region_area_ratio,
-                region_intensity=region_intensity,
+                region=pending.region or None,
+                reason=pending.reason,
+                change_ratio=pending.change_ratio,
+                global_change=pending.global_change,
+                region_area_ratio=pending.region_area_ratio,
+                region_intensity=pending.region_intensity,
                 input=logged_input,
-                focus_location=focus_location,
-                latency_ms=(self._clock() - started) * 1000.0,
+                focus_location=pending.focus_location,
+                scope=pending.scope,
+                latency_ms=elapsed * 1000.0,
                 ttft_ms=ttft_ms,
                 dropped=dropped,
                 cost_usd=cost,
@@ -999,16 +1143,18 @@ class GenericVisionAdapter:
                 output_tokens=output_tokens,
                 actual_model=actual_model,
                 actual_provider=actual_provider,
+                learned_at=pending.frame.metadata.monotonic_seconds + elapsed,
             )
         )
+        if cancelled:
+            raise asyncio.CancelledError
 
     def _complete_record(self, record: ObservationRecord) -> None:
-        self._pending[record.seq] = record
-        while self._next_write_sequence in self._pending:
-            current = self._pending.pop(self._next_write_sequence)
-            assert self._log is not None
-            self._log.append(current)
-            self._next_write_sequence += 1
+        if record.seq in self._completed_sequences:
+            raise RuntimeError(f"fast observation already recorded for frame f{record.seq}")
+        self._completed_sequences.add(record.seq)
+        assert self._log is not None
+        self._log.append(record)
         self._refresh_cost_warning()
 
     def _price(self, result: LlmResult) -> float:
