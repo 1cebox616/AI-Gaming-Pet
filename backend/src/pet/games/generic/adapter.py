@@ -925,7 +925,18 @@ class GenericVisionAdapter:
                     reasoning_enabled=False,
                 ),
             )
-            future.add_done_callback(lambda _future: frame.bitmap.close())
+
+            # dropped 已承载产品层事实；每秒一帧下 warning 会在上游抖动时刷屏，
+            # 所以迟到异常在取回后刻意只记 debug，而不是静默吞掉或重复告警。
+            def release_bitmap(completed: asyncio.Future[LlmResult]) -> None:
+                frame.bitmap.close()
+                if completed.cancelled():
+                    return
+                late_error = completed.exception()
+                if late_error is not None:
+                    logger.debug("通用视觉工作线程迟到失败：%s", _one_line(late_error))
+
+            future.add_done_callback(release_bitmap)
             result = await asyncio.wait_for(
                 asyncio.shield(future),
                 timeout=self._settings.fast_timeout_seconds,

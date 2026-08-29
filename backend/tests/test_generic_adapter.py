@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import logging
 from pathlib import Path
 import re
 import threading
@@ -149,6 +150,19 @@ class DelayedBitmapClient(FakeClient):
             provider="fixture-provider",
             finish_reason="stop",
         )
+
+
+class DelayedFailureClient(FakeClient):
+    def __init__(self, delay: float) -> None:
+        super().__init__()
+        self.delay = delay
+        self.finished = threading.Event()
+
+    def complete_with_images_stream(self, **kwargs: object) -> LlmResult:
+        self.calls.append(kwargs)
+        time.sleep(self.delay)
+        self.finished.set()
+        raise RuntimeError("late worker failure")
 
 
 def _configuration(
@@ -474,6 +488,39 @@ def test_timeout_keeps_bitmap_alive_until_worker_finishes(tmp_path: Path) -> Non
     assert client.bitmap_bytes is not None
     with pytest.raises(ValueError, match="Operation on closed image"):
         frame.bitmap.tobytes()
+
+
+# 锁住超时后的工作线程迟到失败未取回而产生 asyncio ERROR 噪声的故障。
+def test_timeout_retrieves_late_worker_exception_without_asyncio_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    adapter_config, llm_config = _configuration(tmp_path, timeout=0.01)
+    client = DelayedFailureClient(0.08)
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: FakeBackend([_frame(1)]),
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: client,
+        title_map=_title_map(),
+    )
+    caplog.set_level(logging.ERROR, logger="asyncio")
+
+    async def scenario() -> list[dict[str, object]]:
+        await adapter.start(_core([]))
+        try:
+            _, rows = await _wait_for_observation_rows(tmp_path, 1)
+            worker_finished = await asyncio.to_thread(client.finished.wait, 2.0)
+            assert worker_finished is True
+            await asyncio.sleep(0.05)
+            return rows
+        finally:
+            await adapter.stop()
+
+    rows = asyncio.run(scenario())
+    assert rows[0]["dropped"] == "timeout"
+    assert "Future exception was never retrieved" not in caplog.text
 
 
 def test_latest_wins_keeps_one_pending_frame_and_marks_replacements(tmp_path: Path) -> None:
