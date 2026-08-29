@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use serde::Deserialize;
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -169,7 +170,8 @@ impl PetMenuAction {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BackendMenuState {
     connected: bool,
     speech_enabled: bool,
@@ -179,8 +181,6 @@ struct BackendMenuState {
     llm_mode: String,
     llm_cost: String,
 }
-
-type BackendMenuStateInput = (bool, bool, bool, String, String, String, String);
 
 struct PetMenu {
     menu: Menu<Wry>,
@@ -456,20 +456,7 @@ fn build_pet_menu(app: &App) -> tauri::Result<PetMenu> {
 }
 
 #[tauri::command]
-fn update_pet_menu_state(
-    state: BackendMenuStateInput,
-    menu: State<'_, PetMenu>,
-) -> Result<(), String> {
-    let (connected, speech_enabled, muted, game_id, game_status, llm_mode, llm_cost) = state;
-    let state = BackendMenuState {
-        connected,
-        speech_enabled,
-        muted,
-        game_id,
-        game_status,
-        llm_mode,
-        llm_cost,
-    };
+fn update_pet_menu_state(state: BackendMenuState, menu: State<'_, PetMenu>) -> Result<(), String> {
     menu.update_backend_state(&state)
 }
 
@@ -836,6 +823,31 @@ mod tests {
         assert_eq!(state.game_id, "generic");
         assert_eq!(state.llm_mode, "当前：AI 模式");
         assert_eq!(state.llm_cost, "本次花费：$0.0123");
+    }
+
+    // 锁住前后端菜单状态字段按名字对齐，避免同类型字段按位置静默错位。
+    #[test]
+    fn backend_menu_state_deserializes_camel_case_ipc_fields_by_name() {
+        let state: BackendMenuState = serde_json::from_str(
+            r#"{
+                "connected": true,
+                "speechEnabled": false,
+                "muted": true,
+                "gameId": "generic",
+                "gameStatus": "正在观看",
+                "llmMode": "当前：AI 模式",
+                "llmCost": "本次花费：$0.0456"
+            }"#,
+        )
+        .expect("camelCase backend menu state must deserialize");
+
+        assert!(state.connected);
+        assert!(!state.speech_enabled);
+        assert!(state.muted);
+        assert_eq!(state.game_id, "generic");
+        assert_eq!(state.game_status, "正在观看");
+        assert_eq!(state.llm_mode, "当前：AI 模式");
+        assert_eq!(state.llm_cost, "本次花费：$0.0456");
     }
 
     #[test]

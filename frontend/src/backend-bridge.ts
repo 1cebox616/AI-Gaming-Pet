@@ -44,25 +44,51 @@ let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
 let bridgeStarted = false;
 let lastUtteranceId: string | undefined;
 
-type BackendMenuState = readonly [
-  connected: boolean,
-  speechEnabled: boolean,
-  muted: boolean,
-  gameId: string,
-  gameStatus: string,
-  llmMode: string,
-  llmCost: string,
-];
+interface BackendMenuState {
+  connected: boolean;
+  speechEnabled: boolean;
+  muted: boolean;
+  gameId: string;
+  gameStatus: string;
+  llmMode: string;
+  llmCost: string;
+}
 
 function setPetDisconnected(): void {
   setPetExpression("speechless");
   setPetDimmed(true);
   setWatchStatus(null);
-  updatePetMenuState([false, false, false, "", "后端：未连接", "—", "—"]);
+  updatePetMenuState({
+    connected: false,
+    speechEnabled: false,
+    muted: false,
+    gameId: "",
+    gameStatus: "后端：未连接",
+    llmMode: "—",
+    llmCost: "—",
+  });
 }
 
-function updatePetMenuState(state: BackendMenuState): void {
-  void invoke("update_pet_menu_state", { state }).catch((error: unknown) => {
+function updatePetMenuState({
+  connected,
+  speechEnabled,
+  muted,
+  gameId,
+  gameStatus,
+  llmMode,
+  llmCost,
+}: BackendMenuState): void {
+  void invoke("update_pet_menu_state", {
+    state: {
+      connected,
+      speechEnabled,
+      muted,
+      gameId,
+      gameStatus,
+      llmMode,
+      llmCost,
+    },
+  }).catch((error: unknown) => {
     console.error("failed to synchronize pet menu state", error);
   });
 }
@@ -242,15 +268,15 @@ function handleMessage(event: MessageEvent<unknown>): void {
         ? summaryString(message.game, "game")
         : null,
     );
-    updatePetMenuState([
-      true,
-      message.speech_enabled,
-      message.muted,
-      message.game.game_id,
-      formatGameStatus(message.game),
-      formatLlmMode(message.llm),
-      formatLlmCost(message.llm),
-    ]);
+    updatePetMenuState({
+      connected: true,
+      speechEnabled: message.speech_enabled,
+      muted: message.muted,
+      gameId: message.game.game_id,
+      gameStatus: formatGameStatus(message.game),
+      llmMode: formatLlmMode(message.llm),
+      llmCost: formatLlmCost(message.llm),
+    });
     return;
   }
 
