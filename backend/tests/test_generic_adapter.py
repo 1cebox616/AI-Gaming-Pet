@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -1014,7 +1015,8 @@ def test_b_t1_old_fake_client_scenario_covers_markdown_contract(
         await adapter.finish_replay()
 
     asyncio.run(scenario())
-    markdown = (output / "observations.md").read_text(encoding="utf-8")
+    markdown_path = output / "observations.md"
+    markdown = markdown_path.read_text(encoding="utf-8")
     assert "本会话始于 2026-08-29T12:34:56+00:00" in markdown
     assert "[丢弃：superseded]" in markdown
     assert "[丢弃：timeout]" in markdown
@@ -1024,3 +1026,48 @@ def test_b_t1_old_fake_client_scenario_covers_markdown_contract(
     assert "【全局画面】（全局像素变化0.0%）定时快照保持稳定" in markdown
     assert "【玩家输入】W 按住 0.6 秒" in markdown
     assert len(client.calls) == 3
+    request_signatures = []
+    for call in client.calls:
+        images = call["images"]
+        signature_payload = {
+            key: call[key]
+            for key in (
+                "model",
+                "provider",
+                "system_prompt",
+                "user_prompt",
+                "max_image_edge",
+                "max_tokens",
+                "temperature",
+                "reasoning_enabled",
+            )
+        }
+        signature_payload["images"] = [
+            {
+                "label": image.label,
+                "max_edge": image.max_edge,
+                "target_width": image.target_width,
+                "encoding": image.encoding,
+                "jpeg_quality": image.jpeg_quality,
+            }
+            for image in images  # type: ignore[union-attr]
+        ]
+        serialized = json.dumps(
+            signature_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request_signatures.append(hashlib.sha256(serialized).hexdigest())
+    assert request_signatures == [
+        "2ed4930f41dc7a37cbbe152da190d9798f74377fb980d15b795474790988d0de",
+        "b62370ecf5a63ebbaf0d63e130f93d22ab7d07b44c017c6167358e1e17e65d54",
+        "d3d6a695e273aa1dbbbfdf67bff8ef19b51b6d1bc58f6d665d255e08ea352c07",
+    ]
+    baseline_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "generic"
+        / "observations-baseline-b-t1.md"
+    )
+    assert markdown_path.read_bytes() == baseline_path.read_bytes()
