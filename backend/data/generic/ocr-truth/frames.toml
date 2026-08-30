@@ -1,0 +1,241 @@
+version = 1
+
+[[frames]]
+role = "fast-fps"
+session = "../../../recordings/capture/20260827-171815"
+frame = "raw/raw-000520-20260827T212320.218820Z.jpg"
+category = "hud_numeric"
+
+[[frames]]
+role = "fast-fps"
+session = "../../../recordings/capture/20260827-171815"
+frame = "raw/raw-000543-20260827T212336.197980Z.jpg"
+category = "hud_numeric"
+
+[[frames]]
+role = "fast-fps"
+session = "../../../recordings/capture/20260827-171815"
+frame = "raw/raw-000566-20260827T212351.404914Z.jpg"
+category = "hud_numeric"
+
+[[frames]]
+role = "fast-fps"
+session = "../../../recordings/capture/20260827-171815"
+frame = "raw/raw-000590-20260827T212407.326452Z.jpg"
+category = "hud_numeric"
+
+[[frames]]
+role = "fast-fps"
+session = "../../../recordings/capture/20260827-171815"
+frame = "raw/raw-000614-20260827T212422.955431Z.jpg"
+category = "hud_numeric"
+
+[[frames]]
+role = "fast-fps"
+session = "../../../recordings/capture/20260827-171815"
+frame = "raw/raw-000638-20260827T212438.623853Z.jpg"
+category = "hud_numeric"
+
+[[frames]]
+role = "fast-fps"
+session = "../../../recordings/capture/20260827-171815"
+frame = "raw/raw-000662-20260827T212454.079516Z.jpg"
+category = "hud_numeric"
+
+[[frames]]
+role = "fast-fps"
+session = "../../../recordings/capture/20260827-171815"
+frame = "raw/raw-000686-20260827T212509.276231Z.jpg"
+category = "hud_numeric"
+
+[[frames]]
+role = "fast-fps"
+session = "../../../recordings/capture/20260827-171815"
+frame = "raw/raw-000712-20260827T212524.825857Z.jpg"
+category = "hud_numeric"
+
+[[frames]]
+role = "fast-fps"
+session = "../../../recordings/capture/20260827-171815"
+frame = "raw/raw-000738-20260827T212540.396728Z.jpg"
+category = "hud_numeric"
+
+[[frames]]
+role = "survival-2d"
+session = "../../../recordings/capture/20260827-203925"
+frame = "raw/raw-000052-20260828T004016.405414Z.jpg"
+category = "subtitle_dialogue"
+
+[[frames]]
+role = "survival-2d"
+session = "../../../recordings/capture/20260827-203925"
+frame = "raw/raw-000053-20260828T004017.404559Z.jpg"
+category = "subtitle_dialogue"
+
+[[frames]]
+role = "survival-2d"
+session = "../../../recordings/capture/20260827-203925"
+frame = "raw/raw-000071-20260828T004035.403171Z.jpg"
+category = "subtitle_dialogue"
+
+[[frames]]
+role = "survival-2d"
+session = "../../../recordings/capture/20260827-203925"
+frame = "raw/raw-000080-20260828T004044.408664Z.jpg"
+category = "subtitle_dialogue"
+
+[[frames]]
+role = "survival-2d"
+session = "../../../recordings/capture/20260827-203925"
+frame = "raw/raw-000081-20260828T004045.413206Z.jpg"
+category = "subtitle_dialogue"
+
+[[frames]]
+role = "survival-2d"
+session = "../../../recordings/capture/20260827-203925"
+frame = "raw/raw-000087-20260828T004051.407721Z.jpg"
+category = "subtitle_dialogue"
+
+[[frames]]
+role = "survival-2d"
+session = "../../../recordings/capture/20260827-203925"
+frame = "raw/raw-000088-20260828T004052.408930Z.jpg"
+category = "subtitle_dialogue"
+
+[[frames]]
+role = "survival-2d"
+session = "../../../recordings/capture/20260827-203925"
+frame = "raw/raw-000092-20260828T004056.418914Z.jpg"
+category = "subtitle_dialogue"
+
+[[frames]]
+role = "survival-2d"
+session = "../../../recordings/capture/20260827-203925"
+frame = "raw/raw-000093-20260828T004057.415119Z.jpg"
+category = "subtitle_dialogue"
+
+[[frames]]
+role = "survival-2d"
+session = "../../../recordings/capture/20260827-203925"
+frame = "raw/raw-000300-20260828T004424.649500Z.jpg"
+category = "subtitle_dialogue"
+
+[[frames]]
+role = "simulation-fps"
+session = "../../../recordings/capture/20260827-215554"
+frame = "raw/raw-000080-20260828T015714.578859Z.jpg"
+category = "menu_button"
+
+[[frames]]
+role = "simulation-fps"
+session = "../../../recordings/capture/20260827-215554"
+frame = "raw/raw-000083-20260828T015717.571344Z.jpg"
+category = "menu_button"
+
+[[frames]]
+role = "simulation-fps"
+session = "../../../recordings/capture/20260827-215554"
+frame = "raw/raw-000088-20260828T015722.616461Z.jpg"
+category = "menu_button"
+
+[[frames]]
+role = "simulation-fps"
+session = "../../../recordings/capture/20260827-215554"
+frame = "raw/raw-000091-20260828T015725.617901Z.jpg"
+category = "menu_button"
+
+[[frames]]
+role = "simulation-fps"
+session = "../../../recordings/capture/20260827-215554"
+frame = "raw/raw-000094-20260828T015728.619800Z.jpg"
+category = "menu_button"
+
+[[frames]]
+role = "simulation-fps"
+session = "../../../recordings/capture/20260827-215554"
+frame = "raw/raw-000099-20260828T015733.620098Z.jpg"
+category = "menu_button"
+
+[[frames]]
+role = "simulation-fps"
+session = "../../../recordings/capture/20260827-215554"
+frame = "raw/raw-000103-20260828T015737.616844Z.jpg"
+category = "menu_button"
+
+[[frames]]
+role = "simulation-fps"
+session = "../../../recordings/capture/20260827-215554"
+frame = "raw/raw-000106-20260828T015740.618961Z.jpg"
+category = "menu_button"
+
+[[frames]]
+role = "simulation-fps"
+session = "../../../recordings/capture/20260827-215554"
+frame = "raw/raw-000111-20260828T015745.622309Z.jpg"
+category = "menu_button"
+
+[[frames]]
+role = "simulation-fps"
+session = "../../../recordings/capture/20260827-215554"
+frame = "raw/raw-000223-20260828T015937.655024Z.jpg"
+category = "menu_button"
+
+[[frames]]
+role = "card-game"
+session = "../../../recordings/capture/20260827-220206"
+frame = "raw/raw-000044-20260828T020250.090735Z.jpg"
+category = "dense_panel"
+
+[[frames]]
+role = "card-game"
+session = "../../../recordings/capture/20260827-220206"
+frame = "raw/raw-000056-20260828T020302.095150Z.jpg"
+category = "dense_panel"
+
+[[frames]]
+role = "card-game"
+session = "../../../recordings/capture/20260827-220206"
+frame = "raw/raw-000061-20260828T020307.104875Z.jpg"
+category = "dense_panel"
+
+[[frames]]
+role = "card-game"
+session = "../../../recordings/capture/20260827-220206"
+frame = "raw/raw-000083-20260828T020329.108205Z.jpg"
+category = "dense_panel"
+
+[[frames]]
+role = "card-game"
+session = "../../../recordings/capture/20260827-220206"
+frame = "raw/raw-000087-20260828T020333.109150Z.jpg"
+category = "dense_panel"
+
+[[frames]]
+role = "card-game"
+session = "../../../recordings/capture/20260827-220206"
+frame = "raw/raw-000091-20260828T020337.106282Z.jpg"
+category = "dense_panel"
+
+[[frames]]
+role = "card-game"
+session = "../../../recordings/capture/20260827-220206"
+frame = "raw/raw-000094-20260828T020340.114149Z.jpg"
+category = "dense_panel"
+
+[[frames]]
+role = "card-game"
+session = "../../../recordings/capture/20260827-220206"
+frame = "raw/raw-000208-20260828T020613.331480Z.jpg"
+category = "dense_panel"
+
+[[frames]]
+role = "card-game"
+session = "../../../recordings/capture/20260827-220206"
+frame = "raw/raw-000211-20260828T020616.340050Z.jpg"
+category = "dense_panel"
+
+[[frames]]
+role = "card-game"
+session = "../../../recordings/capture/20260827-220206"
+frame = "raw/raw-000214-20260828T020619.337325Z.jpg"
+category = "dense_panel"
