@@ -152,6 +152,21 @@ def resolve_llm_profile(
     return configuration.model_copy(update=profile.model_dump(exclude_none=True))
 
 
+class OcrConfig(BaseModel):
+    """One fixed production OCR implementation with bounded CPU threads."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    enabled: bool = True
+    engine: Literal["rapidocr-ppocrv6-tiny-openvino"] = (
+        "rapidocr-ppocrv6-tiny-openvino"
+    )
+    num_threads: int = Field(default=2, ge=1)
+    det_limit_side_len: int = Field(default=1280, ge=64, le=8192)
+    language: Literal["zh-Hans-CN"] = "zh-Hans-CN"
+    model_dir: str = "models/ocr"
+
+
 class GenericVisionConfig(BaseModel):
     """Disabled-by-default settings for the generic visual adapter."""
 
@@ -171,6 +186,7 @@ class GenericVisionConfig(BaseModel):
     )
     llm_profile: str = "vision_fast"
     cost_warn_per_hour: float = Field(default=1.0, gt=0)
+    ocr: OcrConfig = Field(default_factory=OcrConfig)
 
 
 GENERIC_VISION_FIELDS = frozenset(GenericVisionConfig.model_fields)

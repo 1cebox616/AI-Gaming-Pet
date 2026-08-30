@@ -265,7 +265,8 @@ def test_local_1080p_replay_emits_three_evidence_kinds_per_selected_frame(
             send_width=896,
             timeout=1.0,
             max_inflight=4,
-            region_focus_max=0.50,
+                region_focus_max=0.50,
+                ocr_enabled=False,
         ),
         llm,
         capture_backend_factory=lambda: (_ for _ in ()).throw(

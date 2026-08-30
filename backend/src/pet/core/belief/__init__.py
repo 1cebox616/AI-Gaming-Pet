@@ -7,7 +7,9 @@ from pet.core.belief.models import (
     FastObservationPayload,
     FrameMetricsPayload,
     KeyWindowPayload,
+    OcrFramePayload,
     Scope,
+    TextObservedPayload,
 )
 from pet.core.belief.render import (
     ObservationsMarkdownWriter,
@@ -23,7 +25,9 @@ __all__ = [
     "FastObservationPayload",
     "FrameMetricsPayload",
     "KeyWindowPayload",
+    "OcrFramePayload",
     "ObservationsMarkdownWriter",
     "Scope",
+    "TextObservedPayload",
     "render_observations_markdown",
 ]

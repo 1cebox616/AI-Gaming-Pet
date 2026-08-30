@@ -28,6 +28,7 @@ from pet.core.config import (
     GenericVisionConfig,
     LlmConfig,
     LlmProfileConfig,
+    OcrConfig,
 )
 from pet.core.llm import LlmResult, LlmUsage, image_upload_metadata
 from pet.core.input_telemetry import ActionInputEvent, ActionInputTimeline
@@ -194,6 +195,7 @@ def _configuration(
             input_context=input_context,
             observation_log_dir=str(log_dir),
             cost_warn_per_hour=cost_warn,
+            ocr=OcrConfig(enabled=False),
         )
     )
     llm = LlmConfig(

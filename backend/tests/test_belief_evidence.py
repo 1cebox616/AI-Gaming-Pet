@@ -13,8 +13,10 @@ from pet.core.belief import (
     FastObservationPayload,
     FrameMetricsPayload,
     KeyWindowPayload,
+    OcrFramePayload,
     ObservationsMarkdownWriter,
     Scope,
+    TextObservedPayload,
     render_observations_markdown,
 )
 from pet.games.generic.adapter import _focus_geometry, _focus_scope
@@ -138,6 +140,67 @@ def test_observations_markdown_is_regenerable_and_incremental_bytes_match(
     writer.append(events[0])
     writer.close()
     assert writer_path.read_bytes() == expected.encode("utf-8")
+
+
+def test_ocr_events_do_not_change_observations_markdown_bytes(tmp_path: Path) -> None:
+    started_at = datetime(2026, 8, 29, 12, 34, 56, tzinfo=timezone.utc)
+    baseline = _events()
+    ocr = (
+        EvidenceEvent(
+            evidence_id="f1:ocr:1",
+            source="ocr",
+            kind="ocr_frame",
+            root_capture_id="f1",
+            observed_at=0.0,
+            learned_at=0.1,
+            scope=None,
+            payload=OcrFramePayload(
+                engine="rapidocr-ppocrv6-tiny-openvino",
+                num_threads=2,
+                det_limit_side_len=1280,
+                recognized_line_count=2,
+                elapsed_ms=100.0,
+                det_ms=60.0,
+                rec_ms=30.0,
+                cpu_core_seconds=0.2,
+                trigger="detector",
+                outcome_detail="ok",
+            ),
+            derived_from=[],
+            context_version=None,
+            outcome="ok",
+        ),
+        EvidenceEvent(
+            evidence_id="f1:ocr:2",
+            source="ocr",
+            kind="text_observed",
+            root_capture_id="f1",
+            observed_at=0.0,
+            learned_at=0.1,
+            scope=None,
+            payload=TextObservedPayload(
+                text="开始游戏",
+                bbox=(0.1, 0.2, 0.3, 0.25),
+                quad=((0.1, 0.2), (0.3, 0.2), (0.3, 0.25), (0.1, 0.25)),
+                change="new",
+                previous_text=None,
+                streak=1,
+                engine="rapidocr-ppocrv6-tiny-openvino",
+                engine_confidence=0.95,
+            ),
+            derived_from=[],
+            context_version=None,
+            outcome="ok",
+        ),
+    )
+    expected = render_observations_markdown(baseline, started_at).encode("utf-8")
+    assert render_observations_markdown((*baseline, *ocr), started_at).encode("utf-8") == expected
+
+    path = tmp_path / "observations.md"
+    writer = ObservationsMarkdownWriter(path, started_at)
+    writer.append_many((*ocr, *baseline))
+    writer.close()
+    assert path.read_bytes() == expected
 
 
 @pytest.mark.parametrize(

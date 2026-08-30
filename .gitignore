@@ -12,6 +12,6 @@ AUDIT.md
 **/secrets*
 backend/recordings/
 backend/eval-reports/*
-!backend/eval-reports/.gitkeep
+backend/models/ocr/
 backend/.tmp/
 backend/.pytest-*/

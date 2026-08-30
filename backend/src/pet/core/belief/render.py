@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from datetime import datetime
+import logging
 from pathlib import Path
 import re
 from typing import TextIO
@@ -16,6 +17,8 @@ from pet.core.belief.models import (
 )
 
 _ROOT_PATTERN = re.compile(r"f(?P<sequence>[1-9]\d*)\Z")
+logger = logging.getLogger(__name__)
+_RENDERED_KINDS = {"frame_metrics", "key_window", "fast_observation"}
 
 
 def _sequence(root_capture_id: str | None) -> int:
@@ -27,24 +30,22 @@ def _sequence(root_capture_id: str | None) -> int:
 
 def _group_events(
     events: Iterable[EvidenceEvent],
-) -> dict[int, dict[str, EvidenceEvent]]:
-    grouped: dict[int, dict[str, EvidenceEvent]] = {}
+) -> dict[int, dict[str, list[EvidenceEvent]]]:
+    grouped: dict[int, dict[str, list[EvidenceEvent]]] = {}
     for event in events:
         sequence = _sequence(event.root_capture_id)
         frame = grouped.setdefault(sequence, {})
-        if event.kind in frame:
-            raise ValueError(f"duplicate {event.kind} evidence for frame f{sequence}")
-        frame[event.kind] = event
+        frame.setdefault(event.kind, []).append(event)
     return grouped
 
 
-def _render_block(frame: dict[str, EvidenceEvent]) -> str:
-    missing = {"frame_metrics", "key_window", "fast_observation"}.difference(frame)
+def _render_block(frame: dict[str, list[EvidenceEvent]]) -> str:
+    missing = _RENDERED_KINDS.difference(frame)
     if missing:
         raise ValueError(f"cannot render incomplete evidence group: {sorted(missing)}")
-    metrics_event = frame["frame_metrics"]
-    key_event = frame["key_window"]
-    fast_event = frame["fast_observation"]
+    metrics_event = frame["frame_metrics"][0]
+    key_event = frame["key_window"][0]
+    fast_event = frame["fast_observation"][0]
     if not isinstance(metrics_event.payload, FrameMetricsPayload):
         raise TypeError("frame_metrics evidence has the wrong payload")
     if not isinstance(key_event.payload, KeyWindowPayload):
@@ -94,15 +95,17 @@ class ObservationsMarkdownWriter:
             f"本会话始于 {started_at.isoformat()}\n\n"
         )
         self._stream.flush()
-        self._pending: dict[int, dict[str, EvidenceEvent]] = {}
+        self._pending: dict[int, dict[str, list[EvidenceEvent]]] = {}
         self._next_sequence = 1
 
     def append(self, event: EvidenceEvent) -> None:
         sequence = _sequence(event.root_capture_id)
+        if sequence < self._next_sequence:
+            if event.kind not in _RENDERED_KINDS:
+                return
+            raise ValueError(f"late rendered evidence for frame f{sequence}")
         frame = self._pending.setdefault(sequence, {})
-        if event.kind in frame:
-            raise ValueError(f"duplicate {event.kind} evidence for frame f{sequence}")
-        frame[event.kind] = event
+        frame.setdefault(event.kind, []).append(event)
         self._flush_ready()
 
     def append_many(self, events: Sequence[EvidenceEvent]) -> None:
@@ -111,10 +114,20 @@ class ObservationsMarkdownWriter:
 
     def close(self) -> None:
         self._flush_ready()
+        incomplete = [
+            sequence
+            for sequence, frame in sorted(self._pending.items())
+            if not _RENDERED_KINDS.issubset(frame)
+        ]
+        if incomplete:
+            logger.warning(
+                "观察日志关闭时存在不完整帧组：%s",
+                ", ".join(f"f{sequence}" for sequence in incomplete),
+            )
         self._stream.close()
 
     def _flush_ready(self) -> None:
-        required = {"frame_metrics", "key_window", "fast_observation"}
+        required = _RENDERED_KINDS
         while required.issubset(self._pending.get(self._next_sequence, {})):
             frame = self._pending.pop(self._next_sequence)
             self._stream.write(_render_block(frame))

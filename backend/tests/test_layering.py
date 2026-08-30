@@ -88,12 +88,15 @@ def test_game_packages_do_not_cross_import_or_reach_eval_from_production() -> No
                 imported_core = module.split(".")[2] if module.count(".") >= 2 else ""
                 allowed = set(ALLOWED_CORE_MODULES)
                 if game_id == "generic":
-                    allowed.add("belief")
+                    allowed.update(
+                        {"belief", "ocr_probe", "ocr_rapid", "ocr_selective"}
+                    )
                 if in_eval:
                     allowed.add("gate")
                 if relative.as_posix() in {
                     "generic/eval/region_assets.py",
                     "generic/eval/observation_replay.py",
+                    "generic/eval/ocr_ingame_probe.py",
                 }:
                     allowed.add("capture")
                 if relative.as_posix() == "generic/eval/observation_replay.py":

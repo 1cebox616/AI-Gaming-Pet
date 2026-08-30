@@ -1035,15 +1035,35 @@ def write_report(payload: dict[str, Any], destination: Path) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="M5-B-T4a OCR engine probe")
-    parser.add_argument("command", choices=("init-truth", "benchmark", "render-report"))
+    parser.add_argument(
+        "command",
+        choices=("init-truth", "benchmark", "render-report", "benchmark-a2", "render-report-a2"),
+    )
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--truth", type=Path, default=DEFAULT_TRUTH)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--a2-output",
+        type=Path,
+        default=BACKEND_DIRECTORY / "eval-reports" / "m5-b-t4a2",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
+    if arguments.command in {"benchmark-a2", "render-report-a2"}:
+        from convergence import render_report as render_a2_report
+        from convergence import run_benchmark as run_a2_benchmark
+
+        output = arguments.a2_output.resolve()
+        report = (
+            run_a2_benchmark(output)
+            if arguments.command == "benchmark-a2"
+            else render_a2_report(output)
+        )
+        print(report)
+        return 0
     frames = load_frames(arguments.manifest.resolve())
     if arguments.command == "init-truth":
         write_initial_truth(frames, arguments.truth.resolve())

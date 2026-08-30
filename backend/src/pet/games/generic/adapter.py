@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import functools
@@ -16,6 +17,7 @@ import time
 import tomllib
 from typing import Protocol
 
+import numpy as np
 from fastapi import APIRouter
 from PIL import Image
 
@@ -28,8 +30,10 @@ from pet.core.belief import (
     FastObservationPayload,
     FrameMetricsPayload,
     KeyWindowPayload,
+    OcrFramePayload,
     ObservationsMarkdownWriter,
     Scope,
+    TextObservedPayload,
 )
 from pet.core.config import AdapterConfig, LlmConfig, resolve_llm_profile
 from pet.core.llm import (
@@ -39,6 +43,9 @@ from pet.core.llm import (
     OpenRouterClient,
 )
 from pet.core.prompt import PROMPTS_DIRECTORY
+from pet.core.ocr_probe import OcrFrameResult, OcrLine
+from pet.core.ocr_rapid import ENGINE_NAME, RapidOcrEngine, set_current_thread_below_normal
+from pet.core.ocr_selective import OcrEngine, TextLineCache, normalize_text
 
 logger = logging.getLogger(__name__)
 
@@ -485,6 +492,100 @@ class ObservationLog:
             self.truncated += 1
         self._write_session(None)
 
+    def append_ocr_frame(
+        self,
+        *,
+        sequence: int,
+        frame_ts: float,
+        learned_ts: float,
+        engine: str,
+        num_threads: int,
+        det_limit_side_len: int,
+        recognized_line_count: int,
+        elapsed_ms: float,
+        det_ms: float | None,
+        rec_ms: float | None,
+        cpu_core_seconds: float | None,
+        trigger: str,
+        outcome_detail: str,
+    ) -> None:
+        observed_at = self._relative(frame_ts)
+        learned_at = max(observed_at, self._relative(learned_ts))
+        root_capture_id = f"f{sequence}"
+        self._append_event(
+            EvidenceEvent(
+                evidence_id=self._evidence.new_evidence_id(root_capture_id, "ocr"),
+                source="ocr",
+                kind="ocr_frame",
+                root_capture_id=root_capture_id,
+                observed_at=observed_at,
+                learned_at=learned_at,
+                scope=None,
+                payload=OcrFramePayload(
+                    engine=engine,
+                    num_threads=num_threads,
+                    det_limit_side_len=det_limit_side_len,
+                    recognized_line_count=recognized_line_count,
+                    elapsed_ms=elapsed_ms,
+                    det_ms=det_ms,
+                    rec_ms=rec_ms,
+                    cpu_core_seconds=cpu_core_seconds,
+                    trigger=trigger,
+                    outcome_detail=outcome_detail,
+                ),
+                derived_from=[],
+                context_version=None,
+                outcome="ok",
+            )
+        )
+
+    def append_text_observed(
+        self,
+        *,
+        sequence: int,
+        frame_ts: float,
+        learned_ts: float,
+        line: OcrLine,
+        change: str,
+        previous_text: str | None,
+        streak: int,
+        engine: str,
+    ) -> None:
+        text = normalize_text(line.text)
+        if not text or line.width <= 0.0 or line.height <= 0.0:
+            return
+        observed_at = self._relative(frame_ts)
+        learned_at = max(observed_at, self._relative(learned_ts))
+        root_capture_id = f"f{sequence}"
+        self._append_event(
+            EvidenceEvent(
+                evidence_id=self._evidence.new_evidence_id(root_capture_id, "ocr"),
+                source="ocr",
+                kind="text_observed",
+                root_capture_id=root_capture_id,
+                observed_at=observed_at,
+                learned_at=learned_at,
+                scope=None,
+                payload=TextObservedPayload(
+                    text=text,
+                    bbox=(line.x, line.y, line.x + line.width, line.y + line.height),
+                    quad=line.quad,
+                    change=change,
+                    previous_text=(
+                        normalize_text(previous_text)
+                        if previous_text is not None
+                        else None
+                    ),
+                    streak=streak,
+                    engine=engine,
+                    engine_confidence=line.confidence,
+                ),
+                derived_from=[],
+                context_version=None,
+                outcome="ok",
+            )
+        )
+
     def close(self) -> None:
         self._write_session(datetime.now(timezone.utc))
         self._markdown.close()
@@ -567,6 +668,7 @@ class GenericVisionAdapter:
         input_listener_factory: InputListenerFactory | None = None,
         title_map: WindowTitleMap | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        ocr_engine: OcrEngine | None = None,
     ) -> None:
         self._settings = configuration.generic
         self._llm_configuration = llm_configuration
@@ -576,6 +678,7 @@ class GenericVisionAdapter:
         self._input_listener_factory = input_listener_factory
         self._title_map = title_map or WindowTitleMap.load()
         self._clock = clock
+        self._ocr_engine_override = ocr_engine
         self._core: CoreServices | None = None
         self._task: asyncio.Task[None] | None = None
         self._backend: CaptureBackendLike | None = None
@@ -596,6 +699,12 @@ class GenericVisionAdapter:
         self._cost_warning = False
         self._current_game = ""
         self._stopping = False
+        self._ocr_engine: OcrEngine | None = None
+        self._ocr_executor: ThreadPoolExecutor | None = None
+        self._ocr_busy: asyncio.Future[OcrFrameResult] | None = None
+        self._ocr_waiters: set[asyncio.Task[None]] = set()
+        self._ocr_cache = TextLineCache()
+        self._ocr_priority_attempted = False
 
     async def start(self, core: CoreServices) -> None:
         if self._task is not None:
@@ -656,6 +765,7 @@ class GenericVisionAdapter:
             "max_tokens": effective.max_tokens,
             "input_price_per_million_usd": self._input_price,
             "output_price_per_million_usd": self._output_price,
+            "ocr": self._settings.ocr.model_dump(),
         }
         if extra_parameters:
             parameters.update(extra_parameters)
@@ -664,6 +774,7 @@ class GenericVisionAdapter:
             parameters,
             exact_directory=exact_directory,
         )
+        self._initialize_ocr()
 
     def start_replay(
         self,
@@ -723,6 +834,7 @@ class GenericVisionAdapter:
                 break
             await asyncio.gather(*tuple(self._inflight), return_exceptions=True)
         self._close_input_context()
+        await self._finish_ocr()
         close_client = getattr(self._client, "close", None)
         if callable(close_client):
             close_client()
@@ -759,6 +871,7 @@ class GenericVisionAdapter:
             task.cancel()
         if self._inflight:
             await asyncio.gather(*self._inflight, return_exceptions=True)
+        await self._finish_ocr()
         close_client = getattr(self._client, "close", None)
         if callable(close_client):
             close_client()
@@ -905,6 +1018,7 @@ class GenericVisionAdapter:
             region_intensity=focused_intensity,
             scope=scope,
         )
+        self._schedule_ocr(pending)
         while wait_for_capacity and len(self._inflight) >= self._settings.max_inflight:
             done, _ = await asyncio.wait(
                 tuple(self._inflight),
@@ -924,6 +1038,207 @@ class GenericVisionAdapter:
                 self._complete_record(self._dropped_record(replaced, "superseded"))
             return
         self._launch_frame(pending)
+
+    def _initialize_ocr(self) -> None:
+        settings = self._settings.ocr
+        self._ocr_cache.clear()
+        if not settings.enabled:
+            return
+        if settings.engine != ENGINE_NAME:
+            raise RuntimeError(f"未知 OCR 引擎：{settings.engine}")
+        model_dir = Path(settings.model_dir)
+        if not model_dir.is_absolute():
+            model_dir = BACKEND_DIRECTORY / model_dir
+        engine = self._ocr_engine_override or RapidOcrEngine(
+            model_dir=model_dir,
+            num_threads=settings.num_threads,
+            det_limit_side_len=settings.det_limit_side_len,
+        )
+        try:
+            engine.start()
+        except Exception as error:
+            try:
+                engine.close()
+            except Exception as close_error:
+                logger.debug("OCR 启动失败后的关闭也失败：%s", _one_line(close_error))
+            logger.error("OCR 引擎不可用，本会话关闭 OCR 并继续运行：%s", _one_line(error))
+            self._ocr_engine = None
+            return
+        self._ocr_engine = engine
+        self._ocr_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="generic-ocr",
+        )
+
+    def _schedule_ocr(self, pending: PendingFrame) -> None:
+        engine = self._ocr_engine
+        executor = self._ocr_executor
+        if engine is None or executor is None:
+            return
+        trigger = "heartbeat" if pending.reason == "forced" else "detector"
+        busy = self._ocr_busy
+        if busy is not None and not busy.done():
+            self._append_ocr_frame_result(
+                pending,
+                trigger=trigger,
+                outcome_detail="late",
+                result=None,
+                elapsed_ms=0.0,
+            )
+            return
+
+        pixels = np.asarray(pending.frame.bitmap, dtype=np.uint8)
+        if pixels.ndim == 2:
+            pixels = np.repeat(pixels[:, :, None], 3, axis=2)
+        if pixels.shape[2] < 3:
+            raise ValueError("OCR frame must have at least three color channels")
+        # PIL/WGC presents RGB(A); the measured RapidOCR memory path expects BGR.
+        image = pixels[:, :, :3][:, :, ::-1].copy()
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(executor, self._recognize_ocr, engine, image)
+        self._ocr_busy = future
+
+        def release(completed: asyncio.Future[OcrFrameResult]) -> None:
+            if self._ocr_busy is completed:
+                self._ocr_busy = None
+            if completed.cancelled():
+                return
+            late_error = completed.exception()
+            if late_error is not None:
+                logger.debug("OCR 工作线程迟到失败：%s", _one_line(late_error))
+
+        future.add_done_callback(release)
+        waiter = asyncio.create_task(
+            self._record_ocr_completion(pending, trigger, future),
+            name=f"generic-ocr-{pending.seq}",
+        )
+        self._ocr_waiters.add(waiter)
+        waiter.add_done_callback(self._ocr_waiters.discard)
+
+    def _recognize_ocr(
+        self,
+        engine: OcrEngine,
+        image: np.ndarray,
+    ) -> OcrFrameResult:
+        if not self._ocr_priority_attempted:
+            self._ocr_priority_attempted = True
+            try:
+                set_current_thread_below_normal()
+            except OSError as error:
+                logger.warning("无法降低 OCR worker 线程优先级：%s", _one_line(error))
+        return engine.recognize(image)
+
+    async def _record_ocr_completion(
+        self,
+        pending: PendingFrame,
+        trigger: str,
+        future: asyncio.Future[OcrFrameResult],
+    ) -> None:
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(future),
+                timeout=self._settings.poll_interval_seconds,
+            )
+        except asyncio.TimeoutError:
+            self._append_ocr_frame_result(
+                pending,
+                trigger=trigger,
+                outcome_detail="late",
+                result=None,
+                elapsed_ms=self._settings.poll_interval_seconds * 1000.0,
+            )
+            return
+        except Exception as error:
+            logger.error("OCR frame f%d 识别失败：%s", pending.seq, _one_line(error))
+            self._append_ocr_frame_result(
+                pending,
+                trigger=trigger,
+                outcome_detail="failed",
+                result=None,
+                elapsed_ms=max(0.0, self._clock() - pending.scheduled_at_clock) * 1000.0,
+            )
+            return
+
+        learned_ts = self._clock()
+        self._append_ocr_frame_result(
+            pending,
+            trigger=trigger,
+            outcome_detail="ok",
+            result=result,
+            elapsed_ms=result.duration_ms,
+            learned_ts=learned_ts,
+        )
+        diff = self._ocr_cache.update(result.lines)
+        assert self._log is not None
+        for item in diff.lines:
+            change = {
+                "added": "new",
+                "changed": "changed",
+                "unchanged": "stable",
+            }[item.kind]
+            self._log.append_text_observed(
+                sequence=pending.seq,
+                frame_ts=pending.frame.metadata.monotonic_seconds,
+                learned_ts=learned_ts,
+                line=item.line,
+                change=change,
+                previous_text=item.previous_text,
+                streak=item.streak,
+                engine=ENGINE_NAME,
+            )
+        for cached in diff.gone:
+            self._log.append_text_observed(
+                sequence=pending.seq,
+                frame_ts=pending.frame.metadata.monotonic_seconds,
+                learned_ts=learned_ts,
+                line=cached.line,
+                change="gone",
+                previous_text=None,
+                streak=cached.streak,
+                engine=ENGINE_NAME,
+            )
+
+    def _append_ocr_frame_result(
+        self,
+        pending: PendingFrame,
+        *,
+        trigger: str,
+        outcome_detail: str,
+        result: OcrFrameResult | None,
+        elapsed_ms: float,
+        learned_ts: float | None = None,
+    ) -> None:
+        assert self._log is not None
+        settings = self._settings.ocr
+        self._log.append_ocr_frame(
+            sequence=pending.seq,
+            frame_ts=pending.frame.metadata.monotonic_seconds,
+            learned_ts=self._clock() if learned_ts is None else learned_ts,
+            engine=ENGINE_NAME,
+            num_threads=settings.num_threads,
+            det_limit_side_len=settings.det_limit_side_len,
+            recognized_line_count=len(result.lines) if result is not None else 0,
+            elapsed_ms=elapsed_ms,
+            det_ms=result.det_ms if result is not None else None,
+            rec_ms=result.rec_ms if result is not None else None,
+            cpu_core_seconds=result.cpu_core_seconds if result is not None else None,
+            trigger=trigger,
+            outcome_detail=outcome_detail,
+        )
+
+    async def _finish_ocr(self) -> None:
+        if self._ocr_waiters:
+            await asyncio.gather(*tuple(self._ocr_waiters), return_exceptions=True)
+        busy = self._ocr_busy
+        if busy is not None and not busy.done():
+            await asyncio.gather(asyncio.shield(busy), return_exceptions=True)
+        self._ocr_busy = None
+        engine, self._ocr_engine = self._ocr_engine, None
+        if engine is not None:
+            engine.close()
+        executor, self._ocr_executor = self._ocr_executor, None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
     def _launch_frame(self, pending: PendingFrame) -> None:
         frame_ts = pending.frame.metadata.monotonic_seconds

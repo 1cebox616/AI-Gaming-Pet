@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import difflib
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -39,11 +40,14 @@ from pet.core.config import (
     AdapterConfig,
     GenericVisionConfig,
     LlmConfig,
+    OcrConfig,
     load_config,
     resolve_llm_profile,
 )
 from pet.core.input_telemetry import ActionInputTimeline, load_action_input_csv
 from pet.games.generic.adapter import GenericVisionAdapter, WindowTitleMap, _focus_geometry
+
+logger = logging.getLogger(__name__)
 
 BACKEND_DIRECTORY = Path(__file__).resolve().parents[5]
 DEFAULT_OUTPUT_ROOT = BACKEND_DIRECTORY / "eval-reports"
@@ -282,6 +286,7 @@ def _adapter_configuration(
     timeout: float,
     max_inflight: int,
     region_focus_max: float,
+    ocr_enabled: bool = True,
 ) -> AdapterConfig:
     return AdapterConfig(
         generic=GenericVisionConfig(
@@ -291,6 +296,7 @@ def _adapter_configuration(
             max_inflight=max_inflight,
             region_focus_max=region_focus_max,
             llm_profile=profile,
+            ocr=OcrConfig(enabled=ocr_enabled),
         )
     )
 
@@ -408,19 +414,21 @@ def _read_rows(directory: Path) -> list[dict[str, object]]:
     if origin_value is None:
         return []
     origin = float(origin_value)
-    grouped: dict[str, dict[str, object]] = {}
+    grouped: dict[str, dict[str, list[object]]] = {}
     for event in EvidenceStore.read(directory / "evidence.jsonl"):
         if event.root_capture_id is None:
             continue
-        grouped.setdefault(event.root_capture_id, {})[event.kind] = event
+        grouped.setdefault(event.root_capture_id, {}).setdefault(event.kind, []).append(event)
     rows: list[dict[str, object]] = []
+    incomplete: list[str] = []
     for root_capture_id in sorted(grouped, key=lambda value: int(value[1:])):
         frame = grouped[root_capture_id]
         if not {"fast_observation", "frame_metrics", "key_window"}.issubset(frame):
+            incomplete.append(root_capture_id)
             continue
-        fast_event = frame["fast_observation"]
-        metrics_event = frame["frame_metrics"]
-        key_event = frame["key_window"]
+        fast_event = frame["fast_observation"][0]
+        metrics_event = frame["frame_metrics"][0]
+        key_event = frame["key_window"][0]
         fast = fast_event.payload  # type: ignore[union-attr]
         metrics = metrics_event.payload  # type: ignore[union-attr]
         key = key_event.payload  # type: ignore[union-attr]
@@ -463,6 +471,8 @@ def _read_rows(directory: Path) -> list[dict[str, object]]:
                 "actual_provider": fast.actual_provider,
             }
         )
+    if incomplete:
+        logger.warning("重放行构造跳过不完整帧组：%s", ", ".join(incomplete))
     return rows
 
 

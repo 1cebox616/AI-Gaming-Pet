@@ -66,6 +66,14 @@ region_focus_max = 0.50
 llm_profile = "vision_fast"
 cost_warn_per_hour = 1.0
 
+[games.generic.ocr]
+enabled = true
+engine = "rapidocr-ppocrv6-tiny-openvino"
+num_threads = 2
+det_limit_side_len = 1280
+language = "zh-Hans-CN"
+model_dir = "models/ocr"
+
 # 在线模型默认关闭。密钥只从 OPENROUTER_API_KEY 环境变量读取。
 [llm]
 enabled = false

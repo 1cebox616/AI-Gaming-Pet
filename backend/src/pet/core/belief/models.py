@@ -96,7 +96,51 @@ class KeyWindowPayload(EvidenceModel):
         return self
 
 
-EvidencePayload = FastObservationPayload | FrameMetricsPayload | KeyWindowPayload
+class TextObservedPayload(EvidenceModel):
+    text: str = Field(min_length=1)
+    bbox: tuple[float, float, float, float]
+    quad: tuple[tuple[float, float], ...] | None = None
+    change: Literal["new", "changed", "gone", "stable"]
+    previous_text: str | None = None
+    streak: int = Field(ge=1)
+    engine: str = Field(min_length=1)
+    engine_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_text_observation(self) -> TextObservedPayload:
+        x0, y0, x1, y1 = self.bbox
+        if not (0.0 <= x0 < x1 <= 1.0 and 0.0 <= y0 < y1 <= 1.0):
+            raise ValueError("OCR bbox must be normalized as x0,y0,x1,y1")
+        if self.quad is not None:
+            if len(self.quad) != 4:
+                raise ValueError("OCR quad must contain exactly four points")
+            if any(not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0) for x, y in self.quad):
+                raise ValueError("OCR quad points must be normalized")
+        if (self.change == "changed") != (self.previous_text is not None):
+            raise ValueError("changed OCR text must be the only change with previous_text")
+        return self
+
+
+class OcrFramePayload(EvidenceModel):
+    engine: str = Field(min_length=1)
+    num_threads: int = Field(ge=1)
+    det_limit_side_len: int = Field(ge=1)
+    recognized_line_count: int = Field(ge=0)
+    elapsed_ms: float = Field(ge=0.0)
+    det_ms: float | None = Field(default=None, ge=0.0)
+    rec_ms: float | None = Field(default=None, ge=0.0)
+    cpu_core_seconds: float | None = Field(default=None, ge=0.0)
+    trigger: Literal["detector", "heartbeat"]
+    outcome_detail: Literal["ok", "late", "skipped_disabled", "failed"]
+
+
+EvidencePayload = (
+    FastObservationPayload
+    | FrameMetricsPayload
+    | KeyWindowPayload
+    | TextObservedPayload
+    | OcrFramePayload
+)
 
 
 class EvidenceEvent(EvidenceModel):
@@ -118,6 +162,8 @@ class EvidenceEvent(EvidenceModel):
             "fast_observation": FastObservationPayload,
             "frame_metrics": FrameMetricsPayload,
             "key_window": KeyWindowPayload,
+            "text_observed": TextObservedPayload,
+            "ocr_frame": OcrFramePayload,
         }
         expected = expected_payloads.get(self.kind)
         if expected is None or not isinstance(self.payload, expected):
@@ -126,6 +172,8 @@ class EvidenceEvent(EvidenceModel):
             "fast_observation": "fast",
             "frame_metrics": "detector",
             "key_window": "input",
+            "text_observed": "ocr",
+            "ocr_frame": "ocr",
         }
         if self.source != expected_sources[self.kind]:
             raise ValueError(f"source does not match evidence kind {self.kind!r}")
