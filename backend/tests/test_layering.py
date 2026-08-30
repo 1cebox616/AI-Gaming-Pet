@@ -9,6 +9,8 @@ PET_ROOT = Path(__file__).parents[1] / "src" / "pet"
 CORE_ROOT = PET_ROOT / "core"
 GAMES_ROOT = PET_ROOT / "games"
 BELIEF_ROOT = CORE_ROOT / "belief"
+OCR_MODULES = tuple(CORE_ROOT.glob("ocr_*.py"))
+LOCAL_SENSOR_PATHS = (CORE_ROOT / "capture.py", CORE_ROOT / "input_telemetry.py")
 ALLOWED_CORE_MODULES = {"adapter_api", "config", "llm", "prompt"}
 NETWORK_MODULES = {
     "aiohttp",
@@ -18,6 +20,7 @@ NETWORK_MODULES = {
     "requests",
     "socket",
     "urllib",
+    "urllib3",
     "websockets",
 }
 
@@ -47,6 +50,15 @@ def _imports(path: Path) -> tuple[tuple[str, int], ...]:
 
 def _failure(path: Path, line: int, message: str) -> str:
     return f"{path.relative_to(PET_ROOT)}:{line}: {message}"
+
+
+def _network_import_failures(paths: tuple[Path, ...], label: str) -> list[str]:
+    return [
+        _failure(path, line, f"{label} imports network module {module}")
+        for path in paths
+        for module, line in _imports(path)
+        if module.split(".", maxsplit=1)[0] in NETWORK_MODULES
+    ]
 
 
 def test_core_never_imports_game_packages() -> None:
@@ -113,12 +125,17 @@ def test_game_packages_do_not_cross_import_or_reach_eval_from_production() -> No
 
 
 def test_belief_package_has_no_network_imports() -> None:
-    failures = [
-        _failure(path, line, f"belief imports network module {module}")
-        for path in BELIEF_ROOT.rglob("*.py")
-        for module, line in _imports(path)
-        if module.split(".", maxsplit=1)[0] in NETWORK_MODULES
-    ]
+    failures = _network_import_failures(tuple(BELIEF_ROOT.rglob("*.py")), "belief")
+    assert not failures, "\n".join(failures)
+
+
+def test_ocr_modules_have_no_network_imports() -> None:
+    failures = _network_import_failures(OCR_MODULES, "OCR module")
+    assert not failures, "\n".join(failures)
+
+
+def test_capture_and_input_telemetry_have_no_network_imports() -> None:
+    failures = _network_import_failures(LOCAL_SENSOR_PATHS, "local sensor")
     assert not failures, "\n".join(failures)
 
 

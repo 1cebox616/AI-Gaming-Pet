@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib.metadata import version
 import logging
 from pathlib import Path
+import sys
 import time
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 from PIL import Image
@@ -16,6 +19,11 @@ from pet.core.belief import EvidenceStore, OcrFramePayload, TextObservedPayload
 from pet.core.config import AdapterConfig, GenericVisionConfig, LlmConfig, LlmProfileConfig, OcrConfig
 from pet.core.llm import LlmResult, LlmUsage
 from pet.core.ocr_probe import OcrFrameResult, OcrLine
+from pet.core.ocr_rapid import (
+    DETECTOR_MODEL_NAME,
+    RECOGNIZER_MODEL_NAME,
+    RapidOcrEngine,
+)
 from pet.core.ocr_selective import TextLineCache
 from pet.games.generic.adapter import GenericVisionAdapter, WindowTitleMap
 
@@ -306,3 +314,118 @@ def test_ocr_config_rejects_unknown_engine_and_zero_threads() -> None:
         OcrConfig(engine="unknown")  # type: ignore[arg-type]
     with pytest.raises(ValidationError):
         OcrConfig(num_threads=0)
+
+
+def test_configured_model_directory_must_contain_both_local_models(tmp_path: Path) -> None:
+    configured_model_dir = tmp_path / "configured-models"
+    settings = OcrConfig(model_dir=str(configured_model_dir))
+    engine = RapidOcrEngine(
+        model_dir=Path(settings.model_dir),
+        num_threads=settings.num_threads,
+        det_limit_side_len=settings.det_limit_side_len,
+    )
+    assert engine.model_dir == configured_model_dir
+    with pytest.raises(FileNotFoundError) as caught:
+        engine.start()
+    message = str(caught.value)
+    assert str(configured_model_dir / DETECTOR_MODEL_NAME) in message
+    assert str(configured_model_dir / RECOGNIZER_MODEL_NAME) in message
+    assert engine._engine is None
+
+
+def test_rapidocr_392_classifier_is_never_constructed_or_called(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ROOT CAUSE: RapidOCR 3.9.2 constructs TextClassifier even when
+    # Global.use_cls=false. The private _initialize override prevents that.
+    # A failure after upgrading rapidocr means the override must be reviewed,
+    # not that this regression test should be weakened.
+    assert version("rapidocr") == "3.9.2"
+    calls = {"classifier_constructed": 0, "classifier_called": 0}
+
+    class FakeEngineType:
+        OPENVINO = "openvino"
+
+    class FakeLang:
+        CH = "ch"
+
+    class FakeModelType:
+        TINY = "tiny"
+
+    class FakeOcrVersion:
+        PPOCRV6 = "ppocrv6"
+
+    class FakeComponent:
+        def __init__(self, _cfg: object = None) -> None:
+            return None
+
+    class FakeClassifier(FakeComponent):
+        def __init__(self, _cfg: object = None) -> None:
+            calls["classifier_constructed"] += 1
+
+        def __call__(self, _images: object) -> object:
+            calls["classifier_called"] += 1
+            return _images
+
+    class FakeRapidOcr:
+        def __init__(self, *, params: dict[str, object]) -> None:
+            del params
+            engine_type = SimpleNamespace(value="openvino")
+            cfg = SimpleNamespace(
+                Global=SimpleNamespace(
+                    text_score=0.5,
+                    min_height=1,
+                    width_height_ratio=8.0,
+                    use_det=True,
+                    use_rec=True,
+                    model_root_dir=None,
+                    font_path=None,
+                    max_side_len=2000,
+                    min_side_len=30,
+                    return_word_box=False,
+                    return_single_char_box=False,
+                ),
+                Det=SimpleNamespace(engine_type=engine_type),
+                Rec=SimpleNamespace(engine_type=engine_type),
+                EngineConfig={"openvino": {}},
+            )
+            self._initialize(cfg)
+
+        def __call__(self, image: np.ndarray, *, use_cls: bool) -> SimpleNamespace:
+            self.use_cls = use_cls
+            if self.use_cls:
+                self.text_cls((image,))
+            return SimpleNamespace(
+                boxes=None,
+                txts=None,
+                scores=None,
+                elapse_list=(0.0, 0.0, 0.0),
+            )
+
+    rapidocr_module = ModuleType("rapidocr")
+    rapidocr_module.EngineType = FakeEngineType
+    rapidocr_module.LangDet = FakeLang
+    rapidocr_module.LangRec = FakeLang
+    rapidocr_module.ModelType = FakeModelType
+    rapidocr_module.OCRVersion = FakeOcrVersion
+    rapidocr_main_module = ModuleType("rapidocr.main")
+    rapidocr_main_module.CalRecBoxes = FakeComponent
+    rapidocr_main_module.LoadImage = FakeComponent
+    rapidocr_main_module.RapidOCR = FakeRapidOcr
+    rapidocr_main_module.TextClassifier = FakeClassifier
+    rapidocr_main_module.TextDetector = FakeComponent
+    rapidocr_main_module.TextRecognizer = FakeComponent
+    monkeypatch.setitem(sys.modules, "rapidocr", rapidocr_module)
+    monkeypatch.setitem(sys.modules, "rapidocr.main", rapidocr_main_module)
+
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    (model_dir / DETECTOR_MODEL_NAME).touch()
+    (model_dir / RECOGNIZER_MODEL_NAME).touch()
+    engine = RapidOcrEngine(model_dir=model_dir, num_threads=2, det_limit_side_len=1280)
+    engine.start()
+
+    assert engine._engine.use_cls is False
+    assert engine._engine.text_cls is None
+    engine.recognize(np.zeros((64, 64, 3), dtype=np.uint8))
+    assert calls == {"classifier_constructed": 0, "classifier_called": 0}

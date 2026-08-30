@@ -87,7 +87,7 @@ class RapidOcrEngine:
             "EngineConfig.openvino.inference_num_threads": self.num_threads,
         }
         class RapidOcrWithoutClassifier(RapidOCR):
-            """RapidOCR 3.9.2 otherwise constructs Cls even when use_cls=false."""
+            """Override RapidOCR 3.9.2 private _initialize to avoid constructing Cls."""
 
             def _initialize(self, cfg: Any) -> None:
                 self.text_score = cfg.Global.text_score
