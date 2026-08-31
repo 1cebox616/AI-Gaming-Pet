@@ -1,10 +1,8 @@
-"""Calibrate full-frame perceptual hashes on retained production recordings."""
+"""Calibrate all-polling-frame scene dwell and regenerate generic game cards."""
 
 from __future__ import annotations
 
 import argparse
-from collections import Counter
-from collections.abc import Sequence
 import csv
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,21 +13,14 @@ import re
 import shutil
 import statistics
 import time
-import tomllib
+from collections.abc import Sequence
 
 import numpy as np
 from PIL import Image
 
 from pet.core.belief import EvidenceEvent, EvidenceStore, SceneFingerprintPayload
 from pet.core.gamecard import GameCardRepository, GameCardSession, slugify_game_id
-from pet.core.scene_fingerprint import (
-    HashBits,
-    HashKind,
-    SceneCluster,
-    SceneClusterer,
-    hamming,
-    perceptual_hash,
-)
+from pet.core.scene_fingerprint import SceneCluster, SceneClusterer, hamming, perceptual_hash
 from pet.games.generic.adapter import WindowTitleMap
 
 BACKEND_DIRECTORY = Path(__file__).resolve().parents[5]
@@ -39,32 +30,18 @@ DEFAULT_RECORDINGS = (
     BACKEND_DIRECTORY / "recordings" / "capture" / "20260827-215554",
     BACKEND_DIRECTORY / "recordings" / "capture" / "20260827-220206",
 )
-DEFAULT_OUTPUT = BACKEND_DIRECTORY / "eval-reports" / "m5-b-t2-2"
+DEFAULT_OUTPUT = BACKEND_DIRECTORY / "eval-reports" / "m5-b-t2-3"
 DEFAULT_MEMORY = BACKEND_DIRECTORY / "memory"
-VARIANTS: tuple[tuple[HashKind, HashBits], ...] = (
-    ("ahash", 64),
-    ("ahash", 256),
-    ("dhash", 64),
-    ("dhash", 256),
-    ("phash", 64),
-    ("phash", 256),
-)
-_RAW_SEQUENCE = re.compile(r"raw-(?P<sequence>\d+)-")
 TRUTH_PATH = BACKEND_DIRECTORY / "data" / "generic" / "scene-truth" / "spans.toml"
+HASH_KIND = "phash"
+HASH_BITS = 64
+HAMMING_THRESHOLD = 8
+CARD_MIN_DWELL_SECONDS = 30.0
+_RAW_SEQUENCE = re.compile(r"raw-(?P<sequence>\d+)-")
 
 
 class SceneEvaluationError(RuntimeError):
     """Raised when retained calibration inputs violate the expected format."""
-
-
-@dataclass(frozen=True, slots=True)
-class SelectedFrame:
-    path: Path
-    raw_sequence: int
-    relative_seconds: float
-    recording_seconds: float
-    captured_at: datetime
-    detector_large: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,49 +59,34 @@ class Recording:
     path: Path
     label: str
     title: str
-    frames: tuple[SelectedFrame, ...]
     polling_frames: tuple[PollingFrame, ...]
 
-
-@dataclass(frozen=True, slots=True)
-class TruthSpan:
-    recording: str
-    start: float
-    end: float
-    screen: str
-
-
-@dataclass(frozen=True, slots=True)
-class CurvePoint:
-    threshold: int
-    cluster_count: int
-    stable_cluster_count: int
-    max_cluster_share: float
-    singleton_cluster_share: float
-    candidate_stable_min_frames: int
-
-
-@dataclass(frozen=True, slots=True)
-class VariantResult:
-    kind: HashKind
-    bits: HashBits
-    hashes: tuple[tuple[str, ...], ...]
-    elapsed_ms: tuple[float, ...]
-    all_adjacent_distances: tuple[int, ...]
-    noise_floor_distances: tuple[int, ...]
-    curve: tuple[CurvePoint, ...]
-    threshold_lower: int
-    threshold_upper: int
-    plateau_start: int | None
-    plateau_end: int | None
-    plateau_width_ratio: float
-    raw_stable_min_frames: int | None
-    stable_min_frames: int
-    elimination_reason: str | None
-
     @property
-    def median_elapsed_ms(self) -> float:
-        return statistics.median(self.elapsed_ms)
+    def selected_frames(self) -> tuple[PollingFrame, ...]:
+        return tuple(frame for frame in self.polling_frames if frame.selected)
+
+
+@dataclass(frozen=True, slots=True)
+class DurationCalibration:
+    stable_min_seconds: float
+    temporary: bool
+    method: str
+    bin_width_seconds: float
+    histogram_edges: tuple[float, ...]
+    histogram_counts: tuple[int, ...]
+    zero_duration_count: int
+    measured_durations: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayResult:
+    clusterer: SceneClusterer
+    members: dict[int, tuple[PollingFrame, ...]]
+    selected_cluster_count: int
+    promoted_cluster_ids: tuple[int, ...]
+    stable_unpromoted_cluster_ids: tuple[int, ...]
+    card_scene_count: int
+    representative_rows: tuple[str, ...]
 
 
 def load_recording(path: Path) -> Recording:
@@ -137,274 +99,55 @@ def load_recording(path: Path) -> Recording:
     startup = payload.get("启动参数")
     if not isinstance(startup, dict) or not isinstance(startup.get("title"), str):
         raise SceneEvaluationError(f"recording title is missing: {session_path}")
+
     raw_paths: dict[int, Path] = {}
     for raw_path in raw_dir.glob("raw-*.jpg"):
         match = _RAW_SEQUENCE.match(raw_path.name)
         if match is not None:
             raw_paths[int(match.group("sequence"))] = raw_path
-    captured_rows: list[tuple[int, float, datetime, str, bool, bool]] = []
+
+    rows: list[tuple[int, float, datetime, str, bool]] = []
     with metrics_path.open("r", encoding="utf-8-sig", newline="") as stream:
         for row in csv.DictReader(stream):
             if row.get("是否取得画面") != "是":
                 continue
-            sequence = int(row["序号"])
             captured_at = datetime.fromisoformat(row["时间"])
-            monotonic = float(row.get("单调秒") or captured_at.timestamp())
-            change_ratio = float(
-                row.get("confirmed块占比")
-                or row.get("确实变了的块占比")
-                or 0.0
-            )
-            captured_rows.append(
+            rows.append(
                 (
-                    sequence,
-                    monotonic,
+                    int(row["序号"]),
+                    float(row.get("单调秒") or captured_at.timestamp()),
                     captured_at,
                     row.get("判定原因") or "",
                     row.get("是否落盘") == "是",
-                    change_ratio > 0.50,
                 )
             )
-    if not captured_rows:
+    if not rows:
         raise SceneEvaluationError(f"recording has no captured frames: {path}")
-    polling_origin = captured_rows[0][1]
-    selected_origin = next(
-        (monotonic for _seq, monotonic, _wall, _reason, selected, _large in captured_rows if selected),
-        None,
-    )
-    if selected_origin is None:
-        raise SceneEvaluationError(f"recording has no selected frames: {path}")
-    frames: list[SelectedFrame] = []
-    polling_frames: list[PollingFrame] = []
-    for (
-        sequence,
-        monotonic,
-        captured_at,
-        detector_reason,
-        selected,
-        detector_large,
-    ) in captured_rows:
+    origin = rows[0][1]
+    frames: list[PollingFrame] = []
+    for sequence, monotonic, captured_at, detector_reason, selected in rows:
         raw_path = raw_paths.get(sequence)
         if raw_path is None:
             raise SceneEvaluationError(
                 f"captured frame {sequence} is absent from raw archive: {path}"
             )
-        polling_relative_seconds = monotonic - polling_origin
-        polling_frames.append(
+        frames.append(
             PollingFrame(
                 path=raw_path,
                 raw_sequence=sequence,
-                relative_seconds=polling_relative_seconds,
+                relative_seconds=monotonic - origin,
                 captured_at=captured_at,
                 detector_reason=detector_reason,
                 selected=selected,
             )
         )
-        if selected:
-            frames.append(
-                SelectedFrame(
-                    path=raw_path,
-                    raw_sequence=sequence,
-                    relative_seconds=monotonic - selected_origin,
-                    recording_seconds=polling_relative_seconds,
-                    captured_at=captured_at,
-                    detector_large=detector_large,
-                )
-            )
-    if not frames:
+    if not any(frame.selected for frame in frames):
         raise SceneEvaluationError(f"recording has no selected frames: {path}")
-    label = payload.get("标签")
     return Recording(
         path=path,
-        label=str(label) if label else path.name,
+        label=str(payload.get("标签") or path.name),
         title=startup["title"],
-        frames=tuple(frames),
-        polling_frames=tuple(polling_frames),
-    )
-
-
-def load_truth_spans(path: Path) -> tuple[TruthSpan, ...]:
-    if not path.is_file():
-        return ()
-    with path.open("rb") as stream:
-        payload = tomllib.load(stream)
-    raw_spans = payload.get("spans", payload.get("span"))
-    if not isinstance(raw_spans, list):
-        raise SceneEvaluationError("scene truth must contain [[spans]] entries")
-    spans: list[TruthSpan] = []
-    for raw in raw_spans:
-        if not isinstance(raw, dict):
-            raise SceneEvaluationError("scene truth span must be a TOML table")
-        span = TruthSpan(
-            recording=str(raw["recording"]),
-            start=float(raw["start"]),
-            end=float(raw["end"]),
-            screen=str(raw["screen"]),
-        )
-        if span.start < 0 or span.end <= span.start:
-            raise SceneEvaluationError("scene truth span needs 0 <= start < end")
-        spans.append(span)
-    return tuple(spans)
-
-
-def analyze_variants(
-    recordings: Sequence[Recording], truth_spans: Sequence[TruthSpan] = ()
-) -> tuple[VariantResult, ...]:
-    polling_hashes: dict[tuple[HashKind, HashBits], list[list[str]]] = {
-        variant: [[] for _ in recordings] for variant in VARIANTS
-    }
-    timings: dict[tuple[HashKind, HashBits], list[float]] = {
-        variant: [] for variant in VARIANTS
-    }
-    for recording_index, recording in enumerate(recordings):
-        for frame in recording.polling_frames:
-            with Image.open(frame.path) as source:
-                image = source.convert("RGB")
-            for variant in VARIANTS:
-                started = time.perf_counter()
-                value = perceptual_hash(image, *variant)
-                timings[variant].append((time.perf_counter() - started) * 1000.0)
-                polling_hashes[variant][recording_index].append(value)
-            image.close()
-
-    results: list[VariantResult] = []
-    for kind, bits in VARIANTS:
-        grouped_polling_hashes = tuple(
-            tuple(items) for items in polling_hashes[(kind, bits)]
-        )
-        grouped_hashes = tuple(
-            tuple(
-                value
-                for value, frame in zip(group, recording.polling_frames, strict=True)
-                if frame.selected
-            )
-            for group, recording in zip(
-                grouped_polling_hashes, recordings, strict=True
-            )
-        )
-        all_adjacent = tuple(
-            hamming(left, right)
-            for group in grouped_polling_hashes
-            for left, right in zip(group, group[1:])
-        )
-        if truth_spans:
-            noise_floor = tuple(
-                distance
-                for group, recording in zip(
-                    grouped_polling_hashes, recordings, strict=True
-                )
-                for distance in _truth_noise_floor_distances(
-                    group, recording, truth_spans
-                )
-            )
-        else:
-            noise_floor = tuple(
-                distance
-                for group, recording in zip(
-                    grouped_polling_hashes, recordings, strict=True
-                )
-                for distance in _noise_floor_distances(
-                    group,
-                    tuple(
-                        frame.detector_reason
-                        for frame in recording.polling_frames
-                    ),
-                )
-            )
-        if not noise_floor:
-            raise SceneEvaluationError("no detector no_change adjacency pairs were found")
-        lower, upper, interval_error = _threshold_interval(noise_floor, bits)
-        points: list[CurvePoint] = []
-        for threshold in range(upper + 1):
-            _, candidate_stable = _bounded_stable_min_frames(
-                grouped_hashes, threshold
-            )
-            points.append(
-                _curve_point(grouped_hashes, threshold, candidate_stable)
-            )
-        if interval_error is not None:
-            start = None
-            end = None
-            raw_stable = None
-            stable_min_frames = 3
-            elimination_reason = interval_error
-        else:
-            start, end = _stable_plateau(points, lower, upper)
-            raw_stable, stable_min_frames = _bounded_stable_min_frames(
-                grouped_hashes, start
-            )
-            elimination_reason = None
-        results.append(
-            VariantResult(
-                kind=kind,
-                bits=bits,
-                hashes=grouped_hashes,
-                elapsed_ms=tuple(timings[(kind, bits)]),
-                all_adjacent_distances=all_adjacent,
-                noise_floor_distances=noise_floor,
-                curve=tuple(points),
-                threshold_lower=lower,
-                threshold_upper=upper,
-                plateau_start=start,
-                plateau_end=end,
-                plateau_width_ratio=(
-                    (end - start) / bits
-                    if start is not None and end is not None
-                    else 0.0
-                ),
-                raw_stable_min_frames=raw_stable,
-                stable_min_frames=stable_min_frames,
-                elimination_reason=elimination_reason,
-            )
-        )
-    return tuple(results)
-
-
-def choose_default(results: Sequence[VariantResult]) -> VariantResult:
-    candidates = [
-        result
-        for result in results
-        if result.elimination_reason is None and result.median_elapsed_ms < 1.0
-    ]
-    if not candidates:
-        raise SceneEvaluationError(
-            "no hash variant has a valid threshold interval and median time below 1ms"
-        )
-    return max(
-        candidates,
-        key=lambda result: (
-            result.plateau_width_ratio,
-            -result.median_elapsed_ms,
-            -result.bits,
-        ),
-    )
-
-
-def _curve_point(
-    hashes: Sequence[Sequence[str]], threshold: int, stable_min_frames: int
-) -> CurvePoint:
-    clusters: list[SceneCluster] = []
-    frame_count = 0
-    for group in hashes:
-        clusterer = SceneClusterer(threshold, stable_min_frames)
-        for index, value in enumerate(group):
-            clusterer.observe(value, float(index))
-        clusters.extend(clusterer.clusters)
-        frame_count += len(group)
-    cluster_count = len(clusters)
-    return CurvePoint(
-        threshold=threshold,
-        cluster_count=cluster_count,
-        stable_cluster_count=sum(cluster.stable for cluster in clusters),
-        max_cluster_share=(
-            max((cluster.seen_count for cluster in clusters), default=0) / frame_count
-        ),
-        singleton_cluster_share=(
-            sum(cluster.seen_count == 1 for cluster in clusters) / cluster_count
-            if cluster_count
-            else 0.0
-        ),
-        candidate_stable_min_frames=stable_min_frames,
+        polling_frames=tuple(frames),
     )
 
 
@@ -422,8 +165,9 @@ def _noise_floor_distances(
 
 
 def _threshold_interval(
-    noise_floor_distances: Sequence[int], bits: HashBits
+    noise_floor_distances: Sequence[int], bits: int
 ) -> tuple[int, int, str | None]:
+    """Retain the B-T2-2 interval rule as a regression-tested diagnostic."""
     if not noise_floor_distances:
         raise ValueError("noise-floor distances must not be empty")
     lower = math.ceil(_percentile(noise_floor_distances, 95.0))
@@ -436,301 +180,143 @@ def _threshold_interval(
     return lower, upper, reason
 
 
-def _truth_noise_floor_distances(
-    hashes: Sequence[str],
-    recording: Recording,
-    truth_spans: Sequence[TruthSpan],
-) -> tuple[int, ...]:
-    if len(hashes) != len(recording.polling_frames):
-        raise ValueError("polling hashes and frames must have equal length")
-    identifiers = {
-        recording.path.name,
-        recording.label,
-        str(recording.path),
-        recording.path.as_posix(),
-    }
-    matching = [span for span in truth_spans if span.recording in identifiers]
-    distances: list[int] = []
-    for index in range(1, len(hashes)):
-        previous = recording.polling_frames[index - 1].relative_seconds
-        current = recording.polling_frames[index].relative_seconds
-        if any(
-            span.start <= previous <= span.end
-            and span.start <= current <= span.end
-            for span in matching
-        ):
-            distances.append(hamming(hashes[index - 1], hashes[index]))
-    return tuple(distances)
-
-
-def _stable_plateau(
-    points: Sequence[CurvePoint], lower: int, upper: int
-) -> tuple[int, int]:
-    eligible = [point for point in points if lower <= point.threshold <= upper]
-    if not eligible:
-        raise ValueError("stable plateau interval must not be empty")
-    runs: list[tuple[int, int]] = []
-    start = eligible[0].threshold
-    previous = eligible[0]
-    for point in eligible[1:]:
-        if point.stable_cluster_count != previous.stable_cluster_count:
-            runs.append((start, previous.threshold))
-            start = point.threshold
-        previous = point
-    runs.append((start, previous.threshold))
-    return max(runs, key=lambda run: (run[1] - run[0], -run[0]))
-
-
-def _stable_min_frames(hashes: Sequence[Sequence[str]], threshold: int) -> int:
-    lengths: list[int] = []
-    for group in hashes:
-        run = 0
-        for left, right in zip(group, group[1:]):
-            if hamming(left, right) > threshold:
-                run += 1
-            elif run:
-                lengths.append(run)
-                run = 0
-        if run:
-            lengths.append(run)
-    return max(1, math.ceil(_percentile(lengths, 90.0))) if lengths else 1
-
-
-def _bounded_stable_min_frames(
-    hashes: Sequence[Sequence[str]], threshold: int
-) -> tuple[int, int]:
-    raw = _stable_min_frames(hashes, threshold)
-    return raw, min(10, max(3, raw))
-
-
-def _percentile(values: Sequence[int] | Sequence[float], percentile: float) -> float:
-    if not values:
-        return 0.0
-    return float(np.percentile(np.asarray(values, dtype=np.float64), percentile))
-
-
-def _cluster_recording(
-    recording: Recording,
-    hashes: Sequence[str],
-    default: VariantResult,
-    repository: GameCardRepository,
-    game_id: str,
-    *,
-    card_min_visits: int,
-    card_min_span_seconds: float,
-    evidence_directory: Path | None = None,
-) -> tuple[GameCardSession, SceneClusterer, dict[int, list[SelectedFrame]], Counter[str]]:
-    if default.plateau_start is None:
-        raise ValueError("production replay requires a calibrated threshold")
-    source = recording.path.relative_to(BACKEND_DIRECTORY).as_posix()
-    card = repository.load_or_create(
-        game_id,
-        recording.title,
-        recording.frames[0].captured_at,
-        source_recording=source,
-    )
-    clusterer = SceneClusterer(
-        default.plateau_start,
-        default.stable_min_frames,
-        repository.card_references(card),
-    )
-    session = GameCardSession(
-        repository,
-        card,
-        recording.frames[0].captured_at,
-        card_min_visits=card_min_visits,
-        card_min_span_seconds=card_min_span_seconds,
-        source_recording=source,
-    )
-    members: dict[int, list[SelectedFrame]] = {}
-    corroboration: Counter[str] = Counter()
-    store = EvidenceStore.open(evidence_directory) if evidence_directory is not None else None
-    try:
-        for sequence, (frame, value) in enumerate(
-            zip(recording.frames, hashes, strict=True), start=1
-        ):
-            started = time.perf_counter()
-            with Image.open(frame.path) as image:
-                measured_value = perceptual_hash(image, default.kind, default.bits)
-            if measured_value != value:
-                raise RuntimeError(f"fingerprint changed during replay: {frame.path}")
-            match = clusterer.observe(measured_value, frame.relative_seconds)
-            elapsed_ms = (time.perf_counter() - started) * 1000.0
-            evidence_id = f"f{sequence}:scene:1"
-            clusterer.record_evidence(match.cluster_id, evidence_id)
-            members.setdefault(match.cluster_id, []).append(frame)
-            switched = match.switched_from is not None
-            key = (
-                "both"
-                if frame.detector_large and switched
-                else "neither"
-                if not frame.detector_large and not switched
-                else "detector_only"
-                if frame.detector_large
-                else "fingerprint_only"
-            )
-            corroboration[key] += 1
-            if store is not None:
-                candidate = match.card_candidate
-                store.append(
-                    EvidenceEvent(
-                        evidence_id=evidence_id,
-                        source="scene",
-                        kind="scene_fingerprint",
-                        root_capture_id=f"f{sequence}",
-                        observed_at=frame.relative_seconds,
-                        learned_at=frame.relative_seconds,
-                        scope=None,
-                        payload=SceneFingerprintPayload(
-                            hash=measured_value,
-                            cluster_id=match.cluster_id,
-                            distance=match.distance,
-                            is_new_cluster=match.is_new_cluster,
-                            switched_from=match.switched_from,
-                            stable=match.stable,
-                            card_candidate_scene_id=(candidate.scene_id if candidate else None),
-                            card_candidate_distance=(candidate.distance if candidate else None),
-                            elapsed_ms=elapsed_ms,
-                        ),
-                        derived_from=[],
-                        context_version=None,
-                        outcome="ok",
-                    )
-                )
-    finally:
-        if store is not None:
-            store.close()
-    session.flush(clusterer.clusters)
-    return session, clusterer, members, corroboration
-
-
-def run_evaluation(
+def _hash_recordings(
     recordings: Sequence[Recording],
-    output: Path,
-    memory_root: Path,
-    *,
-    card_min_visits: int = 3,
-    card_min_span_seconds: float = 30.0,
-) -> VariantResult:
-    output.mkdir(parents=True, exist_ok=True)
-    truth_spans = load_truth_spans(TRUTH_PATH)
-    results = analyze_variants(recordings, truth_spans)
-    default = choose_default(results)
-    title_map = WindowTitleMap.load()
-    identities = tuple(
-        _recording_identity(recording, title_map) for recording in recordings
-    )
-    old_card_counts, old_directories = _old_card_inventory(
-        recordings, memory_root
-    )
-    _reset_calibration_cards(
-        memory_root,
-        old_directories,
-        tuple(game_id for game_id, _display_name in identities),
-    )
-    repository = GameCardRepository(memory_root)
-    production_rows: list[str] = []
-    persistence_rows: list[str] = []
-    new_card_counts: dict[str, int] = {}
+) -> tuple[tuple[tuple[str, ...], ...], tuple[tuple[float, ...], ...]]:
+    hashes: list[tuple[str, ...]] = []
+    timings: list[tuple[float, ...]] = []
+    for recording in recordings:
+        recording_hashes: list[str] = []
+        recording_timings: list[float] = []
+        for frame in recording.polling_frames:
+            with Image.open(frame.path) as source:
+                image = source.convert("RGB")
+            started = time.perf_counter()
+            value = perceptual_hash(image, HASH_KIND, HASH_BITS)
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            image.close()
+            recording_hashes.append(value)
+            recording_timings.append(elapsed_ms)
+        hashes.append(tuple(recording_hashes))
+        timings.append(tuple(recording_timings))
+    return tuple(hashes), tuple(timings)
 
-    for index, (recording, identity) in enumerate(
-        zip(recordings, identities, strict=True)
-    ):
-        game_id, _display_name = identity
-        hashes = default.hashes[index]
-        evidence_directory = output / recording.label / "production-replay"
-        session, clusterer, members, corroboration = _cluster_recording(
-            recording,
-            hashes,
-            default,
-            repository,
-            game_id,
-            card_min_visits=card_min_visits,
-            card_min_span_seconds=card_min_span_seconds,
-            evidence_directory=evidence_directory,
-        )
-        representative_root = output / recording.label / "representatives"
-        if representative_root.is_dir():
-            shutil.rmtree(representative_root)
-        representative_root.mkdir(parents=True, exist_ok=True)
-        production_rows.extend(
-            _production_report_rows(
-                recording,
-                session,
-                clusterer,
-                members,
-                corroboration,
-                representative_root,
-                card_min_visits=card_min_visits,
-                card_min_span_seconds=card_min_span_seconds,
-            )
-        )
-        if index == 0:
-            first_card = session.card.model_copy(deep=True)
-            second, second_clusterer, _, _ = _cluster_recording(
-                recording,
-                hashes,
-                default,
-                repository,
-                game_id,
-                card_min_visits=card_min_visits,
-                card_min_span_seconds=card_min_span_seconds,
-            )
-            first_ids = [scene.cluster_id for scene in first_card.scenes]
-            second_ids = [scene.cluster_id for scene in second.card.scenes]
-            candidate_ids = sorted(
-                {
-                    cluster.card_candidate.scene_id
-                    for cluster in second_clusterer.clusters
-                    if cluster.card_candidate is not None
-                }
-            )
-            persistence_rows.extend(
-                (
-                    f"- 录制：`{recording.path}`",
-                    f"- 第一遍场景 ID：{first_ids}",
-                    f"- 第二遍场景 ID：{second_ids}",
-                    f"- 第二遍会话簇从 1 开始：{bool(second_clusterer.clusters and second_clusterer.clusters[0].cluster_id == 1)}",
-                    f"- 第二遍卡候选：{candidate_ids}",
-                    "- sessions_seen 变化："
-                    + str(
-                        {
-                            scene.cluster_id: scene.sessions_seen
-                            for scene in second.card.scenes
-                        }
-                    ),
-                    "",
-                )
-            )
-        new_card_counts[recording.label] = len(session.card.scenes)
 
-    report = _render_report(
-        recordings,
-        results,
-        default,
-        production_rows,
-        persistence_rows,
-        old_card_counts=old_card_counts,
-        new_card_counts=new_card_counts,
-        noise_source=("人工区间" if truth_spans else "检测器 no_change 邻接对"),
-        truth_spans=truth_spans,
-        card_min_visits=card_min_visits,
-        card_min_span_seconds=card_min_span_seconds,
+def _cluster(
+    frames: Sequence[PollingFrame],
+    hashes: Sequence[str],
+    stable_min_seconds: float,
+) -> tuple[SceneClusterer, dict[int, tuple[PollingFrame, ...]]]:
+    if len(frames) != len(hashes):
+        raise ValueError("frames and hashes must have equal length")
+    clusterer = SceneClusterer(HAMMING_THRESHOLD, stable_min_seconds)
+    members: dict[int, list[PollingFrame]] = {}
+    for frame, value in zip(frames, hashes, strict=True):
+        match = clusterer.observe(value, frame.relative_seconds)
+        members.setdefault(match.cluster_id, []).append(frame)
+    return clusterer, {
+        cluster_id: tuple(items) for cluster_id, items in members.items()
+    }
+
+
+def _derive_stable_min_seconds(
+    durations: Sequence[float],
+    bin_width_seconds: float,
+) -> DurationCalibration:
+    if bin_width_seconds <= 0:
+        raise ValueError("histogram bin width must be positive")
+    zero_count = sum(duration <= 0 for duration in durations)
+    if any(duration < 0 for duration in durations):
+        raise ValueError("continuous-run durations must be nonnegative")
+    measured = tuple(sorted(durations))
+    if not measured:
+        return DurationCalibration(
+            stable_min_seconds=0.0,
+            temporary=True,
+            method="无连续段，P75=0.000s（临时）",
+            bin_width_seconds=bin_width_seconds,
+            histogram_edges=(0.0, bin_width_seconds),
+            histogram_counts=(0,),
+            zero_duration_count=zero_count,
+            measured_durations=(),
+        )
+    upper = max(measured)
+    bin_count = max(1, math.ceil(upper / bin_width_seconds))
+    edges = np.arange(bin_count + 1, dtype=np.float64) * bin_width_seconds
+    if edges[-1] < upper:
+        edges = np.append(edges, edges[-1] + bin_width_seconds)
+    counts_array, edges_array = np.histogram(measured, bins=edges)
+    counts = tuple(int(value) for value in counts_array)
+
+    peak_floor = max(3, math.ceil(max(counts) * 0.10))
+    peaks = [
+        index
+        for index, count in enumerate(counts)
+        if count >= peak_floor
+        and count >= (counts[index - 1] if index else -1)
+        and count >= (counts[index + 1] if index + 1 < len(counts) else -1)
+        and (
+            count > (counts[index - 1] if index else -1)
+            or count > (counts[index + 1] if index + 1 < len(counts) else -1)
+        )
+    ]
+    candidates: list[tuple[int, int, int]] = []
+    for left_position, left in enumerate(peaks):
+        for right in peaks[left_position + 1 :]:
+            if right - left < 2:
+                continue
+            valley = min(range(left + 1, right), key=counts.__getitem__)
+            if counts[valley] * 2 < min(counts[left], counts[right]):
+                candidates.append((left, right, valley))
+    if candidates:
+        left, right, valley = max(
+            candidates,
+            key=lambda item: (
+                min(counts[item[0]], counts[item[1]]),
+                item[1] - item[0],
+            ),
+        )
+        threshold = round(float(edges_array[valley + 1]), 3)
+        method = (
+            f"双峰可分：峰位 {left}/{right}，谷位 {valley}，取谷右边界 "
+            f"{threshold:.3f}s"
+        )
+        temporary = False
+    else:
+        threshold = round(_percentile(measured, 75.0), 3)
+        method = f"直方图单峰或平缓，取全部连续段 P75={threshold:.3f}s（临时）"
+        temporary = True
+    return DurationCalibration(
+        stable_min_seconds=threshold,
+        temporary=temporary,
+        method=method,
+        bin_width_seconds=bin_width_seconds,
+        histogram_edges=tuple(float(value) for value in edges_array),
+        histogram_counts=counts,
+        zero_duration_count=zero_count,
+        measured_durations=measured,
     )
-    (output / "report.md").write_text(report, encoding="utf-8", newline="\n")
-    return default
+
+
+def _polling_interval(recordings: Sequence[Recording]) -> float:
+    deltas = [
+        right.relative_seconds - left.relative_seconds
+        for recording in recordings
+        for left, right in zip(recording.polling_frames, recording.polling_frames[1:])
+        if right.relative_seconds > left.relative_seconds
+    ]
+    if not deltas:
+        raise SceneEvaluationError("recordings contain no positive polling intervals")
+    return float(statistics.median(deltas))
 
 
 def _recording_identity(
     recording: Recording, title_map: WindowTitleMap
 ) -> tuple[str, str]:
-    try:
-        game_name = title_map.identify(recording.title, "")
-    except ValueError:
-        # Legacy capture session.json did not persist process_name.  Live
-        # production still follows the process-name fallback exactly.
-        game_name = recording.title
-    return slugify_game_id(game_name, recording.title), recording.title
+    identity = title_map.identify_identity(recording.title, "")
+    if identity.game_id.startswith("g-") and identity.context_name == recording.title:
+        return slugify_game_id(recording.title, recording.title), recording.title
+    return identity.game_id, recording.title
 
 
 def _old_card_inventory(
@@ -774,238 +360,368 @@ def _reset_calibration_cards(
             shutil.rmtree(target)
 
 
-def _supervised_quality(
-    recordings: Sequence[Recording],
-    result: VariantResult,
-    truth_spans: Sequence[TruthSpan],
-) -> tuple[float, float]:
-    if result.plateau_start is None:
-        raise ValueError("supervised quality requires a calibrated threshold")
-    purity_correct = 0
-    purity_total = 0
-    separated = 0
-    separation_total = 0
-    for recording, hashes in zip(recordings, result.hashes, strict=True):
-        clusterer = SceneClusterer(result.plateau_start, result.stable_min_frames)
-        assignments = [
-            clusterer.observe(value, frame.relative_seconds).cluster_id
-            for value, frame in zip(hashes, recording.frames, strict=True)
-        ]
-        identifiers = {
-            recording.path.name,
-            recording.label,
-            str(recording.path),
-            recording.path.as_posix(),
-        }
-        summaries: list[tuple[TruthSpan, int]] = []
-        for span in truth_spans:
-            if span.recording not in identifiers:
-                continue
-            members = [
-                assignment
-                for assignment, frame in zip(
-                    assignments, recording.frames, strict=True
-                )
-                if span.start <= frame.recording_seconds <= span.end
-            ]
-            if not members:
-                continue
-            counts = Counter(members)
-            dominant, count = counts.most_common(1)[0]
-            purity_correct += count
-            purity_total += len(members)
-            summaries.append((span, dominant))
-        for index, (left_span, left_cluster) in enumerate(summaries):
-            for right_span, right_cluster in summaries[index + 1 :]:
-                if left_span.screen == right_span.screen:
-                    continue
-                separation_total += 1
-                separated += left_cluster != right_cluster
-    purity = purity_correct / purity_total if purity_total else 0.0
-    separation = separated / separation_total if separation_total else 0.0
-    return purity, separation
-
-
-def _production_report_rows(
-    recording: Recording,
-    session: GameCardSession,
-    clusterer: SceneClusterer,
-    members: dict[int, list[SelectedFrame]],
-    corroboration: Counter[str],
-    representative_root: Path,
+def _copy_representatives(
+    output: Path,
+    cluster: SceneCluster,
+    members: Sequence[PollingFrame],
     *,
-    card_min_visits: int,
-    card_min_span_seconds: float,
-) -> list[str]:
-    rows = [
-        f"### {recording.label}",
-        "",
-        f"- 录制：`{recording.path}`",
-        f"- 选中帧：{len(recording.frames)}",
-        f"- 会话簇：{len(clusterer.clusters)}；升格卡场景：{len(session.card.scenes)}",
-        "- 印证四格："
-        f"都真 {corroboration['both']} / 都假 {corroboration['neither']} / "
-        f"只检测器 {corroboration['detector_only']} / 只指纹 {corroboration['fingerprint_only']}",
-        "",
-    ]
-    promoted_clusters = [
-        cluster
+    promoted: bool,
+) -> tuple[str, ...]:
+    category = "promoted" if promoted else "stable-unpromoted"
+    directory = output / "representatives" / category
+    directory.mkdir(parents=True, exist_ok=True)
+    if promoted:
+        chosen = (members[0], members[len(members) // 2], members[-1])
+        names = ("first", "middle", "last")
+    else:
+        chosen = (members[len(members) // 2],)
+        names = ("candidate",)
+    paths: list[str] = []
+    for name, frame in zip(names, chosen, strict=True):
+        destination = directory / f"cluster-{cluster.cluster_id}-{name}.jpg"
+        shutil.copyfile(frame.path, destination)
+        paths.append(str(destination))
+    return tuple(paths)
+
+
+def _replay_recording(
+    recording: Recording,
+    hashes: Sequence[str],
+    timings: Sequence[float],
+    stable_min_seconds: float,
+    repository: GameCardRepository,
+    game_id: str,
+    output: Path,
+) -> ReplayResult:
+    source = recording.path.relative_to(BACKEND_DIRECTORY).as_posix()
+    card = repository.load_or_create(
+        game_id,
+        recording.title,
+        recording.polling_frames[0].captured_at,
+        source_recording=source,
+    )
+    clusterer = SceneClusterer(
+        HAMMING_THRESHOLD,
+        stable_min_seconds,
+        repository.card_references(card),
+    )
+    session = GameCardSession(
+        repository,
+        card,
+        recording.polling_frames[0].captured_at,
+        card_min_dwell_seconds=CARD_MIN_DWELL_SECONDS,
+        source_recording=source,
+    )
+    member_lists: dict[int, list[PollingFrame]] = {}
+    previous_selected_cluster: int | None = None
+    changed_since_selected = False
+    selected_sequence = 0
+    store = EvidenceStore.open(output / "production-replay")
+    try:
+        for frame, value, elapsed_ms in zip(
+            recording.polling_frames, hashes, timings, strict=True
+        ):
+            match = clusterer.observe(value, frame.relative_seconds)
+            member_lists.setdefault(match.cluster_id, []).append(frame)
+            if match.switched_from is not None:
+                changed_since_selected = True
+            if not frame.selected:
+                continue
+            selected_sequence += 1
+            selected_switched_from = (
+                previous_selected_cluster
+                if changed_since_selected and previous_selected_cluster is not None
+                else None
+            )
+            candidate = match.card_candidate
+            evidence_id = f"f{selected_sequence}:scene:1"
+            store.append(
+                EvidenceEvent(
+                    evidence_id=evidence_id,
+                    source="scene",
+                    kind="scene_fingerprint",
+                    root_capture_id=f"f{selected_sequence}",
+                    observed_at=frame.relative_seconds,
+                    learned_at=frame.relative_seconds,
+                    scope=None,
+                    payload=SceneFingerprintPayload(
+                        hash=value,
+                        cluster_id=match.cluster_id,
+                        distance=match.distance,
+                        is_new_cluster=match.is_new_cluster,
+                        switched_from=selected_switched_from,
+                        stable=match.stable,
+                        card_candidate_scene_id=(candidate.scene_id if candidate else None),
+                        card_candidate_distance=(candidate.distance if candidate else None),
+                        elapsed_ms=elapsed_ms,
+                    ),
+                    derived_from=[],
+                    context_version=None,
+                    outcome="ok",
+                )
+            )
+            clusterer.record_evidence(match.cluster_id, evidence_id)
+            previous_selected_cluster = match.cluster_id
+            changed_since_selected = False
+    finally:
+        store.close()
+    session.flush(clusterer.clusters)
+
+    selected_frames = recording.selected_frames
+    selected_hashes = tuple(
+        value
+        for value, frame in zip(hashes, recording.polling_frames, strict=True)
+        if frame.selected
+    )
+    selected_clusterer, _selected_members = _cluster(
+        selected_frames, selected_hashes, stable_min_seconds
+    )
+    promoted = tuple(
+        cluster.cluster_id
         for cluster in clusterer.clusters
-        if cluster.stable
-        and cluster.seen_count >= card_min_visits
-        and cluster.span_seconds >= card_min_span_seconds
-    ]
-    if not promoted_clusters:
-        rows.extend(
-            (
-                "- 本段按新阈值得到零个可升格场景；未调参凑数，也不生成代表帧。",
-                "",
-            )
+        if cluster.stable and cluster.dwell_seconds >= CARD_MIN_DWELL_SECONDS
+    )
+    stable_unpromoted = tuple(
+        cluster.cluster_id
+        for cluster in clusterer.clusters
+        if cluster.stable and cluster.dwell_seconds < CARD_MIN_DWELL_SECONDS
+    )
+    members = {
+        cluster_id: tuple(items) for cluster_id, items in member_lists.items()
+    }
+    representative_rows: list[str] = []
+    for cluster_id in promoted:
+        cluster = clusterer.clusters[cluster_id - 1]
+        paths = _copy_representatives(
+            output, cluster, members[cluster_id], promoted=True
         )
-    for cluster in promoted_clusters:
-        frames = members[cluster.cluster_id]
-        chosen = (frames[0], frames[len(frames) // 2], frames[-1])
-        paths: list[str] = []
-        for position, frame in zip(("first", "middle", "last"), chosen, strict=True):
-            destination = representative_root / f"cluster-{cluster.cluster_id}-{position}.jpg"
-            shutil.copyfile(frame.path, destination)
-            paths.append(str(destination))
-        rows.extend(
-            (
-                f"#### session:c{cluster.cluster_id}",
-                "",
-                f"- 帧数 / 跨度：{cluster.seen_count} / {cluster.span_seconds:.3f}s",
-                f"- 距离：中位 {statistics.median(cluster.distances):.1f} / 最大 {max(cluster.distances)}",
-                f"- 访问段：{[(round(span.start, 3), round(span.end, 3)) for span in cluster.visit_spans]}",
-                f"- 代表帧：`{paths[0]}` / `{paths[1]}` / `{paths[2]}`",
-                "",
-            )
+        representative_rows.append(
+            f"- 升格 `session:c{cluster_id}`：`{paths[0]}` / `{paths[1]}` / `{paths[2]}`"
         )
-    return rows
+    for cluster_id in stable_unpromoted:
+        cluster = clusterer.clusters[cluster_id - 1]
+        paths = _copy_representatives(
+            output, cluster, members[cluster_id], promoted=False
+        )
+        representative_rows.append(
+            f"- 稳定未升格 `session:c{cluster_id}`：`{paths[0]}`"
+        )
+    return ReplayResult(
+        clusterer=clusterer,
+        members=members,
+        selected_cluster_count=len(selected_clusterer.clusters),
+        promoted_cluster_ids=promoted,
+        stable_unpromoted_cluster_ids=stable_unpromoted,
+        card_scene_count=len(session.card.scenes),
+        representative_rows=tuple(representative_rows),
+    )
 
 
 def _render_report(
     recordings: Sequence[Recording],
-    results: Sequence[VariantResult],
-    default: VariantResult,
-    production_rows: Sequence[str],
-    persistence_rows: Sequence[str],
-    *,
-    old_card_counts: dict[str, int],
-    new_card_counts: dict[str, int],
-    noise_source: str,
-    truth_spans: Sequence[TruthSpan],
-    card_min_visits: int,
-    card_min_span_seconds: float,
+    grouped_timings: Sequence[Sequence[float]],
+    noise_distances: Sequence[int],
+    all_adjacent_distances: Sequence[int],
+    calibration: DurationCalibration,
+    replay_results: Sequence[ReplayResult],
+    old_counts: dict[str, int],
 ) -> str:
-    if default.plateau_start is None or default.plateau_end is None:
-        raise ValueError("report default must have a calibrated plateau")
+    noise_p95 = _percentile(noise_distances, 95.0)
     lines = [
-        "# M5-B-T2-2 场景指纹重校准报告",
+        "# M5-B-T2-3 全轮询帧场景指纹校准报告",
         "",
-        "## 输入与方法",
+        "## 固定参数与噪声底复核",
         "",
-        f"- 噪声底口径：**{noise_source}**。人工真值优先；本次若无真值，就只取 detector_reason=`no_change` 的轮询帧与其直接前一帧。",
-        "- 六个变体都对全部轮询帧计算指纹；生产聚簇和稳定帧数仍只使用检测器选中帧，在线行为未改。",
-        "- 阈值下限为噪声底 P95，上限为位数的 25%；平台按 [下限, 上限] 内稳定簇数不变的最宽连续区间定义，取其起点。",
-        "- stable_min_frames 取选中帧连续超阈值段 P90 向上取整，再限制到 [3, 10]。",
-        "- slug 规则：NFKC 后小写，只保留 ASCII 字母数字，其他字符折叠为 `-`；无字符剩余时用 display_name UTF-8 SHA-1 前 8 位生成 `g-<hash>`。",
-        "- 录制身份限制：两段旧 session.json 未保存 process_name；查表未命中时，离线卡以原始标题生成 slug。线上生产仍严格用进程名生成未命中 slug。",
+        f"- 固定参数：`{HASH_KIND}` / `{HASH_BITS}` 位 / `hamming_threshold={HAMMING_THRESHOLD}`；本任务未改。",
+        f"- 噪声底：检测器 `no_change` 帧与直接前帧，共 {len(noise_distances)} 对；P95={noise_p95:.3f}。",
+        f"- 复核结论：P95 {'≤' if noise_p95 <= HAMMING_THRESHOLD else '>'} 8；{'维持阈值 8' if noise_p95 <= HAMMING_THRESHOLD else '按规格只报告、不改阈值'}。",
+        f"- 全体相邻帧共 {len(all_adjacent_distances)} 对：中位 / P90 / P95 / P99 = "
+        f"{_percentile(all_adjacent_distances, 50):.3f} / {_percentile(all_adjacent_distances, 90):.3f} / "
+        f"{_percentile(all_adjacent_distances, 95):.3f} / {_percentile(all_adjacent_distances, 99):.3f}。",
+        f"- pHash64 单帧耗时中位：{statistics.median(value for group in grouped_timings for value in group):.4f}ms。",
+        f"- 人工区间文件：{'存在但本任务仍按指定 no_change 口径复核' if TRUTH_PATH.is_file() else '不存在，未生成'}。",
         "",
+        "## 连续段时长直方图与稳定时长",
+        "",
+        f"- 连续段总数：{len(calibration.measured_durations)}，其中零时长单帧段 {calibration.zero_duration_count}；两者都按规格进入 P75。",
+        f"- 直方图桶宽：{calibration.bin_width_seconds:.3f}s。",
+        f"- 判定：{calibration.method}。",
+        f"- `stable_min_seconds={calibration.stable_min_seconds:.3f}`；{'临时值' if calibration.temporary else '双峰谷值'}，未钳制。",
+        "",
+        "| 时长桶（秒） | 段数 |",
+        "|---|---:|",
     ]
-    lines.extend(
-        f"- `{recording.path}`：{len(recording.polling_frames)} 张轮询帧 / {len(recording.frames)} 张选中帧"
-        for recording in recordings
-    )
-    lines.extend(
-        (
-            "",
-            "## 两种相邻距离口径并排",
-            "",
-            "| 变体 | 噪声底样本 | 噪声底中位 / P90 / P95 / P99 | 全体样本 | 全体中位 / P90 / P95 / P99 |",
-            "|---|---:|---:|---:|---:|",
-        )
-    )
-    for result in results:
-        noise = result.noise_floor_distances
-        all_pairs = result.all_adjacent_distances
-        lines.append(
-            f"| {result.kind}/{result.bits} | {len(noise)} | "
-            f"{_percentile(noise, 50):.2f} / {_percentile(noise, 90):.2f} / {_percentile(noise, 95):.2f} / {_percentile(noise, 99):.2f} | "
-            f"{len(all_pairs)} | {_percentile(all_pairs, 50):.2f} / {_percentile(all_pairs, 90):.2f} / {_percentile(all_pairs, 95):.2f} / {_percentile(all_pairs, 99):.2f} |"
-        )
+    for index, count in enumerate(calibration.histogram_counts):
+        left = calibration.histogram_edges[index]
+        right = calibration.histogram_edges[index + 1]
+        lines.append(f"| [{left:.3f}, {right:.3f}) | {count} |")
+
     lines.extend(
         (
             "",
-            "## 六变体定值表",
+            "## 全帧时间线 vs 选中帧时间线",
             "",
-            "| 变体 | [下限, 上限] | 稳定簇平台 | 归一化宽度 | 单帧中位 | stable 原值→定值 | 结论 |",
-            "|---|---:|---:|---:|---:|---:|---|",
+            "| 录像 | 全部轮询帧 | 选中帧 | 全帧簇数 | 选中帧簇数 | 稳定簇 | 升格簇 | 稳定未升格 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
         )
     )
-    for result in results:
-        platform = (
-            "淘汰"
-            if result.plateau_start is None
-            else f"{result.plateau_start}–{result.plateau_end}"
-        )
-        stable = (
-            "—"
-            if result.raw_stable_min_frames is None
-            else f"{result.raw_stable_min_frames}→{result.stable_min_frames}"
-        )
-        conclusion = result.elimination_reason or (
-            "候选" if result.median_elapsed_ms < 1.0 else "超过 1ms，不参与变体选择"
-        )
+    for recording, result in zip(recordings, replay_results, strict=True):
         lines.append(
-            f"| {result.kind}/{result.bits} | [{result.threshold_lower}, {result.threshold_upper}] | {platform} | "
-            f"{result.plateau_width_ratio:.4%} | {result.median_elapsed_ms:.4f}ms | {stable} | {conclusion} |"
+            f"| {recording.label} | {len(recording.polling_frames)} | {len(recording.selected_frames)} | "
+            f"{len(result.clusterer.clusters)} | {result.selected_cluster_count} | "
+            f"{sum(cluster.stable for cluster in result.clusterer.clusters)} | "
+            f"{len(result.promoted_cluster_ids)} | {len(result.stable_unpromoted_cluster_ids)} |"
         )
-    eliminated = [result for result in results if result.elimination_reason]
-    lines.extend(("", "淘汰名单：", ""))
-    if eliminated:
+
+    lines.extend(("", "## 四段录像逐簇明细", ""))
+    for recording, result in zip(recordings, replay_results, strict=True):
         lines.extend(
-            f"- {result.kind}/{result.bits}：{result.elimination_reason}"
-            for result in eliminated
+            (
+                f"### {recording.label}",
+                "",
+                f"- 录制：`{recording.path}`",
+                f"- 会话簇 / 稳定 / 升格 / 稳定未升格：{len(result.clusterer.clusters)} / "
+                f"{sum(cluster.stable for cluster in result.clusterer.clusters)} / "
+                f"{len(result.promoted_cluster_ids)} / {len(result.stable_unpromoted_cluster_ids)}",
+                "",
+                "| 簇 | 帧数 | dwell | visit_count | longest_run | stable | 升格 |",
+                "|---|---:|---:|---:|---:|---|---|",
+            )
         )
-    else:
-        lines.append("- 无变体因阈值区间为空被淘汰。")
-    lines.extend(("", "## 监督复核", ""))
-    if truth_spans:
-        purity, separation = _supervised_quality(
-            recordings, default, truth_spans
+        for cluster in result.clusterer.clusters:
+            lines.append(
+                f"| session:c{cluster.cluster_id} | {cluster.seen_count} | "
+                f"{cluster.dwell_seconds:.3f}s | {cluster.visit_count} | "
+                f"{cluster.longest_run_seconds:.3f}s | "
+                f"{'是' if cluster.stable else '否'} | "
+                f"{'是' if cluster.cluster_id in result.promoted_cluster_ids else '否'} |"
+            )
+        lines.append("")
+        if result.representative_rows:
+            lines.extend(("代表帧：", "", *result.representative_rows, ""))
+        if not result.promoted_cluster_ids:
+            stable_clusters = [
+                cluster for cluster in result.clusterer.clusters if cluster.stable
+            ]
+            if stable_clusters:
+                longest = max(stable_clusters, key=lambda cluster: cluster.dwell_seconds)
+                gap = max(0.0, CARD_MIN_DWELL_SECONDS - longest.dwell_seconds)
+                lines.extend(
+                    (
+                        f"- 本段仍为零场景；最长稳定簇是 `session:c{longest.cluster_id}`，"
+                        f"dwell={longest.dwell_seconds:.3f}s，距 30s 驻留门还差 {gap:.3f}s。",
+                        "",
+                    )
+                )
+            else:
+                lines.extend(("- 本段仍为零场景；没有连续段达到稳定时长。", ""))
+
+    lines.extend(
+        (
+            "## 新旧游戏卡",
+            "",
+            "| 录像 | 旧场景 | 新场景 |",
+            "|---|---:|---:|",
         )
+    )
+    for recording, result in zip(recordings, replay_results, strict=True):
         lines.append(
-            f"人工区间 {len(truth_spans)} 个；默认值纯度 {purity:.4%}，分离度 {separation:.4%}，乘积 {purity * separation:.4%}。定值未因监督结果自动改动。"
-        )
-    else:
-        lines.append(
-            "`data/generic/scene-truth/spans.toml` 不存在，未由 agent 生成；本次采用 no_change 代理口径，无监督冲突可报告。"
+            f"| {recording.label} | {old_counts[recording.label]} | {result.card_scene_count} |"
         )
     lines.extend(
         (
             "",
-            "## 四个默认值逐条推导",
+            "## 证据边界核对",
             "",
-            f"- `hash_kind={default.kind}`、`hash_bits={default.bits}`：未淘汰且单帧中位 {default.median_elapsed_ms:.4f}ms < 1ms 的候选中，稳定簇平台归一化宽度 {default.plateau_width_ratio:.4%} 最大。",
-            f"- `hamming_threshold={default.plateau_start}`：噪声底 P95 下限 {default.threshold_lower}、25% 上限 {default.threshold_upper}，稳定簇平台为 {default.plateau_start}–{default.plateau_end}，按规则取平台起点。",
-            f"- `stable_min_frames={default.stable_min_frames}`：阈值 {default.plateau_start} 下连续超阈值段 P90 向上取整为 {default.raw_stable_min_frames}，再限制到 [3, 10]。",
-            f"- 待实测占位：card_min_visits={card_min_visits}、card_min_span_seconds={card_min_span_seconds:g}、card_flush_seconds=120。",
-            "",
-            "## 新旧卡场景数",
+            "- 聚簇、稳定时长、dwell 与 visit_count 使用全部轮询帧。",
+            "- `scene_fingerprint` 证据只为检测器选中帧写入；root_capture_id 仍为该选中帧的 `fN`。",
+            "- 检测器上传、区域提示与 OCR 选帧逻辑未参与本次校准，也未被指纹反向影响。",
             "",
         )
     )
-    lines.extend(("| 录制 | 旧卡 | 新卡 |", "|---|---:|---:|"))
-    lines.extend(
-        f"| {recording.label} | {old_card_counts.get(recording.label, 0)} | {new_card_counts.get(recording.label, 0)} |"
-        for recording in recordings
+    return "\n".join(lines)
+
+
+def run_evaluation(
+    recordings: Sequence[Recording], output: Path, memory_root: Path
+) -> DurationCalibration:
+    output.mkdir(parents=True, exist_ok=True)
+    grouped_hashes, grouped_timings = _hash_recordings(recordings)
+    noise_distances = tuple(
+        distance
+        for recording, hashes in zip(recordings, grouped_hashes, strict=True)
+        for distance in _noise_floor_distances(
+            hashes,
+            tuple(frame.detector_reason for frame in recording.polling_frames),
+        )
     )
-    lines.extend(("", "## 新默认值生产逻辑", ""))
-    lines.extend(production_rows)
-    lines.extend(("## 跨会话持久化对照", ""))
-    lines.extend(persistence_rows)
-    return "\n".join(lines) + "\n"
+    if not noise_distances:
+        raise SceneEvaluationError("no detector no_change adjacency pairs were found")
+    all_adjacent = tuple(
+        hamming(left, right)
+        for hashes in grouped_hashes
+        for left, right in zip(hashes, hashes[1:])
+    )
+    provisional_clusters = [
+        _cluster(recording.polling_frames, hashes, 0.0)[0]
+        for recording, hashes in zip(recordings, grouped_hashes, strict=True)
+    ]
+    durations = tuple(
+        span.duration_seconds
+        for clusterer in provisional_clusters
+        for cluster in clusterer.clusters
+        for span in cluster.visit_spans
+    )
+    calibration = _derive_stable_min_seconds(durations, _polling_interval(recordings))
+
+    title_map = WindowTitleMap.load()
+    identities = tuple(
+        _recording_identity(recording, title_map) for recording in recordings
+    )
+    old_counts, old_directories = _old_card_inventory(recordings, memory_root)
+    _reset_calibration_cards(
+        memory_root,
+        old_directories,
+        tuple(game_id for game_id, _display_name in identities),
+    )
+    repository = GameCardRepository(memory_root)
+    replay_results: list[ReplayResult] = []
+    for recording, hashes, timings, identity in zip(
+        recordings, grouped_hashes, grouped_timings, identities, strict=True
+    ):
+        game_id, _display_name = identity
+        recording_output = output / recording.label
+        if recording_output.is_dir():
+            shutil.rmtree(recording_output)
+        recording_output.mkdir(parents=True)
+        replay_results.append(
+            _replay_recording(
+                recording,
+                hashes,
+                timings,
+                calibration.stable_min_seconds,
+                repository,
+                game_id,
+                recording_output,
+            )
+        )
+    report = _render_report(
+        recordings,
+        grouped_timings,
+        noise_distances,
+        all_adjacent,
+        calibration,
+        replay_results,
+        old_counts,
+    )
+    (output / "report.md").write_text(report, encoding="utf-8", newline="\n")
+    return calibration
+
+
+def _percentile(values: Sequence[int] | Sequence[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    return float(np.percentile(np.asarray(values, dtype=np.float64), percentile))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1019,55 +735,37 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
-    paths = tuple(arguments.recording or DEFAULT_RECORDINGS)
-    recordings = tuple(load_recording(path) for path in paths)
+    recordings = tuple(
+        load_recording(path) for path in tuple(arguments.recording or DEFAULT_RECORDINGS)
+    )
     if arguments.analyze_only:
-        results = analyze_variants(recordings, load_truth_spans(TRUTH_PATH))
-        print(
-            json.dumps(
-                [
-                    {
-                        "hash_kind": result.kind,
-                        "hash_bits": result.bits,
-                        "noise_samples": len(result.noise_floor_distances),
-                        "noise_p95": _percentile(
-                            result.noise_floor_distances, 95
-                        ),
-                        "all_p95": _percentile(
-                            result.all_adjacent_distances, 95
-                        ),
-                        "threshold_interval": [
-                            result.threshold_lower,
-                            result.threshold_upper,
-                        ],
-                        "plateau": [result.plateau_start, result.plateau_end],
-                        "plateau_width_ratio": result.plateau_width_ratio,
-                        "raw_stable_min_frames": result.raw_stable_min_frames,
-                        "stable_min_frames": result.stable_min_frames,
-                        "median_elapsed_ms": result.median_elapsed_ms,
-                        "elimination_reason": result.elimination_reason,
-                    }
-                    for result in results
-                ],
-                ensure_ascii=False,
-                indent=2,
-            )
+        grouped_hashes, _timings = _hash_recordings(recordings)
+        provisional = [
+            _cluster(recording.polling_frames, hashes, 0.0)[0]
+            for recording, hashes in zip(recordings, grouped_hashes, strict=True)
+        ]
+        durations = tuple(
+            span.duration_seconds
+            for clusterer in provisional
+            for cluster in clusterer.clusters
+            for span in cluster.visit_spans
         )
-        return 0
+        calibration = _derive_stable_min_seconds(
+            durations, _polling_interval(recordings)
+        )
     else:
-        default = run_evaluation(recordings, arguments.output, arguments.memory_dir)
+        calibration = run_evaluation(recordings, arguments.output, arguments.memory_dir)
     print(
         json.dumps(
             {
-                "hash_kind": default.kind,
-                "hash_bits": default.bits,
-                "hamming_threshold": default.plateau_start,
-                "stable_min_frames": default.stable_min_frames,
-                "plateau": [default.plateau_start, default.plateau_end],
-                "noise_p95": _percentile(default.noise_floor_distances, 95),
-                "median_elapsed_ms": default.median_elapsed_ms,
+                "hash_kind": HASH_KIND,
+                "hash_bits": HASH_BITS,
+                "hamming_threshold": HAMMING_THRESHOLD,
+                "stable_min_seconds": calibration.stable_min_seconds,
+                "temporary": calibration.temporary,
+                "method": calibration.method,
             },
-            ensure_ascii=False,
+            ensure_ascii=True,
             indent=2,
         )
     )

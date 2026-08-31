@@ -30,6 +30,7 @@ class GameCardScene(GameCardModel):
     first_seen: datetime
     last_seen: datetime
     seen_count: int = Field(ge=1)
+    visit_count: int = Field(ge=1)
     sessions_seen: int = Field(ge=1)
     evidence_ids: list[str]
 
@@ -118,6 +119,7 @@ def render_gamecard_markdown(card: GameCard) -> str:
                 f"- 首次见到：{_iso(scene.first_seen)}",
                 f"- 最近见到：{_iso(scene.last_seen)}",
                 f"- 累计帧数：{scene.seen_count}",
+                f"- 累计访问段数：{scene.visit_count}",
                 f"- 会话簇次数：{scene.sessions_seen}",
                 "- 证据样本："
                 + (", ".join(f"`{item}`" for item in scene.evidence_ids) or "无"),
@@ -207,27 +209,25 @@ class GameCardSession:
         card: GameCard,
         started_at: datetime,
         *,
-        card_min_visits: int,
-        card_min_span_seconds: float,
+        card_min_dwell_seconds: float,
         source_recording: str | None = None,
     ) -> None:
-        if card_min_visits < 1:
-            raise ValueError("card_min_visits must be positive")
-        if card_min_span_seconds < 0:
-            raise ValueError("card_min_span_seconds must be nonnegative")
+        if card_min_dwell_seconds < 0:
+            raise ValueError("card_min_dwell_seconds must be nonnegative")
         self.repository = repository
         self.card = card
         self.started_at = _utc(started_at)
-        self.card_min_visits = card_min_visits
-        self.card_min_span_seconds = card_min_span_seconds
+        self.card_min_dwell_seconds = card_min_dwell_seconds
         self.source_recording = source_recording
         self._cluster_scene_ids: dict[int, str] = {}
         self._flushed_seen_counts: dict[int, int] = {}
+        self._flushed_visit_counts: dict[int, int] = {}
 
     def flush(self, clusters: Sequence[SceneCluster]) -> GameCard:
         working = self.card.model_copy(deep=True)
         cluster_scene_ids = dict(self._cluster_scene_ids)
         flushed_seen_counts = dict(self._flushed_seen_counts)
+        flushed_visit_counts = dict(self._flushed_visit_counts)
         if self.source_recording is not None and self.source_recording not in working.init.source_recordings:
             working.init.source_recordings.append(self.source_recording)
 
@@ -253,6 +253,7 @@ class GameCardSession:
                         first_seen=self._absolute(cluster.first_seen),
                         last_seen=self._absolute(cluster.last_seen),
                         seen_count=cluster.seen_count,
+                        visit_count=cluster.visit_count,
                         sessions_seen=1,
                         evidence_ids=[],
                     )
@@ -269,30 +270,37 @@ class GameCardSession:
                     raise ValueError(f"flushed scene disappeared from game card: {scene_id}")
 
             previous_count = flushed_seen_counts.get(cluster.cluster_id, 0)
+            previous_visits = flushed_visit_counts.get(cluster.cluster_id, 0)
             if created_scene:
                 previous_count = cluster.seen_count
+                previous_visits = cluster.visit_count
             delta = cluster.seen_count - previous_count
+            visit_delta = cluster.visit_count - previous_visits
             if delta < 0:
                 raise ValueError("session cluster seen_count must be append-only")
+            if visit_delta < 0:
+                raise ValueError("session cluster visit_count must be append-only")
             scene.seen_count += delta
+            scene.visit_count += visit_delta
             scene.last_seen = max(scene.last_seen, self._absolute(cluster.last_seen))
             for evidence_id in cluster.evidence_ids:
                 if evidence_id not in scene.evidence_ids and len(scene.evidence_ids) < 5:
                     scene.evidence_ids.append(evidence_id)
             flushed_seen_counts[cluster.cluster_id] = cluster.seen_count
+            flushed_visit_counts[cluster.cluster_id] = cluster.visit_count
 
         working.scenes.sort(key=lambda scene: _scene_number(scene.cluster_id))
         self.repository.write(working)
         self.card = working
         self._cluster_scene_ids = cluster_scene_ids
         self._flushed_seen_counts = flushed_seen_counts
+        self._flushed_visit_counts = flushed_visit_counts
         return working
 
     def _qualifies(self, cluster: SceneCluster) -> bool:
         return (
             cluster.stable
-            and cluster.seen_count >= self.card_min_visits
-            and cluster.span_seconds >= self.card_min_span_seconds
+            and cluster.dwell_seconds >= self.card_min_dwell_seconds
         )
 
     def _absolute(self, relative_seconds: float) -> datetime:

@@ -52,7 +52,11 @@ from pet.core.prompt import PROMPTS_DIRECTORY
 from pet.core.ocr_probe import OcrFrameResult, OcrLine
 from pet.core.ocr_rapid import ENGINE_NAME, RapidOcrEngine, set_current_thread_below_normal
 from pet.core.ocr_selective import OcrEngine, TextLineCache, normalize_text
-from pet.core.scene_fingerprint import SceneClusterer, perceptual_hash
+from pet.core.scene_fingerprint import (
+    SceneClusterer,
+    SceneFingerprintMatch,
+    perceptual_hash,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +150,13 @@ class GameIdentity:
     game_id: str
     display_name: str
     context_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class SceneFrameState:
+    fingerprint: str
+    match: SceneFingerprintMatch
+    elapsed_ms: float
 
 
 class WindowTitleMap:
@@ -785,6 +796,8 @@ class GenericVisionAdapter:
         self._scene_game_id: str | None = None
         self._scene_origin_monotonic: float | None = None
         self._scene_last_flush_at = 0.0
+        self._scene_last_selected_cluster_id: int | None = None
+        self._scene_changed_since_selected = False
 
     async def start(self, core: CoreServices) -> None:
         if self._task is not None:
@@ -895,6 +908,12 @@ class GenericVisionAdapter:
         """Submit one retained frame with bounded backpressure for offline replay."""
         if self._log is None:
             raise RuntimeError("离线观察器尚未启动")
+        identity = GameIdentity(
+            slugify_game_id(game, game),
+            game,
+            game,
+        )
+        scene_state = self._observe_scene_frame(frame, identity)
         await self._schedule(
             frame,
             game,
@@ -906,6 +925,7 @@ class GenericVisionAdapter:
             region_intensity=region_intensity,
             forced=forced,
             wait_for_capacity=True,
+            scene_state=scene_state,
         )
 
     async def finish_replay(self) -> None:
@@ -1016,6 +1036,7 @@ class GenericVisionAdapter:
             )
             game = identity.context_name
             self._current_game = game
+            scene_state = self._observe_scene_frame(frame, identity)
             observation = self._selector.observe(
                 frame.bitmap,
                 frame.metadata.monotonic_seconds,
@@ -1031,7 +1052,7 @@ class GenericVisionAdapter:
                     global_change=observation.comparisons.vs_baseline.mean_amplitude * 100.0,
                     region_intensity=observation.decision.confirmed_region_intensity * 100.0,
                     forced=observation.decision.forced,
-                    game_identity=identity,
+                    scene_state=scene_state,
                 )
                 ownership_transferred = True
         finally:
@@ -1052,7 +1073,7 @@ class GenericVisionAdapter:
         region_intensity: float,
         forced: bool,
         wait_for_capacity: bool = False,
-        game_identity: GameIdentity | None = None,
+        scene_state: SceneFrameState | None = None,
     ) -> None:
         sequence = self._next_sequence
         self._next_sequence += 1
@@ -1106,12 +1127,7 @@ class GenericVisionAdapter:
             scope=scope,
         )
         self._schedule_ocr(pending)
-        identity = game_identity or GameIdentity(
-            game_id=slugify_game_id(game, game),
-            display_name=game,
-            context_name=game,
-        )
-        self._record_scene_fingerprint(pending, identity)
+        self._record_scene_fingerprint(pending, scene_state)
         while wait_for_capacity and len(self._inflight) >= self._settings.max_inflight:
             done, _ = await asyncio.wait(
                 tuple(self._inflight),
@@ -1138,6 +1154,8 @@ class GenericVisionAdapter:
         self._scene_game_id = None
         self._scene_origin_monotonic = None
         self._scene_last_flush_at = 0.0
+        self._scene_last_selected_cluster_id = None
+        self._scene_changed_since_selected = False
         settings = self._settings.scene
         if not settings.enabled:
             self._scene_repository = None
@@ -1147,71 +1165,98 @@ class GenericVisionAdapter:
             memory_root = BACKEND_DIRECTORY / memory_root
         self._scene_repository = GameCardRepository(memory_root)
 
-    def _record_scene_fingerprint(
+    def _observe_scene_frame(
         self,
-        pending: PendingFrame,
+        frame: CapturedFrameLike,
         identity: GameIdentity,
-    ) -> None:
+    ) -> SceneFrameState | None:
         settings = self._settings.scene
         if not settings.enabled:
-            return
+            return None
         assert self._scene_repository is not None
         if self._scene_game_id != identity.game_id:
             self._close_scene_session()
             card = self._scene_repository.load_or_create(
                 identity.game_id,
                 identity.display_name,
-                pending.frame.metadata.captured_at,
+                frame.metadata.captured_at,
             )
             self._scene_session = GameCardSession(
                 self._scene_repository,
                 card,
-                pending.frame.metadata.captured_at,
-                card_min_visits=settings.card_min_visits,
-                card_min_span_seconds=settings.card_min_span_seconds,
+                frame.metadata.captured_at,
+                card_min_dwell_seconds=settings.card_min_dwell_seconds,
             )
             self._scene_clusterer = SceneClusterer(
                 settings.hamming_threshold,
-                settings.stable_min_frames,
+                settings.stable_min_seconds,
                 self._scene_repository.card_references(card),
             )
             self._scene_game_id = identity.game_id
-            self._scene_origin_monotonic = pending.frame.metadata.monotonic_seconds
+            self._scene_origin_monotonic = frame.metadata.monotonic_seconds
             self._scene_last_flush_at = 0.0
         assert self._scene_session is not None
         assert self._scene_clusterer is not None
         assert self._scene_origin_monotonic is not None
         relative_seconds = max(
             0.0,
-            pending.frame.metadata.monotonic_seconds - self._scene_origin_monotonic,
+            frame.metadata.monotonic_seconds - self._scene_origin_monotonic,
         )
         started = self._clock()
         fingerprint = perceptual_hash(
-            pending.frame.bitmap,
+            frame.bitmap,
             settings.hash_kind,
             settings.hash_bits,
         )
         match = self._scene_clusterer.observe(fingerprint, relative_seconds)
         elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
+        if match.switched_from is not None:
+            self._scene_changed_since_selected = True
+        if relative_seconds - self._scene_last_flush_at >= settings.card_flush_seconds:
+            self._flush_scene_session()
+            self._scene_last_flush_at = relative_seconds
+        return SceneFrameState(
+            fingerprint=fingerprint,
+            match=match,
+            elapsed_ms=elapsed_ms,
+        )
+
+    def _record_scene_fingerprint(
+        self,
+        pending: PendingFrame,
+        scene_state: SceneFrameState | None,
+    ) -> None:
+        settings = self._settings.scene
+        if not settings.enabled:
+            return
+        if scene_state is None:
+            raise RuntimeError("selected frame lacks its polling-time scene fingerprint")
+        assert self._scene_clusterer is not None
+        match = scene_state.match
         candidate = match.card_candidate
+        switched_from = (
+            self._scene_last_selected_cluster_id
+            if self._scene_changed_since_selected
+            and self._scene_last_selected_cluster_id is not None
+            else None
+        )
         assert self._log is not None
         evidence_id = self._log.append_scene_fingerprint(
             sequence=pending.seq,
             frame_ts=pending.frame.metadata.monotonic_seconds,
-            fingerprint=fingerprint,
+            fingerprint=scene_state.fingerprint,
             cluster_id=match.cluster_id,
             distance=match.distance,
             is_new_cluster=match.is_new_cluster,
-            switched_from=match.switched_from,
+            switched_from=switched_from,
             stable=match.stable,
             card_candidate_scene_id=(candidate.scene_id if candidate else None),
             card_candidate_distance=(candidate.distance if candidate else None),
-            elapsed_ms=elapsed_ms,
+            elapsed_ms=scene_state.elapsed_ms,
         )
         self._scene_clusterer.record_evidence(match.cluster_id, evidence_id)
-        if relative_seconds - self._scene_last_flush_at >= settings.card_flush_seconds:
-            self._flush_scene_session()
-            self._scene_last_flush_at = relative_seconds
+        self._scene_last_selected_cluster_id = match.cluster_id
+        self._scene_changed_since_selected = False
 
     def _flush_scene_session(self) -> None:
         if self._scene_session is None or self._scene_clusterer is None:
@@ -1228,6 +1273,8 @@ class GenericVisionAdapter:
         self._scene_game_id = None
         self._scene_origin_monotonic = None
         self._scene_last_flush_at = 0.0
+        self._scene_last_selected_cluster_id = None
+        self._scene_changed_since_selected = False
 
     def _initialize_ocr(self) -> None:
         settings = self._settings.ocr

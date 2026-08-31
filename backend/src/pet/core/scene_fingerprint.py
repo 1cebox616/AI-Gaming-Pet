@@ -104,7 +104,11 @@ class CardCandidate:
 class VisitSpan:
     start: float
     end: float
-    selected_frame_count: int = 1
+    frame_count: int = 1
+
+    @property
+    def duration_seconds(self) -> float:
+        return self.end - self.start
 
 
 @dataclass(slots=True)
@@ -119,11 +123,21 @@ class SceneCluster:
     evidence_ids: list[str] = field(default_factory=list)
     card_candidate: CardCandidate | None = None
     stable: bool = False
-    max_consecutive_frames: int = 1
 
     @property
-    def span_seconds(self) -> float:
-        return self.last_seen - self.first_seen
+    def dwell_seconds(self) -> float:
+        return sum(span.duration_seconds for span in self.visit_spans)
+
+    @property
+    def visit_count(self) -> int:
+        return len(self.visit_spans)
+
+    @property
+    def longest_run_seconds(self) -> float:
+        return max(
+            (span.duration_seconds for span in self.visit_spans),
+            default=0.0,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,19 +156,18 @@ class SceneClusterer:
     def __init__(
         self,
         hamming_threshold: int,
-        stable_min_frames: int,
+        stable_min_seconds: float,
         card_scenes: Sequence[CardSceneReference] = (),
     ) -> None:
         if hamming_threshold < 0:
             raise ValueError("hamming threshold must be nonnegative")
-        if stable_min_frames < 1:
-            raise ValueError("stable_min_frames must be positive")
+        if stable_min_seconds < 0:
+            raise ValueError("stable_min_seconds must be nonnegative")
         self.hamming_threshold = hamming_threshold
-        self.stable_min_frames = stable_min_frames
+        self.stable_min_seconds = stable_min_seconds
         self._card_scenes = tuple(card_scenes)
         self._clusters: list[SceneCluster] = []
         self._previous_cluster_id: int | None = None
-        self._consecutive_frames = 0
         self._last_observed_at: float | None = None
 
     @property
@@ -177,23 +190,17 @@ class SceneClusterer:
 
         previous = self._previous_cluster_id
         switched_from = previous if previous is not None and previous != cluster.cluster_id else None
-        if previous == cluster.cluster_id:
-            self._consecutive_frames += 1
-        else:
-            self._consecutive_frames = 1
         self._previous_cluster_id = cluster.cluster_id
-        cluster.max_consecutive_frames = max(
-            cluster.max_consecutive_frames,
-            self._consecutive_frames,
-        )
-        if self._consecutive_frames >= self.stable_min_frames:
+        current_run_seconds = cluster.visit_spans[-1].duration_seconds
+        current_stable = current_run_seconds >= self.stable_min_seconds
+        if current_stable:
             cluster.stable = True
         return SceneFingerprintMatch(
             cluster_id=cluster.cluster_id,
             distance=distance,
             is_new_cluster=is_new,
             switched_from=switched_from,
-            stable=self._consecutive_frames >= self.stable_min_frames,
+            stable=current_stable,
             card_candidate=cluster.card_candidate,
         )
 
@@ -237,7 +244,7 @@ class SceneClusterer:
         if self._previous_cluster_id == cluster.cluster_id:
             span = cluster.visit_spans[-1]
             span.end = observed_at
-            span.selected_frame_count += 1
+            span.frame_count += 1
         else:
             cluster.visit_spans.append(VisitSpan(start=observed_at, end=observed_at))
 

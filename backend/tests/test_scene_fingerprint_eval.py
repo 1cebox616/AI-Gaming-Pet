@@ -1,24 +1,28 @@
-"""M5-B-T2-2 calibration-rule regression tests."""
+"""M5-B-T2-3 all-frame duration-calibration regression tests."""
 
 from __future__ import annotations
 
+from pydantic import ValidationError
+import pytest
+
 from pet.core.config import SceneConfig
 from pet.games.generic.eval.scene_fingerprint_eval import (
-    _bounded_stable_min_frames,
+    _derive_stable_min_seconds,
     _noise_floor_distances,
     _threshold_interval,
 )
 
 
-def test_scene_defaults_match_recalibrated_report() -> None:
+def test_scene_defaults_match_all_frame_duration_report() -> None:
     settings = SceneConfig()
 
     assert (
         settings.hash_kind,
         settings.hash_bits,
         settings.hamming_threshold,
-        settings.stable_min_frames,
-    ) == ("phash", 64, 8, 10)
+        settings.stable_min_seconds,
+        settings.card_min_dwell_seconds,
+    ) == ("phash", 64, 8, 0.0, 30.0)
 
 
 def test_noise_floor_uses_only_no_change_frame_and_its_predecessor() -> None:
@@ -40,14 +44,19 @@ def test_threshold_interval_eliminates_variant_when_noise_floor_exceeds_cap() ->
     assert reason == "噪声底 P95 下限 17 > 25% 上限 16"
 
 
-def test_stable_min_frames_is_clamped_to_three_through_ten() -> None:
-    same = (("0000000000000000",) * 5,)
-    alternating = (
-        tuple(
-            "0000000000000000" if index % 2 == 0 else "ffffffffffffffff"
-            for index in range(22)
-        ),
+def test_single_peak_duration_histogram_keeps_zero_duration_p75_without_clamp() -> None:
+    result = _derive_stable_min_seconds(
+        (0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        1.0,
     )
 
-    assert _bounded_stable_min_frames(same, 0) == (1, 3)
-    assert _bounded_stable_min_frames(alternating, 0) == (21, 10)
+    assert result.temporary is True
+    assert result.stable_min_seconds == 0.0
+    assert result.zero_duration_count == 5
+    assert "P75" in result.method
+
+
+@pytest.mark.parametrize("legacy_key", ("stable_min_frames", "card_min_visits"))
+def test_removed_scene_configuration_keys_are_rejected(legacy_key: str) -> None:
+    with pytest.raises(ValidationError, match=legacy_key):
+        SceneConfig.model_validate({legacy_key: 3})

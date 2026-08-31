@@ -99,6 +99,17 @@ class AlwaysSelect:
         )
 
 
+class SelectPattern(AlwaysSelect):
+    def __init__(self, decisions: list[bool]) -> None:
+        super().__init__()
+        self.decisions = decisions
+
+    def observe(self, frame: Image.Image, now: float) -> object:
+        observation = super().observe(frame, now)
+        observation.decision.should_save = self.decisions.pop(0)
+        return observation
+
+
 class FakeClient:
     def __init__(
         self,
@@ -647,9 +658,8 @@ def test_selected_frames_each_emit_one_scene_event_without_changing_markdown(
         hash_kind="ahash",
         hash_bits=64,
         hamming_threshold=1,
-        stable_min_frames=2,
-        card_min_visits=2,
-        card_min_span_seconds=1.0,
+        stable_min_seconds=1.0,
+        card_min_dwell_seconds=1.0,
         card_flush_seconds=999.0,
         memory_dir=str(tmp_path / "memory"),
     )
@@ -707,6 +717,136 @@ def test_selected_frames_each_emit_one_scene_event_without_changing_markdown(
     assert card["scenes"][0]["seen_count"] == 2
 
 
+def test_no_change_polling_frames_advance_scene_stability_without_evidence(
+    tmp_path: Path,
+) -> None:
+    adapter_config, llm_config = _configuration(tmp_path)
+    adapter_config.generic.scene = SceneConfig(
+        enabled=True,
+        hash_kind="ahash",
+        hash_bits=64,
+        hamming_threshold=1,
+        stable_min_seconds=5.0,
+        card_min_dwell_seconds=30.0,
+        card_flush_seconds=999.0,
+        memory_dir=str(tmp_path / "memory"),
+    )
+    frames = [_frame(sequence) for sequence in range(1, 8)]
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: FakeBackend(frames),
+        selector_factory=lambda _sparsity: SelectPattern(
+            [True, False, False, False, False, False, True]
+        ),
+        client_factory=lambda *_args: FakeClient(),
+        title_map=_title_map(),
+    )
+
+    async def scenario() -> Path:
+        await adapter.start(_core([]))
+        try:
+            session, _rows = await _wait_for_observation_rows(tmp_path, 2)
+            return session
+        finally:
+            await adapter.stop()
+
+    session = asyncio.run(scenario())
+    events = list(EvidenceStore.read(session / "evidence.jsonl"))
+    scene_events = [event for event in events if event.kind == "scene_fingerprint"]
+
+    assert [event.root_capture_id for event in scene_events] == ["f1", "f2"]
+    assert len(scene_events) == 2
+    assert scene_events[0].payload.stable is False  # type: ignore[union-attr]
+    assert scene_events[1].payload.stable is True  # type: ignore[union-attr]
+
+
+def test_selected_scene_switch_reports_last_selected_cluster_across_intermediate_clusters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter_config, llm_config = _configuration(tmp_path)
+    adapter_config.generic.scene = SceneConfig(
+        enabled=True,
+        hash_kind="ahash",
+        hash_bits=64,
+        hamming_threshold=0,
+        stable_min_seconds=1.0,
+        card_min_dwell_seconds=30.0,
+        card_flush_seconds=999.0,
+        memory_dir=str(tmp_path / "memory"),
+    )
+    hashes = iter(
+        (
+            "0000000000000000",
+            "ffffffffffffffff",
+            "0f0f0f0f0f0f0f0f",
+            "0000000000000000",
+        )
+    )
+    monkeypatch.setattr(
+        generic_adapter_module,
+        "perceptual_hash",
+        lambda _image, _kind, _bits: next(hashes),
+    )
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("replay must not initialize capture")
+        ),
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: FakeClient(),
+        title_map=_title_map(),
+    )
+    output = tmp_path / "selected-switch"
+    identity = GameIdentity(
+        "grey-zone-warfare",
+        "Grey Zone Warfare",
+        "Grey Zone Warfare",
+    )
+
+    async def scenario() -> None:
+        adapter.start_replay(output, input_context=None)
+        await adapter.submit_replay_frame(
+            _frame(1),
+            "Grey Zone Warfare",
+            (),
+            0.0,
+            confirmed_region=(),
+            change_ratio=0.6,
+            global_change=20.0,
+            region_intensity=0.0,
+            forced=False,
+        )
+        for sequence in (2, 3):
+            frame = _frame(sequence)
+            adapter._observe_scene_frame(frame, identity)
+            frame.bitmap.close()
+        await adapter.submit_replay_frame(
+            _frame(4),
+            "Grey Zone Warfare",
+            (),
+            0.0,
+            confirmed_region=(),
+            change_ratio=0.6,
+            global_change=20.0,
+            region_intensity=0.0,
+            forced=False,
+        )
+        await adapter.finish_replay()
+
+    asyncio.run(scenario())
+    scene_events = [
+        event
+        for event in EvidenceStore.read(output / "evidence.jsonl")
+        if event.kind == "scene_fingerprint"
+    ]
+    assert [event.payload.cluster_id for event in scene_events] == [1, 1]  # type: ignore[union-attr]
+    assert scene_events[0].payload.switched_from is None  # type: ignore[union-attr]
+    assert scene_events[1].payload.switched_from == 1  # type: ignore[union-attr]
+
+
 def test_game_switch_flushes_old_card_before_loading_new_card(tmp_path: Path) -> None:
     adapter_config, llm_config = _configuration(tmp_path)
     adapter_config.generic.scene = SceneConfig(
@@ -714,9 +854,8 @@ def test_game_switch_flushes_old_card_before_loading_new_card(tmp_path: Path) ->
         hash_kind="ahash",
         hash_bits=64,
         hamming_threshold=1,
-        stable_min_frames=2,
-        card_min_visits=2,
-        card_min_span_seconds=1.0,
+        stable_min_seconds=1.0,
+        card_min_dwell_seconds=1.0,
         card_flush_seconds=999.0,
         memory_dir=str(tmp_path / "memory"),
     )
@@ -735,8 +874,11 @@ def test_game_switch_flushes_old_card_before_loading_new_card(tmp_path: Path) ->
     async def scenario() -> None:
         adapter.start_replay(output, input_context=None)
         for sequence in (1, 2):
+            frame = _frame(sequence)
+            identity = GameIdentity("first-game", "First Game", "First Game")
+            scene_state = adapter._observe_scene_frame(frame, identity)
             await adapter._schedule(
-                _frame(sequence),
+                frame,
                 "First Game",
                 (),
                 0.0,
@@ -746,10 +888,13 @@ def test_game_switch_flushes_old_card_before_loading_new_card(tmp_path: Path) ->
                 region_intensity=0.0,
                 forced=False,
                 wait_for_capacity=True,
-                game_identity=GameIdentity("first-game", "First Game", "First Game"),
+                scene_state=scene_state,
             )
+        frame = _frame(3)
+        identity = GameIdentity("second-game", "Second Game", "Second Game")
+        scene_state = adapter._observe_scene_frame(frame, identity)
         await adapter._schedule(
-            _frame(3),
+            frame,
             "Second Game",
             (),
             0.0,
@@ -759,7 +904,7 @@ def test_game_switch_flushes_old_card_before_loading_new_card(tmp_path: Path) ->
             region_intensity=0.0,
             forced=False,
             wait_for_capacity=True,
-            game_identity=GameIdentity("second-game", "Second Game", "Second Game"),
+            scene_state=scene_state,
         )
         await adapter.finish_replay()
 

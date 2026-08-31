@@ -88,7 +88,7 @@ def test_phash_is_less_sensitive_than_dhash_to_one_corner_animation_fixture() ->
 
 
 def test_clusterer_uses_fixed_representatives_stability_and_switch_semantics() -> None:
-    clusterer = SceneClusterer(hamming_threshold=1, stable_min_frames=3)
+    clusterer = SceneClusterer(hamming_threshold=1, stable_min_seconds=2.0)
     first = clusterer.observe("0000000000000000", 0.0)
     second = clusterer.observe("0000000000000001", 1.0)
     third = clusterer.observe("0000000000000000", 2.0)
@@ -100,15 +100,40 @@ def test_clusterer_uses_fixed_representatives_stability_and_switch_semantics() -
     assert third.cluster_id == 1 and third.stable is True
     assert switched.cluster_id == 2 and switched.switched_from == 1
     assert returned.cluster_id == 1 and returned.switched_from == 2
+    assert returned.stable is False
     assert clusterer.clusters[0].representative_hash == "0000000000000000"
-    assert clusterer.clusters[0].visit_spans[0].selected_frame_count == 3
+    assert clusterer.clusters[0].visit_spans[0].frame_count == 3
     assert len(clusterer.clusters[0].visit_spans) == 2
+    assert clusterer.clusters[0].dwell_seconds == 2.0
+    assert clusterer.clusters[0].visit_count == 2
+    assert clusterer.clusters[0].longest_run_seconds == 2.0
+
+
+def test_stability_uses_content_seconds_not_polling_frame_count() -> None:
+    one_hz = SceneClusterer(hamming_threshold=0, stable_min_seconds=5.0)
+    two_tenths_hz = SceneClusterer(hamming_threshold=0, stable_min_seconds=5.0)
+
+    one_hz_matches = [
+        one_hz.observe("0000000000000000", float(second))
+        for second in range(6)
+    ]
+    sparse_matches = [
+        two_tenths_hz.observe("0000000000000000", second)
+        for second in (0.0, 2.5, 5.0)
+    ]
+
+    assert one_hz_matches[-2].stable is False
+    assert one_hz_matches[-1].stable is True
+    assert sparse_matches[-2].stable is False
+    assert sparse_matches[-1].stable is True
+    assert one_hz.clusters[0].longest_run_seconds == 5.0
+    assert two_tenths_hz.clusters[0].longest_run_seconds == 5.0
 
 
 def test_loaded_card_only_supplies_candidate_and_session_id_starts_from_one() -> None:
     clusterer = SceneClusterer(
         hamming_threshold=2,
-        stable_min_frames=1,
+        stable_min_seconds=1.0,
         card_scenes=(
             CardSceneReference("scene:s7", "0000000000000000"),
             CardSceneReference("scene:s8", "ffffffffffffffff"),
@@ -125,7 +150,7 @@ def test_loaded_card_only_supplies_candidate_and_session_id_starts_from_one() ->
 
     changed_width = SceneClusterer(
         hamming_threshold=25,
-        stable_min_frames=1,
+        stable_min_seconds=1.0,
         card_scenes=(CardSceneReference("scene:s9", "0" * 64),),
     )
     assert changed_width.observe("0" * 16, 0.0).card_candidate is None

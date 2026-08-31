@@ -20,15 +20,28 @@ from pet.core.scene_fingerprint import SceneClusterer
 STARTED = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
 
 
-def _clusterer(*, visits: int, span: float, card=()) -> SceneClusterer:
-    clusterer = SceneClusterer(1, 2, card)
-    times = [0.0]
-    if visits > 1:
-        times.extend(float(index) for index in range(1, visits - 1))
-        times.append(span)
-    for index, observed_at in enumerate(times, start=1):
-        match = clusterer.observe("0000000000000000", observed_at)
-        clusterer.record_evidence(match.cluster_id, f"f{index}:scene:1")
+def _clusterer(
+    *,
+    run_durations: tuple[float, ...],
+    stable_min_seconds: float = 5.0,
+    card=(),
+) -> SceneClusterer:
+    clusterer = SceneClusterer(1, stable_min_seconds, card)
+    observed_at = 0.0
+    evidence_number = 1
+    for visit_index, duration in enumerate(run_durations):
+        for timestamp in (observed_at, observed_at + duration):
+            match = clusterer.observe("0000000000000000", timestamp)
+            clusterer.record_evidence(
+                match.cluster_id,
+                f"f{evidence_number}:scene:1",
+            )
+            evidence_number += 1
+        observed_at += duration
+        if visit_index < len(run_durations) - 1:
+            observed_at += 1.0
+            clusterer.observe("ffffffffffffffff", observed_at)
+            observed_at += 1.0
     return clusterer
 
 
@@ -42,8 +55,7 @@ def _session(
         repository,
         card,
         STARTED,
-        card_min_visits=3,
-        card_min_span_seconds=30.0,
+        card_min_dwell_seconds=30.0,
     )
 
 
@@ -54,17 +66,24 @@ def test_slug_rule_is_ascii_lowercase_collapsed_and_hashes_empty_results() -> No
     assert slugify_game_id("---", "!!!") == "g-9a7b006d"
 
 
-@pytest.mark.parametrize(
-    ("visits", "span"),
-    ((3, 29.0), (2, 31.0)),
-)
-def test_promotion_requires_visits_span_and_stability(
+def test_stable_cluster_with_insufficient_dwell_does_not_promote(
     tmp_path: Path,
-    visits: int,
-    span: float,
 ) -> None:
     repository = GameCardRepository(tmp_path)
-    clusterer = _clusterer(visits=visits, span=span)
+    clusterer = _clusterer(run_durations=(5.0,))
+    session = _session(repository, "fixture-game", clusterer)
+    session.flush(clusterer.clusters)
+    assert session.card.scenes == []
+
+
+def test_sufficient_dwell_without_a_stable_run_does_not_promote(
+    tmp_path: Path,
+) -> None:
+    repository = GameCardRepository(tmp_path)
+    clusterer = _clusterer(run_durations=(4.0,) * 8)
+    assert clusterer.clusters[0].dwell_seconds == 32.0
+    assert clusterer.clusters[0].visit_count == 8
+    assert clusterer.clusters[0].stable is False
     session = _session(repository, "fixture-game", clusterer)
     session.flush(clusterer.clusters)
     assert session.card.scenes == []
@@ -74,16 +93,17 @@ def test_qualifying_cluster_promotes_and_periodic_flush_does_not_double_count(
     tmp_path: Path,
 ) -> None:
     repository = GameCardRepository(tmp_path)
-    clusterer = _clusterer(visits=3, span=31.0)
+    clusterer = _clusterer(run_durations=(15.0, 15.0))
     session = _session(repository, "fixture-game", clusterer)
     session.flush(clusterer.clusters)
     session.flush(clusterer.clusters)
 
     scene = session.card.scenes[0]
     assert scene.cluster_id == "scene:s1"
-    assert scene.seen_count == 3
+    assert scene.seen_count == 4
+    assert scene.visit_count == 2
     assert scene.sessions_seen == 1
-    assert len(scene.evidence_ids) == 3
+    assert len(scene.evidence_ids) == 4
     assert (tmp_path / "fixture-game" / "gamecard.json").is_file()
     assert (tmp_path / "fixture-game" / "gamecard.md").read_text(
         encoding="utf-8"
@@ -94,22 +114,20 @@ def test_second_session_keeps_session_cluster_one_and_merges_candidate(
     tmp_path: Path,
 ) -> None:
     repository = GameCardRepository(tmp_path)
-    first_clusterer = _clusterer(visits=3, span=31.0)
+    first_clusterer = _clusterer(run_durations=(15.0, 15.0))
     first_session = _session(repository, "fixture-game", first_clusterer)
     first_session.flush(first_clusterer.clusters)
 
     loaded = repository.load_or_create("fixture-game", "Fixture Game", STARTED)
     second_clusterer = _clusterer(
-        visits=3,
-        span=32.0,
+        run_durations=(15.0, 15.0),
         card=repository.card_references(loaded),
     )
     second_session = GameCardSession(
         repository,
         loaded,
         STARTED,
-        card_min_visits=3,
-        card_min_span_seconds=30.0,
+        card_min_dwell_seconds=30.0,
     )
     second_session.flush(second_clusterer.clusters)
 
@@ -117,7 +135,8 @@ def test_second_session_keeps_session_cluster_one_and_merges_candidate(
     assert second_clusterer.clusters[0].card_candidate is not None
     scene = second_session.card.scenes[0]
     assert scene.cluster_id == "scene:s1"
-    assert scene.seen_count == 6
+    assert scene.seen_count == 8
+    assert scene.visit_count == 4
     assert scene.sessions_seen == 2
 
 
@@ -125,22 +144,21 @@ def test_unmatched_qualifying_cluster_creates_new_scene_and_keeps_old_last_seen(
     tmp_path: Path,
 ) -> None:
     repository = GameCardRepository(tmp_path)
-    first_clusterer = _clusterer(visits=3, span=31.0)
+    first_clusterer = _clusterer(run_durations=(30.0,))
     first_session = _session(repository, "fixture-game", first_clusterer)
     first_session.flush(first_clusterer.clusters)
     old_last_seen = first_session.card.scenes[0].last_seen
 
     loaded = repository.load_or_create("fixture-game", "Fixture Game", STARTED)
-    new_clusterer = SceneClusterer(1, 2, repository.card_references(loaded))
-    for index, observed_at in enumerate((0.0, 1.0, 31.0), start=1):
+    new_clusterer = SceneClusterer(1, 5.0, repository.card_references(loaded))
+    for index, observed_at in enumerate((0.0, 31.0), start=1):
         match = new_clusterer.observe("ffffffffffffffff", observed_at)
         new_clusterer.record_evidence(match.cluster_id, f"f{index}:scene:1")
     session = GameCardSession(
         repository,
         loaded,
         STARTED,
-        card_min_visits=3,
-        card_min_span_seconds=30.0,
+        card_min_dwell_seconds=30.0,
     )
     session.flush(new_clusterer.clusters)
 
