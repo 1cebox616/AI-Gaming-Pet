@@ -577,3 +577,8 @@ def test_repository_config_loads_without_problems_in_strict_mode(tmp_path: Path)
     )
 
     assert configuration.active.game in configuration.games
+    naming = configuration.games["generic"].generic.scene.naming
+    assert naming.upload_width == 1920
+    profile = configuration.llm.profiles["vision_deep"]
+    assert profile.model == "qwen/qwen3.8-flash"
+    assert profile.timeout_seconds == 6.0

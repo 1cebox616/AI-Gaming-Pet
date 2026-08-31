@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import threading
 
 from PIL import Image
 
@@ -26,6 +27,7 @@ from pet.games.generic.adapter import (
     SceneNamingContext,
     WindowTitleMap,
 )
+from pet.games.generic.deep_read import DeepReadRequest, DeepVisionReader
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +80,25 @@ class DeepClient:
 
     def close(self) -> None:
         return None
+
+
+class BlockingDeepClient(DeepClient):
+    def __init__(self) -> None:
+        super().__init__("")
+        self.release = threading.Event()
+
+    def complete_with_images(self, **kwargs: object) -> LlmResult:
+        self.calls.append(kwargs)
+        self.release.wait(timeout=1.0)
+        return LlmResult(
+            text='{"matches_existing":null,"label":"主菜单",'
+            '"annotation":"用于选择功能的主界面。","modality":"observed"}',
+            usage=LlmUsage(10, 5, 0.001),
+            latency_seconds=1.0,
+            model="deep-actual",
+            provider="fixture-deep",
+            finish_reason="stop",
+        )
 
 
 def _frame(second: float) -> Frame:
@@ -180,7 +201,8 @@ def test_stable_cluster_is_named_once_and_uncertain_is_preserved(
     tmp_path: Path,
 ) -> None:
     deep = DeepClient(
-        '{"label":"主菜单","annotation":"游戏启动后用于选择功能的主界面。",'
+        '{"matches_existing":null,"label":"主菜单",'
+        '"annotation":"游戏启动后用于选择功能的主界面。",'
         '"modality":"uncertain"}'
     )
     adapter = _adapter(tmp_path / "memory", deep)
@@ -194,6 +216,12 @@ def test_stable_cluster_is_named_once_and_uncertain_is_preserved(
 
     asyncio.run(scenario())
     assert len(deep.calls) == 1
+    call = deep.calls[0]
+    images = call["images"]
+    assert isinstance(images, tuple)
+    assert all(image.target_width == 1920 for image in images)
+    assert call["reasoning_effort"] == "none"
+    assert "matches_existing 必须为 null" in str(call["user_prompt"])
     card = json.loads(
         (tmp_path / "memory" / "fixture-game" / "gamecard.json").read_text(
             encoding="utf-8"
@@ -217,7 +245,8 @@ def test_unstable_cluster_proposal_is_rejected_and_persisted_as_failed_evidence(
     tmp_path: Path,
 ) -> None:
     deep = DeepClient(
-        '{"label":"加载界面","annotation":"等待进入下一段内容时显示。",'
+        '{"matches_existing":null,"label":"加载界面",'
+        '"annotation":"等待进入下一段内容时显示。",'
         '"modality":"observed"}'
     )
     adapter = _adapter(tmp_path / "memory", deep)
@@ -282,7 +311,8 @@ def test_deep_failure_does_not_retry_in_session_and_next_session_can_retry(
     assert first_card["scenes"][0]["label_status"] == "unnamed"
 
     succeeding = DeepClient(
-        '{"label":"普通游玩画面","annotation":"玩家正常操控游戏世界时显示。",'
+        '{"matches_existing":null,"label":"普通游玩画面",'
+        '"annotation":"玩家正常操控游戏世界时显示。",'
         '"modality":"observed"}'
     )
     second = _adapter(memory, succeeding)
@@ -302,7 +332,8 @@ def test_deep_failure_does_not_retry_in_session_and_next_session_can_retry(
     assert second_card["scenes"][0]["label_status"] == "named"
 
     already_named = DeepClient(
-        '{"label":"不应调用","annotation":"已有判决的卡上场景不应再次请求。",'
+        '{"matches_existing":true,"label":"错误的新名字",'
+        '"annotation":"确认匹配时这些返回内容不应覆盖当前命名。",'
         '"modality":"observed"}'
     )
     third = _adapter(memory, already_named)
@@ -314,4 +345,77 @@ def test_deep_failure_does_not_retry_in_session_and_next_session_can_retry(
         await third.finish_replay()
 
     asyncio.run(third_session())
-    assert already_named.calls == []
+    assert len(already_named.calls) == 1
+    prompt = str(already_named.calls[0]["user_prompt"])
+    assert "当前短名：普通游玩画面" in prompt
+    third_card = json.loads(
+        (memory / "fixture-game" / "gamecard.json").read_text(encoding="utf-8")
+    )
+    assert third_card["scenes"][0]["label"] == "普通游玩画面"
+    third_evidence_path = tmp_path / "already-named" / "evidence.jsonl"
+    third_verified = [
+        event
+        for event in EvidenceStore.read(third_evidence_path)
+        if event.kind == "scene_verified"
+    ]
+    assert len(third_verified) == 1
+    assert isinstance(third_verified[0].payload, SceneVerifiedPayload)
+    assert third_verified[0].payload.label == "普通游玩画面"
+
+    changed = DeepClient(
+        '{"matches_existing":false,"label":"设置菜单",'
+        '"annotation":"玩家调整游戏选项时显示的设置界面。",'
+        '"modality":"observed"}'
+    )
+    fourth = _adapter(memory, changed)
+
+    async def fourth_session() -> None:
+        fourth.start_replay(tmp_path / "renamed", input_context=None)
+        for moment in (30.0, 31.0):
+            await _submit(fourth, moment)
+        await fourth.finish_replay()
+
+    asyncio.run(fourth_session())
+    assert len(changed.calls) == 1
+    fourth_card = json.loads(
+        (memory / "fixture-game" / "gamecard.json").read_text(encoding="utf-8")
+    )
+    assert fourth_card["scenes"][0]["label"] == "设置菜单"
+    assert fourth_card["scenes"][0]["annotation"] == "玩家调整游戏选项时显示的设置界面。"
+    fourth_verified = [
+        event
+        for event in EvidenceStore.read(tmp_path / "renamed" / "evidence.jsonl")
+        if event.kind == "scene_verified"
+    ]
+    assert len(fourth_verified) == 1
+    assert isinstance(fourth_verified[0].payload, SceneVerifiedPayload)
+    assert fourth_verified[0].payload.label == "设置菜单"
+
+
+def test_deep_reader_enforces_wall_clock_timeout() -> None:
+    client = BlockingDeepClient()
+    reader = DeepVisionReader(
+        client,
+        LlmConfig(
+            enabled=True,
+            model="deep",
+            provider="fixture-deep",
+            timeout_seconds=0.01,
+        ),
+        input_price_per_million_usd=None,
+        output_price_per_million_usd=None,
+        reasoning_effort="none",
+    )
+
+    async def scenario() -> None:
+        try:
+            await reader.read(DeepReadRequest("system", "user", ()))
+        except TimeoutError:
+            client.release.set()
+            return
+        raise AssertionError("deep read exceeded its wall-clock deadline without timing out")
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        client.release.set()

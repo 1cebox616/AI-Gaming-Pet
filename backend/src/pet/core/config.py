@@ -176,6 +176,7 @@ class SceneNamingConfig(BaseModel):
     llm_profile: str = "vision_deep"
     max_requests_per_session: int = Field(default=8, ge=1, le=64)
     representative_frame_count: int = Field(default=3, ge=1, le=3)
+    upload_width: int = Field(default=1920, ge=320, le=3840)
 
 
 class SceneConfig(BaseModel):

@@ -326,15 +326,21 @@ class GameCardSession:
 
     def needs_verification(self, cluster: SceneCluster) -> bool:
         """Return whether this session cluster has no existing naming decision."""
-        if cluster.cluster_id in self._verifications:
-            return False
+        return cluster.cluster_id not in self._verifications
+
+    def named_candidate(self, cluster: SceneCluster) -> GameCardScene | None:
+        """Return the named card candidate that a new session must recheck."""
         candidate_id = (
             cluster.card_candidate.scene_id
             if cluster.card_candidate is not None
             else self._cluster_scene_ids.get(cluster.cluster_id)
         )
         scene = _scene_by_id(self.card.scenes, candidate_id)
-        return scene is None or scene.label_status == "unnamed"
+        if scene is None or scene.label_status == "unnamed":
+            return None
+        if scene.label is None or scene.annotation is None:
+            raise ValueError("named game-card scene lacks label or annotation")
+        return scene
 
     def record_verification(
         self,

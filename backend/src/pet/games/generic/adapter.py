@@ -62,6 +62,7 @@ from pet.core.scene_fingerprint import (
 )
 from pet.games.generic.deep_read import DeepReadResult, DeepVisionReader
 from pet.games.generic.scene_naming import (
+    ExistingSceneNaming,
     SceneNamingFrame,
     build_scene_naming_request,
     parse_scene_naming_proposal,
@@ -184,6 +185,7 @@ class SceneNamingContext:
     session: GameCardSession
     frames: tuple[BufferedSceneFrame, ...]
     trigger_frame_ts: float
+    existing_scene: ExistingSceneNaming | None = None
 
 
 class WindowTitleMap:
@@ -1310,6 +1312,7 @@ class GenericVisionAdapter:
             effective,
             input_price_per_million_usd=profile.input_price_per_million_usd,
             output_price_per_million_usd=profile.output_price_per_million_usd,
+            reasoning_effort="none",
         )
 
     def _observe_scene_frame(
@@ -1462,6 +1465,17 @@ class GenericVisionAdapter:
         if not session.needs_verification(cluster):
             self._scene_naming_attempted.add(cluster_id)
             return
+        card_scene = session.named_candidate(cluster)
+        existing_scene = (
+            ExistingSceneNaming(
+                scene_id=card_scene.scene_id,
+                label=card_scene.label,
+                annotation=card_scene.annotation,
+                label_status=card_scene.label_status,
+            )
+            if card_scene is not None
+            else None
+        )
         if self._scene_naming_request_count >= settings.max_requests_per_session:
             self._scene_naming_attempted.add(cluster_id)
             logger.warning(
@@ -1490,6 +1504,7 @@ class GenericVisionAdapter:
             session=session,
             frames=chosen,
             trigger_frame_ts=chosen[-1].frame_ts,
+            existing_scene=existing_scene,
         )
         task = asyncio.create_task(
             self._run_scene_naming(context),
@@ -1512,11 +1527,16 @@ class GenericVisionAdapter:
                     for frame in context.frames
                 ),
                 stable_ocr_lines=stable_ocr_lines,
-                send_width=self._settings.send_width,
+                send_width=self._settings.scene.naming.upload_width,
+                existing_scene=context.existing_scene,
             )
             deep_result = await self._deep_reader.read(request)
             proposal = parse_scene_naming_proposal(deep_result.result.text)
-            decision = validate_scene_naming_proposal(context.cluster, proposal)
+            decision = validate_scene_naming_proposal(
+                context.cluster,
+                proposal,
+                context.existing_scene,
+            )
             assert self._log is not None
             evidence_id = self._log.append_scene_verified(
                 trigger_frame_ts=context.trigger_frame_ts,

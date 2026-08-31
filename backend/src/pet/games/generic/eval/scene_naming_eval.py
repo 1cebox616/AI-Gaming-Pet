@@ -359,6 +359,7 @@ async def run_evaluation(
         effective,
         input_price_per_million_usd=profile.input_price_per_million_usd,
         output_price_per_million_usd=profile.output_price_per_million_usd,
+        reasoning_effort="none",
     )
     grouped_hashes, grouped_timings = _hash_recordings(recordings)
     title_map = WindowTitleMap.load()

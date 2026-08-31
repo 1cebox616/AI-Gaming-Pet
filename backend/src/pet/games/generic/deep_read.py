@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from pet.core.config import LlmConfig
 from pet.core.llm import LlmImage, LlmResult, LlmVisionClientProtocol
@@ -33,6 +34,9 @@ class DeepVisionReader:
         *,
         input_price_per_million_usd: float | None,
         output_price_per_million_usd: float | None,
+        reasoning_effort: Literal[
+            "none", "minimal", "low", "medium", "high"
+        ] = "high",
     ) -> None:
         if not configuration.enabled or not configuration.model.strip():
             raise ValueError("deep vision profile must be enabled and name a model")
@@ -40,19 +44,23 @@ class DeepVisionReader:
         self._configuration = configuration
         self._input_price = input_price_per_million_usd
         self._output_price = output_price_per_million_usd
+        self._reasoning_effort = reasoning_effort
 
     async def read(self, request: DeepReadRequest) -> DeepReadResult:
-        result = await asyncio.to_thread(
-            self._client.complete_with_images,
-            model=self._configuration.model,
-            provider=self._configuration.provider or None,
-            system_prompt=request.system_prompt,
-            user_prompt=request.user_prompt,
-            images=request.images,
-            max_image_edge=None,
-            max_tokens=self._configuration.max_tokens,
-            temperature=self._configuration.temperature,
-            reasoning_effort="high",
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                self._client.complete_with_images,
+                model=self._configuration.model,
+                provider=self._configuration.provider or None,
+                system_prompt=request.system_prompt,
+                user_prompt=request.user_prompt,
+                images=request.images,
+                max_image_edge=None,
+                max_tokens=self._configuration.max_tokens,
+                temperature=self._configuration.temperature,
+                reasoning_effort=self._reasoning_effort,
+            ),
+            timeout=self._configuration.timeout_seconds,
         )
         return DeepReadResult(result=result, cost_usd=self._price(result))
 

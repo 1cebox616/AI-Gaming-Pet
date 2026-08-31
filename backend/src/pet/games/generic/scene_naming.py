@@ -24,6 +24,7 @@ _CJK_PATTERN = re.compile(r"[\u3400-\u9fff]")
 class SceneNamingProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    matches_existing: bool | None
     label: str
     annotation: str
     modality: Literal["observed", "inferred", "uncertain"]
@@ -36,11 +37,20 @@ class SceneNamingFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class ExistingSceneNaming:
+    scene_id: str
+    label: str
+    annotation: str
+    label_status: Literal["named", "uncertain"]
+
+
+@dataclass(frozen=True, slots=True)
 class SceneNamingDecision:
     accepted: bool
     label: str
     annotation: str
     modality: Literal["observed", "inferred", "uncertain"]
+    matches_existing: bool | None
     validation_error: str | None
 
 
@@ -51,6 +61,7 @@ def build_scene_naming_request(
     frames: Sequence[SceneNamingFrame],
     stable_ocr_lines: Sequence[str],
     send_width: int,
+    existing_scene: ExistingSceneNaming | None = None,
 ) -> DeepReadRequest:
     if not frames:
         raise ValueError("scene naming needs at least one representative frame")
@@ -59,12 +70,25 @@ def build_scene_naming_request(
         "；".join(line.strip() for line in stable_ocr_lines if line.strip())
         or "无可用稳定 OCR 文字"
     )
+    existing_text = (
+        "游戏卡中没有已命名的候选场景；matches_existing 必须为 null。"
+        if existing_scene is None
+        else (
+            "游戏卡中可能匹配的已命名场景：\n"
+            f"- scene_id：{existing_scene.scene_id}\n"
+            f"- 当前短名：{existing_scene.label}\n"
+            f"- 当前注释：{existing_scene.annotation}\n"
+            f"- 当前状态：{existing_scene.label_status}\n"
+            "请判断本次画面是否就是这个场景，matches_existing 必须为 true 或 false。"
+        )
+    )
     user_prompt = (
         f"游戏名（由窗口标题确定）：{game_name}\n"
         f"会话视觉簇：session:c{session_cluster_id}\n"
         f"所看帧：{root_ids}\n"
         f"稳定 OCR 文字：{ocr_text}\n"
-        "请只根据这些画面和文字给出该视觉簇的场景命名。"
+        f"{existing_text}\n"
+        "请只根据这些画面、文字与给出的当前命名完成场景确认或命名。"
     )
     images = tuple(
         LlmImage(
@@ -102,12 +126,27 @@ def parse_scene_naming_proposal(text: str) -> SceneNamingProposal:
 def validate_scene_naming_proposal(
     cluster: SceneCluster,
     proposal: SceneNamingProposal,
+    existing_scene: ExistingSceneNaming | None = None,
 ) -> SceneNamingDecision:
-    label = " ".join(proposal.label.split())
-    annotation = " ".join(proposal.annotation.split())
     problems: list[str] = []
     if not cluster.stable:
         problems.append("referenced cluster has not passed the stable gate")
+    if existing_scene is None and proposal.matches_existing is not None:
+        problems.append("matches_existing must be null without a named card candidate")
+    if existing_scene is not None and proposal.matches_existing is None:
+        problems.append("matches_existing must be boolean for a named card candidate")
+    reuse_existing = existing_scene is not None and proposal.matches_existing is True
+    label = " ".join(
+        (existing_scene.label if reuse_existing else proposal.label).split()
+    )
+    annotation = " ".join(
+        (existing_scene.annotation if reuse_existing else proposal.annotation).split()
+    )
+    modality = (
+        "uncertain"
+        if reuse_existing and existing_scene.label_status == "uncertain"
+        else proposal.modality
+    )
     if not label:
         problems.append("label is empty")
     elif len(label) > 24:
@@ -122,6 +161,7 @@ def validate_scene_naming_proposal(
         accepted=not problems,
         label=label,
         annotation=annotation,
-        modality=proposal.modality,
+        modality=modality,
+        matches_existing=proposal.matches_existing,
         validation_error="; ".join(problems) if problems else None,
     )

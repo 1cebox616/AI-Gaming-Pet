@@ -92,6 +92,8 @@ llm_profile = "vision_deep"
 # 四段校准录像单会话最多出现 4 个稳定簇；8 留出一倍余量，同时限制异常簇风暴的花费。
 max_requests_per_session = 8
 representative_frame_count = 3
+# 场景深线保持原始宽高比缩放到 1920px；16:9 帧即 1920x1080。
+upload_width = 1920
 
 # 在线模型默认关闭。密钥只从 OPENROUTER_API_KEY 环境变量读取。
 [llm]
@@ -113,11 +115,13 @@ max_tokens = 200
 input_price_per_million_usd = 0.03
 output_price_per_million_usd = 0.13
 
-# 稳定簇命名的冷路径；不受快线 5 秒超时约束，一次请求最多看三张 896px 代表帧。
+# 稳定簇命名与跨会话复核的冷路径；6 秒墙钟截止，一次最多看三张 1080p 代表帧。
 [llm.profiles.vision_deep]
 enabled = true
-model = "qwen/qwen3.5-122b-a10b"
+model = "qwen/qwen3.8-flash"
 provider = "Alibaba"
 temperature = 0.0
-timeout_seconds = 30.0
+timeout_seconds = 6.0
 max_tokens = 1024
+input_price_per_million_usd = 0.15
+output_price_per_million_usd = 0.47
