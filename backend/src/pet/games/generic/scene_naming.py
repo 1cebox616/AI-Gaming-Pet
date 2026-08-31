@@ -64,7 +64,7 @@ def build_scene_naming_request(
     existing_scene: ExistingSceneNaming | None = None,
 ) -> DeepReadRequest:
     if not frames:
-        raise ValueError("scene naming needs at least one representative frame")
+        raise ValueError("scene verification needs at least one representative frame")
     root_ids = ", ".join(frame.root_capture_id for frame in frames)
     ocr_text = (
         "；".join(line.strip() for line in stable_ocr_lines if line.strip())
@@ -115,11 +115,11 @@ def parse_scene_naming_proposal(text: str) -> SceneNamingProposal:
     start = value.find("{")
     end = value.rfind("}")
     if start < 0 or end < start:
-        raise ValueError("scene naming response contains no JSON object")
+        raise ValueError("scene verification response contains no JSON object")
     try:
         payload = json.loads(value[start : end + 1])
     except json.JSONDecodeError as error:
-        raise ValueError(f"scene naming response is invalid JSON: {error}") from error
+        raise ValueError(f"scene verification response is invalid JSON: {error}") from error
     return SceneNamingProposal.model_validate(payload)
 
 

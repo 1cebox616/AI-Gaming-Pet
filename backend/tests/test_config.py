@@ -579,6 +579,6 @@ def test_repository_config_loads_without_problems_in_strict_mode(tmp_path: Path)
     assert configuration.active.game in configuration.games
     naming = configuration.games["generic"].generic.scene.naming
     assert naming.upload_width == 1920
-    profile = configuration.llm.profiles["vision_deep"]
+    profile = configuration.llm.profiles["scene_fingerprint_verifier"]
     assert profile.model == "qwen/qwen3.8-flash"
-    assert profile.timeout_seconds == 6.0
+    assert profile.timeout_seconds == 10.0

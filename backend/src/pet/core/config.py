@@ -168,12 +168,12 @@ class OcrConfig(BaseModel):
 
 
 class SceneNamingConfig(BaseModel):
-    """Bounded, off-path deep naming for stable scene clusters."""
+    """Bounded, off-path scene-fingerprint verification."""
 
     model_config = ConfigDict(strict=True, extra="forbid")
 
     enabled: bool = False
-    llm_profile: str = "vision_deep"
+    llm_profile: str = "scene_fingerprint_verifier"
     max_requests_per_session: int = Field(default=8, ge=1, le=64)
     representative_frame_count: int = Field(default=3, ge=1, le=3)
     upload_width: int = Field(default=1920, ge=320, le=3840)

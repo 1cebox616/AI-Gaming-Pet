@@ -1295,11 +1295,11 @@ class GenericVisionAdapter:
             return
         profile = self._llm_configuration.profiles.get(naming.llm_profile)
         if profile is None:
-            raise RuntimeError(f"场景命名模型档位不存在：{naming.llm_profile}")
+            raise RuntimeError(f"场景指纹核查模型档位不存在：{naming.llm_profile}")
         effective = resolve_llm_profile(self._llm_configuration, naming.llm_profile)
         if not effective.enabled or not effective.model.strip():
             raise RuntimeError(
-                f"场景命名模型档位 {naming.llm_profile} 未启用或未配置型号"
+                f"场景指纹核查模型档位 {naming.llm_profile} 未启用或未配置型号"
             )
         client = self._deep_client_factory(
             naming.llm_profile,
@@ -1574,7 +1574,7 @@ class GenericVisionAdapter:
             raise
         except Exception as error:
             logger.error(
-                "session:c%d 场景深读失败，本会话不重试：%s",
+                "session:c%d 场景指纹核查失败，本会话不重试：%s",
                 context.cluster.cluster_id,
                 _one_line(error),
             )

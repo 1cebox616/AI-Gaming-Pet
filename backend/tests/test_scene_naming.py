@@ -1,4 +1,4 @@
-"""M5-B-T2-4 stable-cluster deep naming contract tests."""
+"""M5-B-T2-4 stable-cluster scene-fingerprint verification tests."""
 
 from __future__ import annotations
 
@@ -149,7 +149,7 @@ def _configuration(memory: Path) -> tuple[AdapterConfig, LlmConfig]:
                 input_price_per_million_usd=1.0,
                 output_price_per_million_usd=1.0,
             ),
-            "vision_deep": LlmProfileConfig(
+            "scene_fingerprint_verifier": LlmProfileConfig(
                 enabled=True,
                 model="deep",
                 provider="fixture-deep",

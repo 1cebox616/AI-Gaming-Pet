@@ -140,7 +140,7 @@ def render_gamecard_markdown(card: GameCard) -> str:
                 "- 证据样本："
                 + (", ".join(f"`{item}`" for item in scene.evidence_ids) or "无"),
                 f"- 命名时间：{_iso(scene.verified_at) if scene.verified_at else '未命名'}",
-                "- 深线证据："
+                "- 场景指纹核查证据："
                 + (", ".join(f"`{item}`" for item in scene.deep_evidence_ids) or "无"),
                 "",
             )

@@ -422,7 +422,7 @@ async def run_evaluation(
                             recording=recording,
                             trigger=trigger,
                             output=output,
-                            send_width=generic.send_width,
+                            send_width=naming.upload_width,
                         )
                         for trigger in triggers
                     ]
@@ -463,15 +463,15 @@ def _render_report(results: Sequence[RecordingResult]) -> str:
         "## 实现边界与代表帧",
         "",
         "- 指纹参数保持 `pHash64 / Hamming <= 8 / stable=4s / dwell=8s`，本任务未改聚簇或升格规则。",
-        "- 稳定门由全部轮询帧推进；深线在过门时使用该连续段内已有、且具备合法 `root_capture_id` 的检测器选中帧。",
-        "- 代表帧最多三张，按当时可用帧的首／中／末选取；少于三张时去重后全部使用。上传宽度为 896px。",
+        "- 稳定门由全部轮询帧推进；场景指纹核查模型在过门时使用该连续段内已有、且具备合法 `root_capture_id` 的检测器选中帧。",
+        "- 代表帧最多三张，按当时可用帧的首／中／末选取；少于三张时去重后全部使用。上传宽度为 1920px，16:9 输入即 1080p。",
         "- 每会话请求上限为 8：四段校准录像单段最多 4 个稳定簇，取两倍余量，同时给异常簇风暴设置花费边界。",
         "- 本批保留录制没有同时间线的稳定 OCR 产物，因此请求未附 OCR；在线原语保留该输入槽位。",
-        "- 深线不联网、不做跨簇归并、不做 variants；模型只提议，代码检查稳定门、中文标签和长度后执行。",
+        "- 场景指纹核查模型不联网、不做跨簇归并、不做 variants；模型只提议，代码检查稳定门、中文标签和长度后执行。",
         "",
         "## 四张卡汇总",
         "",
-        "| 录像 | 场景数 | 命名数 | uncertain | 被拒判决 | 深读失败 |",
+        "| 录像 | 场景数 | 命名数 | uncertain | 被拒判决 | 核查失败 |",
         "|---|---:|---:|---:|---:|---:|",
     ]
     for result in results:
@@ -503,11 +503,11 @@ def _render_report(results: Sequence[RecordingResult]) -> str:
                     f"{scene['label'] or '未命名'}（{scene['label_status']}）",
                     f"  - 注释：{scene['annotation'] or '无'}",
                     "  - 代表帧：" + (" / ".join(f"`{path}`" for path in paths) or "无"),
-                    f"  - 深线证据：{', '.join(scene['deep_evidence_ids']) or '无'}",
+                    f"  - 场景指纹核查证据：{', '.join(scene['deep_evidence_ids']) or '无'}",
                 )
             )
         lines.append("")
-    lines.extend(("## 每次深读与花费", "", "| 录像 | 簇 | 结果 | modality | 模型 / 上游 | 延迟 | 花费 |", "|---|---|---|---|---|---:|---:|"))
+    lines.extend(("## 每次场景指纹核查与花费", "", "| 录像 | 簇 | 结果 | modality | 模型 / 上游 | 延迟 | 花费 |", "|---|---|---|---|---|---:|---:|"))
     for result in results:
         for attempt in result.attempts:
             outcome = (
@@ -539,7 +539,8 @@ def _render_report(results: Sequence[RecordingResult]) -> str:
             "会话视觉簇：session:c{session_cluster_id}",
             "所看帧：{root_capture_ids}",
             "稳定 OCR 文字：{stable_ocr_lines_or_unavailable}",
-            "请只根据这些画面和文字给出该视觉簇的场景命名。",
+            "{existing_card_candidate_or_none}",
+            "请只根据这些画面、文字与给出的当前命名完成场景确认或命名。",
             "```",
             "",
             "## 偏差与未完成项",
