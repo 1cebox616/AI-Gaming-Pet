@@ -265,8 +265,9 @@ def test_local_1080p_replay_emits_three_evidence_kinds_per_selected_frame(
             send_width=896,
             timeout=1.0,
             max_inflight=4,
-                region_focus_max=0.50,
-                ocr_enabled=False,
+            region_focus_max=0.50,
+            ocr_enabled=False,
+            scene_memory_dir=tmp_path / "memory",
         ),
         llm,
         capture_backend_factory=lambda: (_ for _ in ()).throw(
@@ -316,13 +317,19 @@ def test_local_1080p_replay_emits_three_evidence_kinds_per_selected_frame(
 
     asyncio.run(scenario())
     events = list(EvidenceStore.read(output / "evidence.jsonl"))
-    assert len(events) == len(prepared.selected) * 3
+    assert len(events) == len(prepared.selected) * 4
     roots: dict[str, set[str]] = {}
     for event in events:
         assert event.root_capture_id is not None
         roots.setdefault(event.root_capture_id, set()).add(event.kind)
     assert all(
-        kinds == {"frame_metrics", "key_window", "fast_observation"}
+        kinds
+        == {
+            "frame_metrics",
+            "key_window",
+            "scene_fingerprint",
+            "fast_observation",
+        }
         for kinds in roots.values()
     )
     assert client.calls == len(prepared.selected)

@@ -10,7 +10,12 @@ CORE_ROOT = PET_ROOT / "core"
 GAMES_ROOT = PET_ROOT / "games"
 BELIEF_ROOT = CORE_ROOT / "belief"
 OCR_MODULES = tuple(CORE_ROOT.glob("ocr_*.py"))
-LOCAL_SENSOR_PATHS = (CORE_ROOT / "capture.py", CORE_ROOT / "input_telemetry.py")
+LOCAL_SENSOR_PATHS = (
+    CORE_ROOT / "capture.py",
+    CORE_ROOT / "gamecard.py",
+    CORE_ROOT / "input_telemetry.py",
+    CORE_ROOT / "scene_fingerprint.py",
+)
 ALLOWED_CORE_MODULES = {"adapter_api", "config", "llm", "prompt"}
 NETWORK_MODULES = {
     "aiohttp",
@@ -101,7 +106,14 @@ def test_game_packages_do_not_cross_import_or_reach_eval_from_production() -> No
                 allowed = set(ALLOWED_CORE_MODULES)
                 if game_id == "generic":
                     allowed.update(
-                        {"belief", "ocr_probe", "ocr_rapid", "ocr_selective"}
+                        {
+                            "belief",
+                            "gamecard",
+                            "ocr_probe",
+                            "ocr_rapid",
+                            "ocr_selective",
+                            "scene_fingerprint",
+                        }
                     )
                 if in_eval:
                     allowed.add("gate")

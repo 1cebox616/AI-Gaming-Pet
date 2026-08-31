@@ -1,0 +1,37 @@
+{
+  "game_id": "slay-the-spire-2",
+  "display_name": "Slay the Spire 2",
+  "genre": null,
+  "perspective": null,
+  "scenes": [
+    {
+      "cluster_id": "scene:s1",
+      "label": null,
+      "representative_hash": "d483e823b6fc23dc",
+      "first_seen": "2026-08-28T02:02:26.962335Z",
+      "last_seen": "2026-08-28T02:06:20.334650Z",
+      "seen_count": 66,
+      "sessions_seen": 1,
+      "evidence_ids": [
+        "f13:scene:1",
+        "f14:scene:1",
+        "f15:scene:1",
+        "f19:scene:1",
+        "f24:scene:1"
+      ]
+    }
+  ],
+  "hud_slots": [],
+  "keybinds": {},
+  "view_constants": {
+    "yaw_deg_per_count": null,
+    "user_sensitivity": null
+  },
+  "init": {
+    "initialized_at": "2026-08-28T02:02:07.981643Z",
+    "source_recordings": [
+      "recordings/capture/20260827-220206"
+    ],
+    "version": 1
+  }
+}

@@ -8,6 +8,7 @@ from pet.core.belief.models import (
     FrameMetricsPayload,
     KeyWindowPayload,
     OcrFramePayload,
+    SceneFingerprintPayload,
     Scope,
     TextObservedPayload,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "FrameMetricsPayload",
     "KeyWindowPayload",
     "OcrFramePayload",
+    "SceneFingerprintPayload",
     "ObservationsMarkdownWriter",
     "Scope",
     "TextObservedPayload",

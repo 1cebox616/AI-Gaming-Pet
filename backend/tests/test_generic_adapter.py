@@ -21,6 +21,7 @@ from pet.core.belief import (
     FastObservationPayload,
     FrameMetricsPayload,
     KeyWindowPayload,
+    SceneFingerprintPayload,
     render_observations_markdown,
 )
 from pet.core.config import (
@@ -29,12 +30,14 @@ from pet.core.config import (
     LlmConfig,
     LlmProfileConfig,
     OcrConfig,
+    SceneConfig,
 )
 from pet.core.llm import LlmResult, LlmUsage, image_upload_metadata
 from pet.core.input_telemetry import ActionInputEvent, ActionInputTimeline
 import pet.games.generic.adapter as generic_adapter_module
 from pet.games.generic.adapter import (
     FAST_PROMPT_PATH,
+    GameIdentity,
     GenericVisionAdapter,
     ObservationLog,
     ObservationRecord,
@@ -196,6 +199,7 @@ def _configuration(
             observation_log_dir=str(log_dir),
             cost_warn_per_hour=cost_warn,
             ocr=OcrConfig(enabled=False),
+            scene=SceneConfig(enabled=False),
         )
     )
     llm = LlmConfig(
@@ -626,6 +630,152 @@ def test_title_lookup_falls_back_to_original_window_title() -> None:
     mapping = _title_map()
     assert mapping.identify("GZW ", "anything.exe") == "Grey Zone Warfare"
     assert mapping.identify("Unknown Window 123", "unknown.exe") == "Unknown Window 123"
+    matched = mapping.identify_identity("GZW Season", "anything.exe")
+    unmatched = mapping.identify_identity("Unknown Window 123", "unknown.exe")
+    assert matched.game_id == "grey-zone-warfare"
+    assert matched.display_name == "GZW Season"
+    assert unmatched.game_id == "unknown-exe"
+    assert unmatched.display_name == "Unknown Window 123"
+
+
+def test_selected_frames_each_emit_one_scene_event_without_changing_markdown(
+    tmp_path: Path,
+) -> None:
+    adapter_config, llm_config = _configuration(tmp_path)
+    adapter_config.generic.scene = SceneConfig(
+        enabled=True,
+        hash_kind="ahash",
+        hash_bits=64,
+        hamming_threshold=1,
+        stable_min_frames=2,
+        card_min_visits=2,
+        card_min_span_seconds=1.0,
+        card_flush_seconds=999.0,
+        memory_dir=str(tmp_path / "memory"),
+    )
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("replay must not initialize capture")
+        ),
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: FakeClient(),
+        title_map=_title_map(),
+    )
+    output = tmp_path / "scene-replay"
+
+    async def scenario() -> None:
+        adapter.start_replay(output, input_context=None)
+        for sequence in (1, 2):
+            await adapter.submit_replay_frame(
+                _frame(sequence),
+                "Grey Zone Warfare",
+                (),
+                float(sequence - 1),
+                confirmed_region=(),
+                change_ratio=0.6,
+                global_change=20.0,
+                region_intensity=0.0,
+                forced=False,
+            )
+        await adapter.finish_replay()
+
+    asyncio.run(scenario())
+    events = list(EvidenceStore.read(output / "evidence.jsonl"))
+    scene_events = [event for event in events if event.kind == "scene_fingerprint"]
+    assert len(scene_events) == 2
+    assert all(isinstance(event.payload, SceneFingerprintPayload) for event in scene_events)
+    assert [event.root_capture_id for event in scene_events] == ["f1", "f2"]
+    assert (output / "observations.md").read_text(encoding="utf-8") == (
+        render_observations_markdown(events, adapter._log.started_at)
+        if adapter._log is not None
+        else render_observations_markdown(
+            events,
+            datetime.fromisoformat(
+                json.loads((output / "session.json").read_text(encoding="utf-8"))[
+                    "started_at"
+                ]
+            ),
+        )
+    )
+    card = json.loads(
+        (tmp_path / "memory" / "grey-zone-warfare" / "gamecard.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert card["scenes"][0]["seen_count"] == 2
+
+
+def test_game_switch_flushes_old_card_before_loading_new_card(tmp_path: Path) -> None:
+    adapter_config, llm_config = _configuration(tmp_path)
+    adapter_config.generic.scene = SceneConfig(
+        enabled=True,
+        hash_kind="ahash",
+        hash_bits=64,
+        hamming_threshold=1,
+        stable_min_frames=2,
+        card_min_visits=2,
+        card_min_span_seconds=1.0,
+        card_flush_seconds=999.0,
+        memory_dir=str(tmp_path / "memory"),
+    )
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("replay must not initialize capture")
+        ),
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: FakeClient(),
+        title_map=_title_map(),
+    )
+    output = tmp_path / "switch-replay"
+
+    async def scenario() -> None:
+        adapter.start_replay(output, input_context=None)
+        for sequence in (1, 2):
+            await adapter._schedule(
+                _frame(sequence),
+                "First Game",
+                (),
+                0.0,
+                confirmed_region=(),
+                change_ratio=0.6,
+                global_change=20.0,
+                region_intensity=0.0,
+                forced=False,
+                wait_for_capacity=True,
+                game_identity=GameIdentity("first-game", "First Game", "First Game"),
+            )
+        await adapter._schedule(
+            _frame(3),
+            "Second Game",
+            (),
+            0.0,
+            confirmed_region=(),
+            change_ratio=0.6,
+            global_change=20.0,
+            region_intensity=0.0,
+            forced=False,
+            wait_for_capacity=True,
+            game_identity=GameIdentity("second-game", "Second Game", "Second Game"),
+        )
+        await adapter.finish_replay()
+
+    asyncio.run(scenario())
+    first = json.loads(
+        (tmp_path / "memory" / "first-game" / "gamecard.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    second = json.loads(
+        (tmp_path / "memory" / "second-game" / "gamecard.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert first["scenes"][0]["seen_count"] == 2
+    assert second["scenes"] == []
 
 
 def test_cost_uses_profile_prices_and_sets_warning(tmp_path: Path) -> None:

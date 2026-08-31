@@ -134,12 +134,36 @@ class OcrFramePayload(EvidenceModel):
     outcome_detail: Literal["ok", "late", "skipped_disabled", "failed"]
 
 
+class SceneFingerprintPayload(EvidenceModel):
+    hash: str = Field(pattern=r"^(?:[0-9a-f]{16}|[0-9a-f]{64})$")
+    cluster_id: int = Field(ge=1)
+    distance: int = Field(ge=0)
+    is_new_cluster: bool
+    switched_from: int | None = Field(default=None, ge=1)
+    stable: bool
+    card_candidate_scene_id: str | None = Field(
+        default=None,
+        pattern=r"^scene:s[1-9]\d*$",
+    )
+    card_candidate_distance: int | None = Field(default=None, ge=0)
+    elapsed_ms: float = Field(ge=0.0)
+
+    @model_validator(mode="after")
+    def validate_card_candidate(self) -> SceneFingerprintPayload:
+        if (self.card_candidate_scene_id is None) != (
+            self.card_candidate_distance is None
+        ):
+            raise ValueError("scene card candidate id and distance must coexist")
+        return self
+
+
 EvidencePayload = (
     FastObservationPayload
     | FrameMetricsPayload
     | KeyWindowPayload
     | TextObservedPayload
     | OcrFramePayload
+    | SceneFingerprintPayload
 )
 
 
@@ -164,6 +188,7 @@ class EvidenceEvent(EvidenceModel):
             "key_window": KeyWindowPayload,
             "text_observed": TextObservedPayload,
             "ocr_frame": OcrFramePayload,
+            "scene_fingerprint": SceneFingerprintPayload,
         }
         expected = expected_payloads.get(self.kind)
         if expected is None or not isinstance(self.payload, expected):
@@ -174,6 +199,7 @@ class EvidenceEvent(EvidenceModel):
             "key_window": "input",
             "text_observed": "ocr",
             "ocr_frame": "ocr",
+            "scene_fingerprint": "scene",
         }
         if self.source != expected_sources[self.kind]:
             raise ValueError(f"source does not match evidence kind {self.kind!r}")

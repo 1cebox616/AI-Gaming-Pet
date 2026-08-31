@@ -32,10 +32,16 @@ from pet.core.belief import (
     KeyWindowPayload,
     OcrFramePayload,
     ObservationsMarkdownWriter,
+    SceneFingerprintPayload,
     Scope,
     TextObservedPayload,
 )
 from pet.core.config import AdapterConfig, LlmConfig, resolve_llm_profile
+from pet.core.gamecard import (
+    GameCardRepository,
+    GameCardSession,
+    slugify_game_id,
+)
 from pet.core.llm import (
     LlmImage,
     LlmResult,
@@ -46,6 +52,7 @@ from pet.core.prompt import PROMPTS_DIRECTORY
 from pet.core.ocr_probe import OcrFrameResult, OcrLine
 from pet.core.ocr_rapid import ENGINE_NAME, RapidOcrEngine, set_current_thread_below_normal
 from pet.core.ocr_selective import OcrEngine, TextLineCache, normalize_text
+from pet.core.scene_fingerprint import SceneClusterer, perceptual_hash
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +141,13 @@ class TitleRule:
     process_names: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class GameIdentity:
+    game_id: str
+    display_name: str
+    context_name: str
+
+
 class WindowTitleMap:
     """Case-insensitive deterministic mapping; no model inference is involved."""
 
@@ -156,14 +170,29 @@ class WindowTitleMap:
         return cls(rules)
 
     def identify(self, title: str, process_name: str) -> str:
+        return self.identify_identity(title, process_name).context_name
+
+    def identify_identity(self, title: str, process_name: str) -> GameIdentity:
         folded_title = title.casefold()
         folded_process = process_name.casefold()
         for rule in self._rules:
             if any(value in folded_title for value in rule.title_contains):
-                return rule.game
+                return GameIdentity(
+                    game_id=slugify_game_id(rule.game),
+                    display_name=title,
+                    context_name=rule.game,
+                )
             if folded_process in rule.process_names:
-                return rule.game
-        return title
+                return GameIdentity(
+                    game_id=slugify_game_id(rule.game),
+                    display_name=title,
+                    context_name=rule.game,
+                )
+        return GameIdentity(
+            game_id=slugify_game_id(process_name),
+            display_name=title,
+            context_name=title,
+        )
 
 
 @dataclass(slots=True)
@@ -586,6 +615,51 @@ class ObservationLog:
             )
         )
 
+    def append_scene_fingerprint(
+        self,
+        *,
+        sequence: int,
+        frame_ts: float,
+        fingerprint: str,
+        cluster_id: int,
+        distance: int,
+        is_new_cluster: bool,
+        switched_from: int | None,
+        stable: bool,
+        card_candidate_scene_id: str | None,
+        card_candidate_distance: int | None,
+        elapsed_ms: float,
+    ) -> str:
+        observed_at = self._relative(frame_ts)
+        root_capture_id = f"f{sequence}"
+        evidence_id = self._evidence.new_evidence_id(root_capture_id, "scene")
+        self._append_event(
+            EvidenceEvent(
+                evidence_id=evidence_id,
+                source="scene",
+                kind="scene_fingerprint",
+                root_capture_id=root_capture_id,
+                observed_at=observed_at,
+                learned_at=observed_at,
+                scope=None,
+                payload=SceneFingerprintPayload(
+                    hash=fingerprint,
+                    cluster_id=cluster_id,
+                    distance=distance,
+                    is_new_cluster=is_new_cluster,
+                    switched_from=switched_from,
+                    stable=stable,
+                    card_candidate_scene_id=card_candidate_scene_id,
+                    card_candidate_distance=card_candidate_distance,
+                    elapsed_ms=elapsed_ms,
+                ),
+                derived_from=[],
+                context_version=None,
+                outcome="ok",
+            )
+        )
+        return evidence_id
+
     def close(self) -> None:
         self._write_session(datetime.now(timezone.utc))
         self._markdown.close()
@@ -705,6 +779,12 @@ class GenericVisionAdapter:
         self._ocr_waiters: set[asyncio.Task[None]] = set()
         self._ocr_cache = TextLineCache()
         self._ocr_priority_attempted = False
+        self._scene_repository: GameCardRepository | None = None
+        self._scene_session: GameCardSession | None = None
+        self._scene_clusterer: SceneClusterer | None = None
+        self._scene_game_id: str | None = None
+        self._scene_origin_monotonic: float | None = None
+        self._scene_last_flush_at = 0.0
 
     async def start(self, core: CoreServices) -> None:
         if self._task is not None:
@@ -766,6 +846,7 @@ class GenericVisionAdapter:
             "input_price_per_million_usd": self._input_price,
             "output_price_per_million_usd": self._output_price,
             "ocr": self._settings.ocr.model_dump(),
+            "scene": self._settings.scene.model_dump(),
         }
         if extra_parameters:
             parameters.update(extra_parameters)
@@ -775,6 +856,7 @@ class GenericVisionAdapter:
             exact_directory=exact_directory,
         )
         self._initialize_ocr()
+        self._initialize_scene()
 
     def start_replay(
         self,
@@ -840,6 +922,7 @@ class GenericVisionAdapter:
             close_client()
         self._client = None
         if self._log is not None:
+            self._close_scene_session()
             self._log.close()
             self._log = None
 
@@ -877,6 +960,7 @@ class GenericVisionAdapter:
             close_client()
         self._client = None
         if self._log is not None:
+            self._close_scene_session()
             self._log.close()
             self._log = None
 
@@ -926,10 +1010,11 @@ class GenericVisionAdapter:
 
         ownership_transferred = False
         try:
-            game = self._title_map.identify(
+            identity = self._title_map.identify_identity(
                 frame.metadata.window_title,
                 frame.metadata.process_name,
             )
+            game = identity.context_name
             self._current_game = game
             observation = self._selector.observe(
                 frame.bitmap,
@@ -946,6 +1031,7 @@ class GenericVisionAdapter:
                     global_change=observation.comparisons.vs_baseline.mean_amplitude * 100.0,
                     region_intensity=observation.decision.confirmed_region_intensity * 100.0,
                     forced=observation.decision.forced,
+                    game_identity=identity,
                 )
                 ownership_transferred = True
         finally:
@@ -966,6 +1052,7 @@ class GenericVisionAdapter:
         region_intensity: float,
         forced: bool,
         wait_for_capacity: bool = False,
+        game_identity: GameIdentity | None = None,
     ) -> None:
         sequence = self._next_sequence
         self._next_sequence += 1
@@ -1019,6 +1106,12 @@ class GenericVisionAdapter:
             scope=scope,
         )
         self._schedule_ocr(pending)
+        identity = game_identity or GameIdentity(
+            game_id=slugify_game_id(game),
+            display_name=game,
+            context_name=game,
+        )
+        self._record_scene_fingerprint(pending, identity)
         while wait_for_capacity and len(self._inflight) >= self._settings.max_inflight:
             done, _ = await asyncio.wait(
                 tuple(self._inflight),
@@ -1038,6 +1131,103 @@ class GenericVisionAdapter:
                 self._complete_record(self._dropped_record(replaced, "superseded"))
             return
         self._launch_frame(pending)
+
+    def _initialize_scene(self) -> None:
+        self._scene_session = None
+        self._scene_clusterer = None
+        self._scene_game_id = None
+        self._scene_origin_monotonic = None
+        self._scene_last_flush_at = 0.0
+        settings = self._settings.scene
+        if not settings.enabled:
+            self._scene_repository = None
+            return
+        memory_root = Path(settings.memory_dir)
+        if not memory_root.is_absolute():
+            memory_root = BACKEND_DIRECTORY / memory_root
+        self._scene_repository = GameCardRepository(memory_root)
+
+    def _record_scene_fingerprint(
+        self,
+        pending: PendingFrame,
+        identity: GameIdentity,
+    ) -> None:
+        settings = self._settings.scene
+        if not settings.enabled:
+            return
+        assert self._scene_repository is not None
+        if self._scene_game_id != identity.game_id:
+            self._close_scene_session()
+            card = self._scene_repository.load_or_create(
+                identity.game_id,
+                identity.display_name,
+                pending.frame.metadata.captured_at,
+            )
+            self._scene_session = GameCardSession(
+                self._scene_repository,
+                card,
+                pending.frame.metadata.captured_at,
+                card_min_visits=settings.card_min_visits,
+                card_min_span_seconds=settings.card_min_span_seconds,
+            )
+            self._scene_clusterer = SceneClusterer(
+                settings.hamming_threshold,
+                settings.stable_min_frames,
+                self._scene_repository.card_references(card),
+            )
+            self._scene_game_id = identity.game_id
+            self._scene_origin_monotonic = pending.frame.metadata.monotonic_seconds
+            self._scene_last_flush_at = 0.0
+        assert self._scene_session is not None
+        assert self._scene_clusterer is not None
+        assert self._scene_origin_monotonic is not None
+        relative_seconds = max(
+            0.0,
+            pending.frame.metadata.monotonic_seconds - self._scene_origin_monotonic,
+        )
+        started = self._clock()
+        fingerprint = perceptual_hash(
+            pending.frame.bitmap,
+            settings.hash_kind,
+            settings.hash_bits,
+        )
+        match = self._scene_clusterer.observe(fingerprint, relative_seconds)
+        elapsed_ms = max(0.0, (self._clock() - started) * 1000.0)
+        candidate = match.card_candidate
+        assert self._log is not None
+        evidence_id = self._log.append_scene_fingerprint(
+            sequence=pending.seq,
+            frame_ts=pending.frame.metadata.monotonic_seconds,
+            fingerprint=fingerprint,
+            cluster_id=match.cluster_id,
+            distance=match.distance,
+            is_new_cluster=match.is_new_cluster,
+            switched_from=match.switched_from,
+            stable=match.stable,
+            card_candidate_scene_id=(candidate.scene_id if candidate else None),
+            card_candidate_distance=(candidate.distance if candidate else None),
+            elapsed_ms=elapsed_ms,
+        )
+        self._scene_clusterer.record_evidence(match.cluster_id, evidence_id)
+        if relative_seconds - self._scene_last_flush_at >= settings.card_flush_seconds:
+            self._flush_scene_session()
+            self._scene_last_flush_at = relative_seconds
+
+    def _flush_scene_session(self) -> None:
+        if self._scene_session is None or self._scene_clusterer is None:
+            return
+        try:
+            self._scene_session.flush(self._scene_clusterer.clusters)
+        except (OSError, ValueError):
+            logger.exception("游戏卡写入失败；保留内存状态并继续观察")
+
+    def _close_scene_session(self) -> None:
+        self._flush_scene_session()
+        self._scene_session = None
+        self._scene_clusterer = None
+        self._scene_game_id = None
+        self._scene_origin_monotonic = None
+        self._scene_last_flush_at = 0.0
 
     def _initialize_ocr(self) -> None:
         settings = self._settings.ocr

@@ -74,11 +74,24 @@ det_limit_side_len = 1280
 language = "zh-Hans-CN"
 model_dir = "models/ocr"
 
+[games.generic.scene]
+enabled = true
+# 四段完整 1080p 录像无监督扫描的临时值；规则冲突与逐行推导见 eval-reports/m5-b-t2/report.md。
+hash_kind = "phash"
+hash_bits = 64
+hamming_threshold = 25
+stable_min_frames = 7
+# 以下三个值是 TD-28 待实测占位。
+card_min_visits = 3
+card_min_span_seconds = 30
+card_flush_seconds = 120
+memory_dir = "memory"
+
 # 在线模型默认关闭。密钥只从 OPENROUTER_API_KEY 环境变量读取。
 [llm]
-enabled = false
-model = ""
-provider = ""
+enabled = true
+model = "qwen/qwen3.5-122b-a10b"
+provider = "Alibaba"
 temperature = 0.9
 timeout_seconds = 3.0
 max_tokens = 256

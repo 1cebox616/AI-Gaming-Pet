@@ -41,6 +41,7 @@ from pet.core.config import (
     GenericVisionConfig,
     LlmConfig,
     OcrConfig,
+    SceneConfig,
     load_config,
     resolve_llm_profile,
 )
@@ -287,6 +288,7 @@ def _adapter_configuration(
     max_inflight: int,
     region_focus_max: float,
     ocr_enabled: bool = True,
+    scene_memory_dir: Path | None = None,
 ) -> AdapterConfig:
     return AdapterConfig(
         generic=GenericVisionConfig(
@@ -297,6 +299,11 @@ def _adapter_configuration(
             region_focus_max=region_focus_max,
             llm_profile=profile,
             ocr=OcrConfig(enabled=ocr_enabled),
+            scene=(
+                SceneConfig(memory_dir=str(scene_memory_dir))
+                if scene_memory_dir is not None
+                else SceneConfig(enabled=False)
+            ),
         )
     )
 
@@ -321,6 +328,7 @@ async def _run_prepared(
             timeout=timeout,
             max_inflight=max_inflight,
             region_focus_max=region_focus_max,
+            scene_memory_dir=output_directory / "memory",
         ),
         llm_configuration,
         capture_backend_factory=lambda: (_ for _ in ()).throw(

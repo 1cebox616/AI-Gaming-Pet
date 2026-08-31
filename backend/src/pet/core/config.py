@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
 DEFAULT_LLM_API_KEY_ENV = "OPENROUTER_API_KEY"
@@ -167,6 +167,29 @@ class OcrConfig(BaseModel):
     model_dir: str = "models/ocr"
 
 
+class SceneConfig(BaseModel):
+    """Full-frame scene fingerprint and conservative game-card persistence."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    enabled: bool = True
+    hash_kind: Literal["ahash", "dhash", "phash"] = "phash"
+    hash_bits: Literal[64, 256] = 64
+    hamming_threshold: int = Field(default=25, ge=0)
+    stable_min_frames: int = Field(default=7, ge=1)
+    # These three promotion/flush values remain measured-data placeholders (TD-28).
+    card_min_visits: int = Field(default=3, ge=1)
+    card_min_span_seconds: float = Field(default=30.0, ge=0)
+    card_flush_seconds: float = Field(default=120.0, gt=0)
+    memory_dir: str = "memory"
+
+    @model_validator(mode="after")
+    def validate_hamming_width(self) -> SceneConfig:
+        if self.hamming_threshold > self.hash_bits:
+            raise ValueError("scene hamming_threshold cannot exceed hash_bits")
+        return self
+
+
 class GenericVisionConfig(BaseModel):
     """Disabled-by-default settings for the generic visual adapter."""
 
@@ -187,6 +210,7 @@ class GenericVisionConfig(BaseModel):
     llm_profile: str = "vision_fast"
     cost_warn_per_hour: float = Field(default=1.0, gt=0)
     ocr: OcrConfig = Field(default_factory=OcrConfig)
+    scene: SceneConfig = Field(default_factory=SceneConfig)
 
 
 GENERIC_VISION_FIELDS = frozenset(GenericVisionConfig.model_fields)
@@ -246,6 +270,7 @@ ConfigSection = TypeVar(
     PolicyConfig,
     PersonalityConfig,
     GenericVisionConfig,
+    SceneConfig,
     LlmProfileConfig,
     LlmConfig,
 )

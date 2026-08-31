@@ -16,7 +16,14 @@ from pydantic import ValidationError
 import pytest
 
 from pet.core.belief import EvidenceStore, OcrFramePayload, TextObservedPayload
-from pet.core.config import AdapterConfig, GenericVisionConfig, LlmConfig, LlmProfileConfig, OcrConfig
+from pet.core.config import (
+    AdapterConfig,
+    GenericVisionConfig,
+    LlmConfig,
+    LlmProfileConfig,
+    OcrConfig,
+    SceneConfig,
+)
 from pet.core.llm import LlmResult, LlmUsage
 from pet.core.ocr_probe import OcrFrameResult, OcrLine
 from pet.core.ocr_rapid import (
@@ -130,6 +137,7 @@ def _adapter(tmp_path: Path, engine: FakeEngine, *, interval: float = 0.03) -> G
             input_context=False,
             observation_log_dir=str(tmp_path),
             ocr=OcrConfig(enabled=True),
+            scene=SceneConfig(enabled=False),
         )
     )
     llm = LlmConfig(
