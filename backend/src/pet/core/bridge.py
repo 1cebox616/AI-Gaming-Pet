@@ -46,6 +46,10 @@ class LlmRuntimeStateMessage(BaseModel):
     consecutive_failures: int
     call_count: int
     cost_usd: float | None
+    rate_limit_count: int = 0
+    cooldown_seconds: float = 0.0
+    cooldown_drop_count: int = 0
+    last_error: dict[str, object] | None = None
 
 
 class PetBridge:

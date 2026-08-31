@@ -33,7 +33,12 @@ from pet.core.config import (
     OcrConfig,
     SceneConfig,
 )
-from pet.core.llm import LlmResult, LlmUsage, image_upload_metadata
+from pet.core.llm import (
+    LlmDispatchStats,
+    LlmResult,
+    LlmUsage,
+    image_upload_metadata,
+)
 from pet.core.input_telemetry import ActionInputEvent, ActionInputTimeline
 import pet.games.generic.adapter as generic_adapter_module
 from pet.games.generic.adapter import (
@@ -1531,6 +1536,7 @@ def test_b_t1_old_fake_client_scenario_covers_markdown_contract(
         (None, "ok"),
         ("timeout", "dropped"),
         ("error:HTTP 429 rate limited", "dropped"),
+        ("cooldown:vision_fast", "dropped"),
         ("error:stopped", "dropped"),
         ("superseded", "superseded"),
         ("error:模型返回空观察", "failed"),
@@ -1539,3 +1545,56 @@ def test_b_t1_old_fake_client_scenario_covers_markdown_contract(
 )
 def test_fast_outcome_mapping(drop_reason: str | None, outcome: str) -> None:
     assert _fast_outcome(drop_reason) == outcome
+
+
+def test_observation_session_persists_cooldown_stats_and_error_metadata(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "rate-limit-session"
+    log = ObservationLog(directory, {"llm_profile": "vision_fast"}, exact_directory=True)
+    log.update_dispatch_statistics(
+        (
+            LlmDispatchStats(
+                profile_name="vision_fast",
+                rate_limit_count=2,
+                cooldown_seconds=7.5,
+                cooldown_drop_count=3,
+                cooling_down=False,
+                cooldown_remaining_seconds=0.0,
+            ),
+        )
+    )
+    log.record_llm_error(
+        {
+            "status_code": 429,
+            "error_type": "rate_limit_error",
+            "provider_code": "ProviderQuotaExceeded",
+            "retry_after": "5",
+            "retry_after_seconds": 5.0,
+            "request_id": "req-42",
+            "request_id_header": "x-request-id",
+            "provider": "Alibaba",
+        },
+        phase="fast",
+    )
+    log.close()
+
+    session = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+    assert session["rate_limit_count"] == 2
+    assert session["cooldown_seconds"] == pytest.approx(7.5)
+    assert session["cooldown_drop_count"] == 3
+    assert session["llm_dispatch_profiles"]["vision_fast"]["rate_limit_count"] == 2
+    assert len(session["llm_errors"]) == 1
+    recorded_error = session["llm_errors"][0]
+    assert isinstance(recorded_error.pop("occurred_at"), str)
+    assert recorded_error == {
+        "phase": "fast",
+        "status_code": 429,
+        "error_type": "rate_limit_error",
+        "provider_code": "ProviderQuotaExceeded",
+        "retry_after": "5",
+        "retry_after_seconds": 5.0,
+        "request_id": "req-42",
+        "request_id_header": "x-request-id",
+        "provider": "Alibaba",
+    }

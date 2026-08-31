@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from typing import Literal
 
 from pet.core.config import LlmConfig
-from pet.core.llm import LlmImage, LlmResult, LlmVisionClientProtocol
+from pet.core.llm import (
+    LlmDispatchStats,
+    LlmImage,
+    LlmResult,
+    LlmVisionClientProtocol,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +73,10 @@ class DeepVisionReader:
         close_client = getattr(self._client, "close", None)
         if callable(close_client):
             close_client()
+
+    def dispatch_stats(self) -> LlmDispatchStats | None:
+        snapshot = getattr(self._client, "dispatch_stats", None)
+        return snapshot() if callable(snapshot) else None
 
     def _price(self, result: LlmResult) -> float:
         if result.usage.cost_usd is not None:

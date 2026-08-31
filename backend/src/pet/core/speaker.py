@@ -12,7 +12,14 @@ from pet.core.bridge import LlmRuntimeStateMessage, PetBridge
 from pet.core.config import LlmConfig, resolve_llm_profile
 from pet.core.gate import check_hard_violations
 from pet.core.lines import Utterance
-from pet.core.llm import LlmClientProtocol, LlmError, LlmResult, OpenRouterClient
+from pet.core.llm import (
+    LlmClientProtocol,
+    LlmCooldownError,
+    LlmDispatchStats,
+    LlmError,
+    LlmResult,
+    OpenRouterClient,
+)
 from pet.core.prompt import load_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -52,15 +59,21 @@ class OnlineCommentaryRuntime:
         self._cost_available = True
         self._mode = "template"
         self._reason = _configuration_reason(configuration)
+        self._last_error: dict[str, object] | None = None
 
     def state(self) -> LlmRuntimeStateMessage:
         """Return a transport-safe snapshot for the existing state message."""
+        dispatch = self._dispatch_stats()
         return LlmRuntimeStateMessage(
             mode=self._mode,  # type: ignore[arg-type]
             reason=self._reason,
             consecutive_failures=self._consecutive_failures,
             call_count=self._call_count,
             cost_usd=self._cost_usd if self._cost_available else None,
+            rate_limit_count=sum(item.rate_limit_count for item in dispatch),
+            cooldown_seconds=sum(item.cooldown_seconds for item in dispatch),
+            cooldown_drop_count=sum(item.cooldown_drop_count for item in dispatch),
+            last_error=self._last_error,
         )
 
     async def start(self) -> None:
@@ -133,7 +146,7 @@ class OnlineCommentaryRuntime:
         try:
             client = self._client_for(request.speech.llm_profile, configuration)
         except LlmError as error:
-            await self._failed(request, str(error))
+            await self._failed(request, error)
             return
         self._call_count += 1
         try:
@@ -150,7 +163,16 @@ class OnlineCommentaryRuntime:
                 reasoning_effort="none",
             )
             text = _validated_text(result, request.speech)
-        except (LlmError, ValueError) as error:
+        except LlmCooldownError as error:
+            self._call_count -= 1
+            if request.generation == self._generation:
+                await self._cooldown_dropped(request, error)
+            return
+        except LlmError as error:
+            if request.generation == self._generation:
+                await self._failed(request, error)
+            return
+        except ValueError as error:
             if request.generation == self._generation:
                 await self._failed(request, str(error))
             return
@@ -200,14 +222,43 @@ class OnlineCommentaryRuntime:
             timeout_seconds=configuration.timeout_seconds,
         )
 
-    async def _failed(self, request: _Request, reason: str) -> None:
+    async def _failed(self, request: _Request, reason: str | LlmError) -> None:
+        detail = reason.diagnostic() if isinstance(reason, LlmError) else reason
+        if isinstance(reason, LlmError):
+            self._last_error = reason.metadata()
         self._consecutive_failures += 1
         if self._consecutive_failures >= MAX_CONSECUTIVE_LLM_FAILURES:
             self._mode = "template"
             self._reason = "连续失败"
-        logger.warning("live LLM output discarded; using template: %s", reason)
+        logger.warning("live LLM output discarded; using template: %s", detail)
         await self._fallback(request.speech)
         await self._bridge.publish_runtime_state()
+
+    async def _cooldown_dropped(
+        self,
+        request: _Request,
+        error: LlmCooldownError,
+    ) -> None:
+        self._last_error = error.metadata()
+        logger.info(
+            "live LLM request discarded by profile cooldown; using template: %s",
+            error.diagnostic(),
+        )
+        await self._fallback(request.speech)
+        await self._bridge.publish_runtime_state()
+
+    def _dispatch_stats(self) -> tuple[LlmDispatchStats, ...]:
+        clients = [self._client, *self._profile_clients.values()]
+        snapshots: list[LlmDispatchStats] = []
+        seen: set[int] = set()
+        for client in clients:
+            if client is None or id(client) in seen:
+                continue
+            seen.add(id(client))
+            snapshot = getattr(client, "dispatch_stats", None)
+            if callable(snapshot):
+                snapshots.append(snapshot())
+        return tuple(snapshots)
 
     async def _fallback(self, request: SpeechRequest) -> None:
         if request.fallback_text is None:

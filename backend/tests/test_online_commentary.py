@@ -10,7 +10,7 @@ import pytest
 from pet.core.adapter_api import SpeechRequest
 from pet.core.config import LlmConfig, LlmProfileConfig
 from pet.core.lines import Utterance
-from pet.core.llm import LlmError, LlmResult, LlmUsage
+from pet.core.llm import LlmCooldownError, LlmError, LlmResult, LlmUsage
 from pet.core.speaker import OnlineCommentaryRuntime, _Request
 
 
@@ -186,6 +186,36 @@ def test_three_failures_hold_template_mode_until_next_match() -> None:
         await runtime.reset_match()
         assert runtime.state().mode == "ai"
         assert runtime.state().consecutive_failures == 0
+        await runtime.shutdown()
+
+    asyncio.run(exercise())
+
+
+def test_cooldown_drop_uses_template_without_counting_a_call_or_failure() -> None:
+    async def exercise() -> None:
+        bridge = _Bridge()
+        client = _Client(
+            LlmCooldownError(
+                "profile cooling down",
+                cooldown_drop=True,
+                cooldown_remaining_seconds=3.0,
+                request_id="req-trigger",
+            )
+        )
+        runtime = OnlineCommentaryRuntime(
+            _config(), bridge, client_factory=lambda _: client  # type: ignore[arg-type]
+        )
+        await runtime.start()
+        await runtime._complete(_request())
+
+        state = runtime.state()
+        assert bridge.utterances[-1].id == "template-event-1"
+        assert state.call_count == 0
+        assert state.consecutive_failures == 0
+        assert state.mode == "ai"
+        assert state.last_error is not None
+        assert state.last_error["cooldown_drop"] is True
+        assert state.last_error["request_id"] == "req-trigger"
         await runtime.shutdown()
 
     asyncio.run(exercise())

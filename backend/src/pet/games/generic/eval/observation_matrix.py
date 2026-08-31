@@ -197,7 +197,14 @@ def _summary(directory: Path) -> dict[str, object]:
         "speculation_count": sum(
             _extract_speculation(str(row.get("text", ""))) is not None for row in successful
         ),
-        "rate_limited": sum(count for reason, count in dropped.items() if "429" in reason),
+        "rate_limited": int(
+            session.get(
+                "rate_limit_count",
+                sum(count for reason, count in dropped.items() if "429" in reason),
+            )
+        ),
+        "cooldown_seconds": float(session.get("cooldown_seconds", 0.0)),
+        "cooldown_dropped": int(session.get("cooldown_drop_count", 0)),
         "timeouts": dropped.get("timeout", 0),
         "truncated": int(session.get("truncated_count", 0)),
     }
@@ -217,7 +224,7 @@ def _write_matrix_review(root: Path, groups: Sequence[dict[str, object]]) -> Non
         "所有列使用同一提示词、检测器与并发参数；档位均锁定单一上游。表格只给数据，不评价模型优劣。",
         "旧‘仅’列只判前缀；严格合规要求完整【局部】正文为 4–6 个汉字且以‘仅’开头。",
         "",
-        "| 档位 | 角色 | 宽度 | 成功/尝试 | 花费 | 输入token均值 | TTFT中位/P90 ms | 总时延中位/P90 ms | 数字局部 | 严格仅/展开 | 推测 | 归因/回溯/指标复述 | 429/超时 |",
+        "| 档位 | 角色 | 宽度 | 成功/尝试 | 花费 | 输入token均值 | TTFT中位/P90 ms | 总时延中位/P90 ms | 数字局部 | 严格仅/展开 | 推测 | 归因/回溯/指标复述 | 限流/冷却秒/冷却丢弃/超时 |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for group in groups:
@@ -232,7 +239,8 @@ def _write_matrix_review(root: Path, groups: Sequence[dict[str, object]]) -> Non
             f"{stats['numeric_local']} ({_format_optional(stats['numeric_local_rate'], percentage=True)}) | "
             f"{stats['only_compliant']}/{stats['only_expanded']} | {stats['speculation_count']} | "
             f"{stats['input_attribution_violations']}/{stats['retrospective_violations']}/{stats['metric_echoes']} | "
-            f"{stats['rate_limited']}/{stats['timeouts']} |"
+            f"{stats['rate_limited']}/{float(stats['cooldown_seconds']):.3f}/"
+            f"{stats['cooldown_dropped']}/{stats['timeouts']} |"
         )
     lines.extend(["", "## 实时目录与锁定证明", ""])
     run = json.loads((root / "run.json").read_text(encoding="utf-8"))

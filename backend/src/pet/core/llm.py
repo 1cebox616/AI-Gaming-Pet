@@ -6,11 +6,15 @@ import argparse
 import base64
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from io import BytesIO
 import json
+import logging
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlparse
@@ -20,6 +24,14 @@ from PIL import Image
 
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Conservative placeholders, not measured provider limits. A valid
+# Retry-After always wins; headerless 429s back off from one second to a
+# capped minute until a successful response resets the exponent.
+RATE_LIMIT_BACKOFF_BASE_SECONDS = 1.0
+RATE_LIMIT_BACKOFF_MAX_SECONDS = 60.0
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +151,18 @@ class LlmProbeResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class LlmDispatchStats:
+    """One profile's rate-limit and cooldown accounting snapshot."""
+
+    profile_name: str
+    rate_limit_count: int
+    cooldown_seconds: float
+    cooldown_drop_count: int
+    cooling_down: bool
+    cooldown_remaining_seconds: float
+
+
 class LlmError(Exception):
     """One failed call, carrying enough context to appear in a report."""
 
@@ -151,6 +175,16 @@ class LlmError(Exception):
         partial_event_text: str | None = None,
         event_latency_seconds: float | None = None,
         provider: str | None = None,
+        profile_name: str | None = None,
+        error_type: str | None = None,
+        provider_code: str | int | None = None,
+        retry_after: str | None = None,
+        retry_after_seconds: float | None = None,
+        request_id: str | None = None,
+        request_id_header: str | None = None,
+        occurred_at: str | None = None,
+        cooldown_drop: bool = False,
+        cooldown_remaining_seconds: float | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -158,10 +192,200 @@ class LlmError(Exception):
         self.partial_event_text = partial_event_text
         self.event_latency_seconds = event_latency_seconds
         self.provider = provider
+        self.profile_name = profile_name
+        self.error_type = error_type
+        self.provider_code = provider_code
+        self.retry_after = retry_after
+        self.retry_after_seconds = retry_after_seconds
+        self.request_id = request_id
+        self.request_id_header = request_id_header
+        self.occurred_at = occurred_at or datetime.now(timezone.utc).isoformat()
+        self.cooldown_drop = cooldown_drop
+        self.cooldown_remaining_seconds = cooldown_remaining_seconds
+
+    def metadata(self) -> dict[str, object]:
+        """Return report-safe structured failure context without the prompt."""
+        return {
+            "message": super().__str__(),
+            "status_code": self.status_code,
+            "error_type": self.error_type,
+            "provider_code": self.provider_code,
+            "retry_after": self.retry_after,
+            "retry_after_seconds": self.retry_after_seconds,
+            "request_id": self.request_id,
+            "request_id_header": self.request_id_header,
+            "occurred_at": self.occurred_at,
+            "provider": self.provider,
+            "profile_name": self.profile_name,
+            "latency_seconds": self.latency_seconds,
+            "cooldown_drop": self.cooldown_drop,
+            "cooldown_remaining_seconds": self.cooldown_remaining_seconds,
+        }
+
+    def diagnostic(self) -> str:
+        """Render metadata for logs and human-readable evaluation reports."""
+        fields = [
+            ("status", self.status_code),
+            ("error_type", self.error_type),
+            ("provider_code", self.provider_code),
+            ("retry_after", self.retry_after),
+            ("retry_after_seconds", self.retry_after_seconds),
+            ("request_id", self.request_id),
+            ("request_id_header", self.request_id_header),
+            ("occurred_at", self.occurred_at),
+            ("provider", self.provider),
+            ("profile_name", self.profile_name),
+            ("cooldown_drop", True if self.cooldown_drop else None),
+            ("cooldown_remaining_seconds", self.cooldown_remaining_seconds),
+        ]
+        suffix = " ".join(
+            f"{key}={value}" for key, value in fields if value is not None
+        )
+        return f"{super().__str__()} [{suffix}]" if suffix else super().__str__()
+
+
+class LlmCooldownError(LlmError):
+    """A request discarded locally before any HTTP dispatch."""
 
 
 class LlmStreamingUnsupported(LlmError):
     """The selected upstream explicitly cannot return this request as SSE."""
+
+
+class _RateLimitCooldown:
+    """Thread-safe, per-client dispatch gate for one configured profile."""
+
+    def __init__(
+        self,
+        profile_name: str,
+        *,
+        clock: Callable[[], float],
+        backoff_base_seconds: float,
+        backoff_max_seconds: float,
+    ) -> None:
+        if backoff_base_seconds <= 0 or backoff_max_seconds <= 0:
+            raise ValueError("rate-limit backoff bounds must be positive")
+        if backoff_max_seconds < backoff_base_seconds:
+            raise ValueError("rate-limit backoff cap must not be below its base")
+        self._profile_name = profile_name
+        self._clock = clock
+        self._base = backoff_base_seconds
+        self._cap = backoff_max_seconds
+        self._lock = threading.Lock()
+        self._rate_limit_count = 0
+        self._cooldown_drop_count = 0
+        self._cooldown_seconds_total = 0.0
+        self._active_started_at: float | None = None
+        self._cooldown_until = 0.0
+        self._consecutive_rate_limits = 0
+        self._last_limit_error: LlmError | None = None
+
+    def before_dispatch(self) -> None:
+        """Reject a request locally when this profile is still cooling down."""
+        now = self._clock()
+        with self._lock:
+            self._finish_expired_locked(now)
+            if self._active_started_at is None:
+                return
+            remaining = max(0.0, self._cooldown_until - now)
+            self._cooldown_drop_count += 1
+            trigger = self._last_limit_error
+        logger.debug(
+            "模型档位 %s 仍在限流冷却，直接丢弃请求；remaining=%.3fs",
+            self._profile_name,
+            remaining,
+        )
+        raise LlmCooldownError(
+            f"模型档位 {self._profile_name} 限流冷却中，派发前丢弃请求",
+            profile_name=self._profile_name,
+            provider=trigger.provider if trigger is not None else None,
+            error_type=trigger.error_type if trigger is not None else None,
+            provider_code=trigger.provider_code if trigger is not None else None,
+            retry_after=trigger.retry_after if trigger is not None else None,
+            retry_after_seconds=(
+                trigger.retry_after_seconds if trigger is not None else None
+            ),
+            request_id=trigger.request_id if trigger is not None else None,
+            request_id_header=(
+                trigger.request_id_header if trigger is not None else None
+            ),
+            cooldown_drop=True,
+            cooldown_remaining_seconds=remaining,
+        )
+
+    def enter(self, error: LlmError) -> None:
+        """Record one 429 and open or extend the profile cooldown interval."""
+        now = self._clock()
+        with self._lock:
+            self._finish_expired_locked(now)
+            self._rate_limit_count += 1
+            if error.retry_after_seconds is not None:
+                duration = max(0.0, error.retry_after_seconds)
+                source = "Retry-After"
+            else:
+                duration = min(
+                    self._base * (2 ** min(self._consecutive_rate_limits, 30)),
+                    self._cap,
+                )
+                source = "exponential-placeholder"
+            self._consecutive_rate_limits += 1
+            was_active = self._active_started_at is not None
+            if not was_active:
+                self._active_started_at = now
+                self._cooldown_until = now + duration
+                self._cooldown_seconds_total += duration
+            else:
+                previous_until = self._cooldown_until
+                self._cooldown_until = max(previous_until, now + duration)
+                self._cooldown_seconds_total += max(
+                    0.0, self._cooldown_until - previous_until
+                )
+            self._last_limit_error = error
+            until = self._cooldown_until
+        logger.warning(
+            "模型档位 %s 收到限流，%s冷却 %.3fs 至 monotonic=%.3f；依据=%s；%s",
+            self._profile_name,
+            "延长" if was_active else "进入",
+            duration,
+            until,
+            source,
+            error.diagnostic(),
+        )
+
+    def record_success(self) -> None:
+        """Reset only the headerless backoff exponent after a real success."""
+        now = self._clock()
+        with self._lock:
+            self._finish_expired_locked(now)
+            self._consecutive_rate_limits = 0
+
+    def snapshot(self) -> LlmDispatchStats:
+        now = self._clock()
+        with self._lock:
+            self._finish_expired_locked(now)
+            active = self._active_started_at is not None
+            remaining = max(0.0, self._cooldown_until - now) if active else 0.0
+            return LlmDispatchStats(
+                profile_name=self._profile_name,
+                rate_limit_count=self._rate_limit_count,
+                cooldown_seconds=self._cooldown_seconds_total,
+                cooldown_drop_count=self._cooldown_drop_count,
+                cooling_down=active,
+                cooldown_remaining_seconds=remaining,
+            )
+
+    def _finish_expired_locked(self, now: float) -> None:
+        if self._active_started_at is None or now < self._cooldown_until:
+            return
+        elapsed = max(0.0, self._cooldown_until - self._active_started_at)
+        self._active_started_at = None
+        self._cooldown_until = 0.0
+        logger.info(
+            "模型档位 %s 限流冷却结束；本段 %.3fs，累计 %.3fs，自然恢复派发",
+            self._profile_name,
+            elapsed,
+            self._cooldown_seconds_total,
+        )
 
 
 class LlmClientProtocol(Protocol):
@@ -252,10 +476,13 @@ class OpenRouterClient:
         self,
         api_key: str,
         *,
+        profile_name: str = "default",
         base_url: str | None = None,
         timeout_seconds: float = 30.0,
         transport: httpx.BaseTransport | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        rate_limit_backoff_base_seconds: float = RATE_LIMIT_BACKOFF_BASE_SECONDS,
+        rate_limit_backoff_max_seconds: float = RATE_LIMIT_BACKOFF_MAX_SECONDS,
     ) -> None:
         if not api_key.strip():
             raise LlmError("模型端点 API 密钥为空")
@@ -276,6 +503,13 @@ class OpenRouterClient:
             transport=transport,
         )
         self._clock = clock
+        self._profile_name = profile_name
+        self._cooldown = _RateLimitCooldown(
+            profile_name,
+            clock=clock,
+            backoff_base_seconds=rate_limit_backoff_base_seconds,
+            backoff_max_seconds=rate_limit_backoff_max_seconds,
+        )
 
     @classmethod
     def from_env(
@@ -293,6 +527,7 @@ class OpenRouterClient:
             )
         return cls(
             api_key,
+            profile_name="default",
             base_url=base_url,
             timeout_seconds=timeout_seconds,
             transport=transport,
@@ -317,6 +552,7 @@ class OpenRouterClient:
             )
         return cls(
             api_key,
+            profile_name=profile_name,
             base_url=base_url,
             timeout_seconds=timeout_seconds,
             transport=transport,
@@ -336,6 +572,7 @@ class OpenRouterClient:
         reasoning_enabled: bool | None = None,
     ) -> LlmResult:
         """Send one non-streaming chat completion and never retry failures."""
+        self._cooldown.before_dispatch()
         return self._complete_messages(
             model=model,
             provider=provider,
@@ -445,6 +682,7 @@ class OpenRouterClient:
         reasoning_enabled: bool | None = None,
     ) -> LlmResult:
         """Send text and local images as OpenAI-compatible content blocks."""
+        self._cooldown.before_dispatch()
         messages = _image_messages(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -478,6 +716,7 @@ class OpenRouterClient:
         reasoning_enabled: bool | None = None,
     ) -> LlmResult:
         """Stream text for local images and measure the first visible token."""
+        self._cooldown.before_dispatch()
         messages = _image_messages(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -508,7 +747,7 @@ class OpenRouterClient:
         reasoning_enabled: bool | None,
     ) -> LlmResult:
         """Send one prepared non-streaming message list without retrying."""
-        started_at = time.perf_counter()
+        started_at = self._clock()
         request_body: dict[str, object] = {
             "model": model,
             "messages": messages,
@@ -539,23 +778,30 @@ class OpenRouterClient:
                 json=request_body,
             )
         except httpx.TimeoutException as error:
-            latency = time.perf_counter() - started_at
+            latency = self._clock() - started_at
             raise LlmError(
                 f"{self._endpoint_label}请求超时：{error}", latency_seconds=latency
             ) from error
         except httpx.RequestError as error:
-            latency = time.perf_counter() - started_at
+            latency = self._clock() - started_at
             raise LlmError(
                 f"{self._endpoint_label}网络请求失败：{error}", latency_seconds=latency
             ) from error
 
-        latency = time.perf_counter() - started_at
+        latency = self._clock() - started_at
         if not response.is_success:
-            raise LlmError(
-                _response_error_message(response, service_label=self._endpoint_label),
-                status_code=response.status_code,
+            error = _response_llm_error(
+                response,
+                service_label=self._endpoint_label,
                 latency_seconds=latency,
+                fallback_provider=effective_provider,
+                profile_name=self._profile_name,
             )
+            if error.status_code == 429:
+                self._cooldown.enter(error)
+            raise error
+
+        self._cooldown.record_success()
 
         try:
             payload: object = response.json()
@@ -612,16 +858,18 @@ class OpenRouterClient:
                     message = _response_error_message(
                         response, service_label=self._endpoint_label
                     )
-                    error_type = (
+                    error_class = (
                         LlmStreamingUnsupported
                         if _streaming_is_unsupported(response, message)
                         else LlmError
                     )
-                    raise error_type(
-                        message,
-                        status_code=response.status_code,
+                    raise _response_llm_error(
+                        response,
+                        service_label=self._endpoint_label,
                         latency_seconds=self._clock() - started_at,
-                        provider=effective_provider,
+                        fallback_provider=effective_provider,
+                        profile_name=self._profile_name,
+                        error_class=error_class,
                     )
                 media_type = response.headers.get("content-type", "").lower()
                 if media_type and "text/event-stream" not in media_type:
@@ -656,7 +904,9 @@ class OpenRouterClient:
                         if ttft_seconds is None:
                             ttft_seconds = self._clock() - started_at
                         text_parts.append(content)
-        except LlmError:
+        except LlmError as error:
+            if error.status_code == 429:
+                self._cooldown.enter(error)
             raise
         except httpx.TimeoutException as error:
             latency = self._clock() - started_at
@@ -673,6 +923,7 @@ class OpenRouterClient:
                 provider=actual_provider or effective_provider,
             ) from error
         latency = self._clock() - started_at
+        self._cooldown.record_success()
         if actual_model is None:
             raise LlmError(
                 f"{self._endpoint_label}流式响应缺少实际型号 ID",
@@ -710,6 +961,7 @@ class OpenRouterClient:
         if full_timeout_seconds < event_timeout_seconds:
             raise ValueError("full timeout must be at least the event timeout")
 
+        self._cooldown.before_dispatch()
         started_at = self._clock()
         if reasoning_effort not in {"none", "minimal", "low", "medium", "high"}:
             raise ValueError("unsupported reasoning effort")
@@ -747,12 +999,12 @@ class OpenRouterClient:
             ) as response:
                 if not response.is_success:
                     response.read()
-                    raise LlmError(
-                        _response_error_message(
-                            response, service_label=self._endpoint_label
-                        ),
-                        status_code=response.status_code,
+                    raise _response_llm_error(
+                        response,
+                        service_label=self._endpoint_label,
                         latency_seconds=self._clock() - started_at,
+                        fallback_provider=effective_provider,
+                        profile_name=self._profile_name,
                     )
                 for line in response.iter_lines():
                     elapsed = self._clock() - started_at
@@ -793,6 +1045,8 @@ class OpenRouterClient:
                         ):
                             event_latency = elapsed
         except LlmError as error:
+            if error.status_code == 429:
+                self._cooldown.enter(error)
             if event_latency is None or error.event_latency_seconds is not None:
                 raise
             raise LlmError(
@@ -805,6 +1059,7 @@ class OpenRouterClient:
                 ),
                 partial_event_text=_partial_event_text(text_parts),
                 event_latency_seconds=event_latency,
+                **_llm_error_metadata_kwargs(error),
             ) from error
         except httpx.TimeoutException as error:
             latency = self._clock() - started_at
@@ -826,6 +1081,7 @@ class OpenRouterClient:
             ) from error
 
         latency = self._clock() - started_at
+        self._cooldown.record_success()
         if event_latency is None:
             raise LlmError(
                 "OpenRouter 返回中缺少完整事件行",
@@ -861,6 +1117,10 @@ class OpenRouterClient:
     def close(self) -> None:
         """Release the underlying connection pool."""
         self._client.close()
+
+    def dispatch_stats(self) -> LlmDispatchStats:
+        """Return this profile's current cooldown accounting."""
+        return self._cooldown.snapshot()
 
 
 def fetch_model_endpoints(
@@ -968,13 +1228,35 @@ def _parse_stream_chunk(data: str) -> Mapping[str, object]:
         raise LlmError("OpenRouter SSE 数据不是 JSON 对象")
     error_value = payload.get("error")
     if error_value is not None:
-        if isinstance(error_value, Mapping) and isinstance(
-            error_value.get("message"), str
-        ):
-            detail = error_value["message"]
+        error_mapping = error_value if isinstance(error_value, Mapping) else None
+        detail = (
+            error_mapping.get("message")
+            if error_mapping is not None
+            and isinstance(error_mapping.get("message"), str)
+            else str(error_value)
+        )
+        error_type, provider_code, provider = _payload_error_fields(payload)
+        gateway_code = error_mapping.get("code") if error_mapping is not None else None
+        if isinstance(gateway_code, int) and not isinstance(gateway_code, bool):
+            status_code = gateway_code if 400 <= gateway_code <= 599 else None
+        elif isinstance(gateway_code, str) and gateway_code.isdecimal():
+            parsed_status = int(gateway_code)
+            status_code = parsed_status if 400 <= parsed_status <= 599 else None
         else:
-            detail = str(error_value)
-        raise LlmError(f"OpenRouter 流式请求失败：{detail}")
+            status_code = None
+        request_id = _first_nonempty_string(
+            payload.get("id"),
+            error_mapping.get("request_id") if error_mapping is not None else None,
+        )
+        raise LlmError(
+            f"OpenRouter 流式请求失败：{detail}",
+            status_code=status_code,
+            error_type=error_type,
+            provider_code=provider_code,
+            provider=provider,
+            request_id=request_id,
+            request_id_header="SSE payload id" if request_id is not None else None,
+        )
     return payload
 
 
@@ -1045,6 +1327,161 @@ def _response_error_message(
         detail = None
     suffix = f"：{detail}" if detail else ""
     return f"{service_label}请求失败（HTTP {response.status_code}）{suffix}"
+
+
+def _response_llm_error(
+    response: httpx.Response,
+    *,
+    service_label: str,
+    latency_seconds: float | None,
+    fallback_provider: str | None,
+    profile_name: str,
+    error_class: type[LlmError] = LlmError,
+) -> LlmError:
+    payload: Mapping[str, object] = {}
+    try:
+        value: object = response.json()
+        if isinstance(value, Mapping):
+            payload = value
+    except ValueError:
+        pass
+    error_type, provider_code, payload_provider = _payload_error_fields(payload)
+    retry_after = response.headers.get("retry-after")
+    request_id, request_id_header = _response_request_id(response, payload)
+    return error_class(
+        _response_error_message(response, service_label=service_label),
+        status_code=response.status_code,
+        latency_seconds=latency_seconds,
+        provider=payload_provider or fallback_provider,
+        profile_name=profile_name,
+        error_type=error_type,
+        provider_code=provider_code,
+        retry_after=retry_after,
+        retry_after_seconds=_parse_retry_after(retry_after),
+        request_id=request_id,
+        request_id_header=request_id_header,
+    )
+
+
+def _payload_error_fields(
+    payload: Mapping[str, object],
+) -> tuple[str | None, str | int | None, str | None]:
+    error_value = payload.get("error")
+    if not isinstance(error_value, Mapping):
+        return None, None, None
+    metadata_value = error_value.get("metadata")
+    metadata = metadata_value if isinstance(metadata_value, Mapping) else {}
+    nested = _nested_provider_error(metadata)
+    error_type = _first_nonempty_string(
+        nested.get("type") if nested is not None else None,
+        nested.get("error_type") if nested is not None else None,
+        error_value.get("type"),
+        error_value.get("error_type"),
+    )
+    provider_code = _first_error_code(
+        nested.get("code") if nested is not None else None,
+        nested.get("error_code") if nested is not None else None,
+        error_value.get("code"),
+        error_value.get("error_code"),
+    )
+    provider = _first_nonempty_string(
+        metadata.get("provider_name"),
+        metadata.get("provider"),
+        error_value.get("provider"),
+    )
+    return error_type, provider_code, provider
+
+
+def _nested_provider_error(metadata: Mapping[str, object]) -> Mapping[str, object] | None:
+    for key in ("provider_error", "raw_error", "raw", "error"):
+        value = metadata.get(key)
+        if isinstance(value, str):
+            try:
+                parsed: object = json.loads(value)
+            except ValueError:
+                continue
+            value = parsed
+        if not isinstance(value, Mapping):
+            continue
+        nested = value.get("error")
+        if isinstance(nested, Mapping):
+            return nested
+        return value
+    return None
+
+
+def _response_request_id(
+    response: httpx.Response,
+    payload: Mapping[str, object],
+) -> tuple[str | None, str | None]:
+    for header in (
+        "x-request-id",
+        "x-openrouter-request-id",
+        "x-generation-id",
+        "request-id",
+    ):
+        value = response.headers.get(header)
+        if value is not None and value.strip():
+            return value.strip(), header
+    error = payload.get("error")
+    error_mapping = error if isinstance(error, Mapping) else {}
+    request_id = _first_nonempty_string(
+        error_mapping.get("request_id"),
+        payload.get("request_id"),
+        payload.get("id"),
+    )
+    return request_id, "response JSON" if request_id is not None else None
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip()
+    try:
+        seconds = float(normalized)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(normalized)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        seconds = (
+            retry_at.astimezone(timezone.utc) - datetime.now(timezone.utc)
+        ).total_seconds()
+    return max(0.0, seconds)
+
+
+def _first_nonempty_string(*values: object) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _first_error_code(*values: object) -> str | int | None:
+    for value in values:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _llm_error_metadata_kwargs(error: LlmError) -> dict[str, object]:
+    return {
+        "provider": error.provider,
+        "profile_name": error.profile_name,
+        "error_type": error.error_type,
+        "provider_code": error.provider_code,
+        "retry_after": error.retry_after,
+        "retry_after_seconds": error.retry_after_seconds,
+        "request_id": error.request_id,
+        "request_id_header": error.request_id_header,
+        "occurred_at": error.occurred_at,
+        "cooldown_drop": error.cooldown_drop,
+        "cooldown_remaining_seconds": error.cooldown_remaining_seconds,
+    }
 
 
 def _optional_int(value: object) -> int | None:

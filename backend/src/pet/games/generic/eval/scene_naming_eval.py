@@ -23,7 +23,7 @@ from pet.core.gamecard import (
     GameCardSession,
     SceneCardVerification,
 )
-from pet.core.llm import OpenRouterClient
+from pet.core.llm import LlmDispatchStats, LlmError, OpenRouterClient
 from pet.core.scene_fingerprint import SceneCluster, SceneClusterer
 from pet.games.generic.adapter import WindowTitleMap
 from pet.games.generic.deep_read import DeepReadResult, DeepVisionReader
@@ -85,6 +85,7 @@ class AttemptResult:
     latency_ms: float | None
     validation_error: str | None
     error: str | None
+    error_metadata: dict[str, object] | None
     representative_paths: tuple[str, ...]
 
 
@@ -357,9 +358,11 @@ async def _name_trigger(
             latency_ms=deep_result.result.latency_seconds * 1000.0,
             validation_error=decision.validation_error,
             error=None,
+            error_metadata=None,
             representative_paths=representative_paths,
         )
     except Exception as error:
+        metadata = error.metadata() if isinstance(error, LlmError) else None
         return AttemptResult(
             cluster_id=trigger.cluster.cluster_id,
             accepted=False,
@@ -372,11 +375,17 @@ async def _name_trigger(
             action=None,
             evidence_id=None,
             model=None,
-            provider=None,
+            provider=error.provider if isinstance(error, LlmError) else None,
             cost_usd=0.0,
-            latency_ms=None,
+            latency_ms=(
+                error.latency_seconds * 1000.0
+                if isinstance(error, LlmError)
+                and error.latency_seconds is not None
+                else None
+            ),
             validation_error=None,
-            error=str(error),
+            error=(error.diagnostic() if isinstance(error, LlmError) else str(error)),
+            error_metadata=metadata,
             representative_paths=representative_paths,
         )
 
@@ -448,6 +457,7 @@ def _apply_recorded_trigger(
         latency_ms=payload.latency_ms,
         validation_error=None,
         error=None,
+        error_metadata=None,
         representative_paths=representative_paths,
     )
 
@@ -502,6 +512,7 @@ async def run_evaluation(
     output.mkdir(parents=True)
     repository = GameCardRepository(memory_root)
     results: list[RecordingResult] = []
+    dispatch_stats: tuple[LlmDispatchStats, ...] = ()
     try:
         for recording, hashes, timings, identity in zip(
             recordings, grouped_hashes, grouped_timings, identities, strict=True
@@ -600,17 +611,25 @@ async def run_evaluation(
             )
     finally:
         if reader is not None:
+            snapshot = reader.dispatch_stats()
+            dispatch_stats = (snapshot,) if snapshot is not None else ()
             reader.close()
     (output / "report.md").write_text(
-        _render_report(results), encoding="utf-8", newline="\n"
+        _render_report(results, dispatch_stats), encoding="utf-8", newline="\n"
     )
     return tuple(results)
 
 
-def _render_report(results: Sequence[RecordingResult]) -> str:
+def _render_report(
+    results: Sequence[RecordingResult],
+    dispatch_stats: Sequence[LlmDispatchStats] = (),
+) -> str:
     total_cost = sum(
         attempt.cost_usd for result in results for attempt in result.attempts
     )
+    rate_limit_count = sum(item.rate_limit_count for item in dispatch_stats)
+    cooldown_seconds = sum(item.cooldown_seconds for item in dispatch_stats)
+    cooldown_drop_count = sum(item.cooldown_drop_count for item in dispatch_stats)
     lines = [
         "# M5-B-T2-5 场景命名收尾报告",
         "",
@@ -624,6 +643,10 @@ def _render_report(results: Sequence[RecordingResult]) -> str:
         "- 场景指纹核查模型不联网、不做跨簇归并、不做 variants；模型只提议，代码检查稳定门、中文标签和长度后执行。",
         "- 上卡门为：稳定簇取得有效命名即可。驻留与访问次数只记录；label 词汇不参与上卡判断，反复出现的战斗界面也可以入卡。",
         "- 场景命名提示词措辞未修改。",
+        (
+            "- 限流响应 / 冷却累计 / 冷却丢弃："
+            f"{rate_limit_count} / {cooldown_seconds:.3f}s / {cooldown_drop_count}。"
+        ),
         "",
         "## 四张卡汇总",
         "",
@@ -681,6 +704,31 @@ def _render_report(results: Sequence[RecordingResult]) -> str:
     lines.extend(
         (
             f"| **合计** |  |  |  |  |  | **${total_cost:.6f}** |",
+            "",
+            "## 错误元数据",
+            "",
+        )
+    )
+    errors = [
+        (result.recording.label, attempt)
+        for result in results
+        for attempt in result.attempts
+        if attempt.error_metadata is not None
+    ]
+    if errors:
+        for recording_label, attempt in errors:
+            lines.append(
+                f"- {recording_label} / session:c{attempt.cluster_id}："
+                + json.dumps(
+                    attempt.error_metadata,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+    else:
+        lines.append("- 无 LLM 错误。")
+    lines.extend(
+        (
             "",
             "## 提示词全文",
             "",

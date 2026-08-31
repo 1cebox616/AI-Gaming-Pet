@@ -744,7 +744,15 @@ def _write_review(
             for row in successful
             if row.get("input_tokens") is not None
         ]
-        rate_limited = sum(count for reason, count in dropped.items() if "429" in reason)
+        rate_limited = int(
+            session.get(
+                "rate_limit_count",
+                sum(count for reason, count in dropped.items() if "429" in reason),
+            )
+        )
+        cooldown_seconds = float(session.get("cooldown_seconds", 0.0))
+        cooldown_dropped = int(session.get("cooldown_drop_count", 0))
+        llm_errors = session.get("llm_errors", [])
         timed_out = dropped.get("timeout", 0)
         truncated = int(session.get("truncated_count", 0))
         average_visible_tokens = session.get("average_visible_output_tokens")
@@ -823,6 +831,10 @@ def _write_review(
                 f"（{metrics_covered}/{len(rows)}）",
                 f"- 429 / 超时次数：{rate_limited} / {timed_out}",
                 (
+                    "- 限流响应 / 冷却累计 / 冷却丢弃："
+                    f"{rate_limited} / {cooldown_seconds:.3f}s / {cooldown_dropped}"
+                ),
+                (
                     f"- 输入归因违约：{len(attribution_violations)} / {len(successful)} "
                     f"（{len(attribution_violations) / len(successful):.2%}）"
                     if successful
@@ -871,6 +883,15 @@ def _write_review(
                 "",
             ]
         )
+        lines.extend(("### LLM 错误元数据", ""))
+        if isinstance(llm_errors, list) and llm_errors:
+            lines.extend(
+                f"- {json.dumps(item, ensure_ascii=False, sort_keys=True)}"
+                for item in llm_errors
+            )
+        else:
+            lines.append("- 无 LLM 错误。")
+        lines.append("")
         markdown_blocks = (directory / "observations.md").read_text(
             encoding="utf-8"
         ).strip().split("\n\n")

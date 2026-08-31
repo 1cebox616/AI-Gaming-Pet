@@ -47,6 +47,9 @@ from pet.core.gamecard import (
     slugify_game_id,
 )
 from pet.core.llm import (
+    LlmCooldownError,
+    LlmDispatchStats,
+    LlmError,
     LlmImage,
     LlmResult,
     LlmVisionClientProtocol,
@@ -266,6 +269,7 @@ class ObservationRecord:
     output_tokens: int | None = None
     actual_model: str | None = None
     actual_provider: str | None = None
+    error_metadata: dict[str, object] | None = None
     learned_at: float = 0.0
 
 
@@ -388,7 +392,11 @@ def _fast_outcome(drop_reason: str | None) -> EvidenceOutcome:
         return "ok"
     if drop_reason == "superseded":
         return "superseded"
-    if drop_reason in {"timeout", "error:stopped"} or "429" in drop_reason:
+    if (
+        drop_reason in {"timeout", "error:stopped"}
+        or "429" in drop_reason
+        or drop_reason.startswith("cooldown:")
+    ):
         return "dropped"
     return "failed"
 
@@ -445,6 +453,8 @@ class ObservationLog:
         self.deep_calls = 0
         self.deep_failures = 0
         self.deep_total_cost_usd = 0.0
+        self.llm_errors: list[dict[str, object]] = []
+        self.dispatch_profiles: dict[str, dict[str, object]] = {}
         self.visible_output_token_total = 0
         self.visible_output_token_count = 0
         self.truncated = 0
@@ -617,6 +627,8 @@ class ObservationLog:
             self.visible_output_token_count += 1
         if record.truncated:
             self.truncated += 1
+        if record.error_metadata is not None:
+            self.record_llm_error(record.error_metadata, phase="fast", write=False)
         self._write_session(None)
 
     def append_ocr_frame(
@@ -826,6 +838,66 @@ class ObservationLog:
         self.total_cost_usd += cost_usd
         self._write_session(None)
 
+    def record_llm_error(
+        self,
+        metadata: dict[str, object],
+        *,
+        phase: str,
+        write: bool = True,
+    ) -> None:
+        self.llm_errors.append(
+            {
+                "phase": phase,
+                "occurred_at": datetime.now(timezone.utc).isoformat(),
+                **metadata,
+            }
+        )
+        if write:
+            self._write_session(None)
+
+    def update_dispatch_statistics(
+        self,
+        snapshots: Sequence[LlmDispatchStats],
+    ) -> None:
+        grouped: dict[str, dict[str, object]] = {}
+        for item in snapshots:
+            current = grouped.setdefault(
+                item.profile_name,
+                {
+                    "rate_limit_count": 0,
+                    "cooldown_seconds": 0.0,
+                    "cooldown_drop_count": 0,
+                    "cooling_down": False,
+                    "cooldown_remaining_seconds": 0.0,
+                },
+            )
+            current["rate_limit_count"] = int(current["rate_limit_count"]) + item.rate_limit_count
+            current["cooldown_seconds"] = float(current["cooldown_seconds"]) + item.cooldown_seconds
+            current["cooldown_drop_count"] = int(current["cooldown_drop_count"]) + item.cooldown_drop_count
+            current["cooling_down"] = bool(current["cooling_down"]) or item.cooling_down
+            current["cooldown_remaining_seconds"] = max(
+                float(current["cooldown_remaining_seconds"]),
+                item.cooldown_remaining_seconds,
+            )
+        merged = dict(self.dispatch_profiles)
+        for profile_name, current in grouped.items():
+            previous = merged.get(profile_name)
+            if previous is not None:
+                current["rate_limit_count"] = max(
+                    int(previous["rate_limit_count"]),
+                    int(current["rate_limit_count"]),
+                )
+                current["cooldown_seconds"] = max(
+                    float(previous["cooldown_seconds"]),
+                    float(current["cooldown_seconds"]),
+                )
+                current["cooldown_drop_count"] = max(
+                    int(previous["cooldown_drop_count"]),
+                    int(current["cooldown_drop_count"]),
+                )
+            merged[profile_name] = current
+        self.dispatch_profiles = merged
+
     def close(self) -> None:
         self._write_session(datetime.now(timezone.utc))
         self._markdown.close()
@@ -847,6 +919,18 @@ class ObservationLog:
         self._markdown.append(event)
 
     def _write_session(self, ended_at: datetime | None) -> None:
+        rate_limit_count = sum(
+            int(item["rate_limit_count"])
+            for item in self.dispatch_profiles.values()
+        )
+        cooldown_seconds = sum(
+            float(item["cooldown_seconds"])
+            for item in self.dispatch_profiles.values()
+        )
+        cooldown_drop_count = sum(
+            int(item["cooldown_drop_count"])
+            for item in self.dispatch_profiles.values()
+        )
         value = {
             "started_at": self.started_at.isoformat(),
             "ended_at": ended_at.isoformat() if ended_at else None,
@@ -861,6 +945,11 @@ class ObservationLog:
             "deep_call_count": self.deep_calls,
             "deep_failure_count": self.deep_failures,
             "deep_total_cost_usd": round(self.deep_total_cost_usd, 9),
+            "rate_limit_count": rate_limit_count,
+            "cooldown_seconds": round(cooldown_seconds, 6),
+            "cooldown_drop_count": cooldown_drop_count,
+            "llm_dispatch_profiles": self.dispatch_profiles,
+            "llm_errors": self.llm_errors,
             "truncated_count": self.truncated,
             "reason_counts": {
                 reason: self.reason_counts[reason] for reason in CHANGE_REASONS
@@ -959,6 +1048,7 @@ class GenericVisionAdapter:
         self._scene_last_selected_cluster_id: int | None = None
         self._scene_changed_since_selected = False
         self._deep_reader: DeepVisionReader | None = None
+        self._deep_client: LlmVisionClientProtocol | None = None
         self._scene_naming_tasks: set[asyncio.Task[None]] = set()
         self._scene_naming_attempted: set[int] = set()
         self._scene_naming_request_count = 0
@@ -1036,6 +1126,7 @@ class GenericVisionAdapter:
         )
         self._initialize_ocr()
         self._initialize_scene()
+        self._sync_dispatch_statistics()
 
     def start_replay(
         self,
@@ -1105,6 +1196,7 @@ class GenericVisionAdapter:
         await self._finish_ocr()
         await self._finish_scene_naming()
         close_client = getattr(self._client, "close", None)
+        self._sync_dispatch_statistics()
         if callable(close_client):
             close_client()
         self._client = None
@@ -1145,6 +1237,7 @@ class GenericVisionAdapter:
         await self._finish_ocr()
         await self._finish_scene_naming()
         close_client = getattr(self._client, "close", None)
+        self._sync_dispatch_statistics()
         if callable(close_client):
             close_client()
         self._client = None
@@ -1330,6 +1423,7 @@ class GenericVisionAdapter:
         self._scene_naming_attempted.clear()
         self._scene_naming_request_count = 0
         self._deep_reader = None
+        self._deep_client = None
         settings = self._settings.scene
         if not settings.enabled:
             self._scene_repository = None
@@ -1355,6 +1449,7 @@ class GenericVisionAdapter:
             effective.api_key_env,
             effective.timeout_seconds,
         )
+        self._deep_client = client
         self._deep_reader = DeepVisionReader(
             client,
             effective,
@@ -1633,6 +1728,26 @@ class GenericVisionAdapter:
             )
         except asyncio.CancelledError:
             raise
+        except LlmCooldownError as error:
+            logger.info(
+                "session:c%d 场景指纹核查被档位冷却直接丢弃，本会话不重试：%s",
+                context.cluster.cluster_id,
+                error.diagnostic(),
+            )
+            if self._log is not None:
+                self._log.record_llm_error(error.metadata(), phase="deep")
+        except LlmError as error:
+            logger.error(
+                "session:c%d 场景指纹核查失败，本会话不重试：%s",
+                context.cluster.cluster_id,
+                error.diagnostic(),
+            )
+            if self._log is not None:
+                self._log.record_llm_error(error.metadata(), phase="deep")
+                self._log.record_deep_call(
+                    deep_result.cost_usd if deep_result is not None else 0.0,
+                    failed=True,
+                )
         except Exception as error:
             logger.error(
                 "session:c%d 场景指纹核查失败，本会话不重试：%s",
@@ -1645,6 +1760,7 @@ class GenericVisionAdapter:
                     failed=True,
                 )
         finally:
+            self._sync_dispatch_statistics()
             for frame in context.frames:
                 frame.image.close()
 
@@ -1681,9 +1797,11 @@ class GenericVisionAdapter:
         self._scene_changed_since_selected = False
 
     def _close_deep_reader(self) -> None:
+        self._sync_dispatch_statistics()
         reader, self._deep_reader = self._deep_reader, None
         if reader is not None:
             reader.close()
+        self._deep_client = None
 
     def _initialize_ocr(self) -> None:
         settings = self._settings.ocr
@@ -2015,6 +2133,8 @@ class GenericVisionAdapter:
         output_tokens: int | None = None
         actual_model: str | None = None
         actual_provider: str | None = None
+        error_metadata: dict[str, object] | None = None
+        model_called = True
         cancelled = False
         try:
             assert self._client is not None
@@ -2083,6 +2203,14 @@ class GenericVisionAdapter:
         except asyncio.CancelledError:
             dropped = "error:stopped"
             cancelled = True
+        except LlmCooldownError as error:
+            dropped = f"cooldown:{error.diagnostic()}"
+            error_metadata = error.metadata()
+            model_called = False
+        except LlmError as error:
+            dropped = f"error:{error.diagnostic()}"
+            error_metadata = error.metadata()
+            self._register_failure(error.diagnostic())
         except Exception as error:
             dropped = f"error:{_one_line(error)}"
             self._register_failure(str(error))
@@ -2107,7 +2235,7 @@ class GenericVisionAdapter:
                 ttft_ms=ttft_ms,
                 dropped=dropped,
                 cost_usd=cost,
-                model_called=True,
+                model_called=model_called,
                 visible_output_tokens=visible_output_tokens,
                 truncated=truncated,
                 user_prompt=user_prompt,
@@ -2116,6 +2244,7 @@ class GenericVisionAdapter:
                 output_tokens=output_tokens,
                 actual_model=actual_model,
                 actual_provider=actual_provider,
+                error_metadata=error_metadata,
                 learned_at=pending.frame.metadata.monotonic_seconds + elapsed,
             )
         )
@@ -2127,8 +2256,25 @@ class GenericVisionAdapter:
             raise RuntimeError(f"fast observation already recorded for frame f{record.seq}")
         self._completed_sequences.add(record.seq)
         assert self._log is not None
+        self._sync_dispatch_statistics()
         self._log.append(record)
         self._refresh_cost_warning()
+
+    def _dispatch_statistics(self) -> tuple[LlmDispatchStats, ...]:
+        snapshots: list[LlmDispatchStats] = []
+        seen: set[int] = set()
+        for client in (self._client, self._deep_client):
+            if client is None or id(client) in seen:
+                continue
+            seen.add(id(client))
+            snapshot = getattr(client, "dispatch_stats", None)
+            if callable(snapshot):
+                snapshots.append(snapshot())
+        return tuple(snapshots)
+
+    def _sync_dispatch_statistics(self) -> None:
+        if self._log is not None:
+            self._log.update_dispatch_statistics(self._dispatch_statistics())
 
     def _price(self, result: LlmResult) -> float:
         if result.usage.cost_usd is not None:
