@@ -178,18 +178,18 @@ class WindowTitleMap:
         for rule in self._rules:
             if any(value in folded_title for value in rule.title_contains):
                 return GameIdentity(
-                    game_id=slugify_game_id(rule.game),
+                    game_id=slugify_game_id(rule.game, title),
                     display_name=title,
                     context_name=rule.game,
                 )
             if folded_process in rule.process_names:
                 return GameIdentity(
-                    game_id=slugify_game_id(rule.game),
+                    game_id=slugify_game_id(rule.game, title),
                     display_name=title,
                     context_name=rule.game,
                 )
         return GameIdentity(
-            game_id=slugify_game_id(process_name),
+            game_id=slugify_game_id(process_name, title),
             display_name=title,
             context_name=title,
         )
@@ -1107,7 +1107,7 @@ class GenericVisionAdapter:
         )
         self._schedule_ocr(pending)
         identity = game_identity or GameIdentity(
-            game_id=slugify_game_id(game),
+            game_id=slugify_game_id(game, game),
             display_name=game,
             context_name=game,
         )

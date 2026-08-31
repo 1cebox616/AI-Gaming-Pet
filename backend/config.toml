@@ -76,11 +76,11 @@ model_dir = "models/ocr"
 
 [games.generic.scene]
 enabled = true
-# 四段完整 1080p 录像无监督扫描的临时值；规则冲突与逐行推导见 eval-reports/m5-b-t2/report.md。
+# 四段完整 1080p 录像按 no_change 噪声底重校；逐行推导见 eval-reports/m5-b-t2-2/report.md。
 hash_kind = "phash"
 hash_bits = 64
-hamming_threshold = 25
-stable_min_frames = 7
+hamming_threshold = 8
+stable_min_frames = 10
 # 以下三个值是 TD-28 待实测占位。
 card_min_visits = 3
 card_min_span_seconds = 30

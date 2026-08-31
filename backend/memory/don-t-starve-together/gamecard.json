@@ -3,24 +3,7 @@
   "display_name": "Don't Starve Together",
   "genre": null,
   "perspective": null,
-  "scenes": [
-    {
-      "cluster_id": "scene:s1",
-      "label": null,
-      "representative_hash": "816e3ef04a39da7c",
-      "first_seen": "2026-08-28T00:40:54.413814Z",
-      "last_seen": "2026-08-28T00:44:18.640860Z",
-      "seen_count": 59,
-      "sessions_seen": 1,
-      "evidence_ids": [
-        "f31:scene:1",
-        "f34:scene:1",
-        "f36:scene:1",
-        "f37:scene:1",
-        "f38:scene:1"
-      ]
-    }
-  ],
+  "scenes": [],
   "hud_slots": [],
   "keybinds": {},
   "view_constants": {

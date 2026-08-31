@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -70,13 +71,13 @@ class GameCard(GameCardModel):
     init: GameCardInit
 
 
-def slugify_game_id(value: str) -> str:
-    """Lowercase, replace non-alphanumerics with one hyphen, and trim it."""
+def slugify_game_id(value: str, display_name: str | None = None) -> str:
+    """Return an ASCII-only slug, hashing the display name when none remains."""
     normalized = unicodedata.normalize("NFKC", value).casefold()
     characters: list[str] = []
     pending_hyphen = False
     for character in normalized:
-        if character.isalnum():
+        if character.isascii() and character.isalnum():
             if pending_hyphen and characters:
                 characters.append("-")
             characters.append(character)
@@ -85,7 +86,9 @@ def slugify_game_id(value: str) -> str:
             pending_hyphen = True
     slug = "".join(characters).strip("-")
     if not slug:
-        raise ValueError("game identity cannot produce an empty filesystem slug")
+        source = display_name if display_name is not None else value
+        digest = hashlib.sha1(source.encode("utf-8")).hexdigest()[:8]
+        return f"g-{digest}"
     return slug
 
 

@@ -47,11 +47,11 @@ def _session(
     )
 
 
-def test_slug_rule_is_lowercase_collapsed_and_filesystem_safe() -> None:
+def test_slug_rule_is_ascii_lowercase_collapsed_and_hashes_empty_results() -> None:
     assert slugify_game_id("  Grey Zone: Warfare.exe  ") == "grey-zone-warfare-exe"
-    assert slugify_game_id("燕云 十六声") == "燕云-十六声"
-    with pytest.raises(ValueError):
-        slugify_game_id("---")
+    assert slugify_game_id("燕云 十六声") == "g-5ec2b67f"
+    assert slugify_game_id("!!!") == "g-9a7b006d"
+    assert slugify_game_id("---", "!!!") == "g-9a7b006d"
 
 
 @pytest.mark.parametrize(

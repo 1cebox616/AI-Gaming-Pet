@@ -1,6 +1,6 @@
 {
-  "game_id": "slay-the-spire-2",
-  "display_name": "Slay the Spire 2",
+  "game_id": "g-592fc85c",
+  "display_name": "守望先锋",
   "genre": null,
   "perspective": null,
   "scenes": [],
@@ -11,9 +11,9 @@
     "user_sensitivity": null
   },
   "init": {
-    "initialized_at": "2026-08-28T02:02:07.981643Z",
+    "initialized_at": "2026-08-27T21:18:16.270174Z",
     "source_recordings": [
-      "recordings/capture/20260827-220206"
+      "recordings/capture/20260827-171815"
     ],
     "version": 1
   }

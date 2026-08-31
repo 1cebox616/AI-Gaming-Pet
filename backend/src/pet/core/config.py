@@ -175,8 +175,8 @@ class SceneConfig(BaseModel):
     enabled: bool = True
     hash_kind: Literal["ahash", "dhash", "phash"] = "phash"
     hash_bits: Literal[64, 256] = 64
-    hamming_threshold: int = Field(default=25, ge=0)
-    stable_min_frames: int = Field(default=7, ge=1)
+    hamming_threshold: int = Field(default=8, ge=0)
+    stable_min_frames: int = Field(default=10, ge=1)
     # These three promotion/flush values remain measured-data placeholders (TD-28).
     card_min_visits: int = Field(default=3, ge=1)
     card_min_span_seconds: float = Field(default=30.0, ge=0)
