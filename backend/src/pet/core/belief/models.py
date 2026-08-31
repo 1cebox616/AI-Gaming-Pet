@@ -157,6 +157,34 @@ class SceneFingerprintPayload(EvidenceModel):
         return self
 
 
+class SceneVerifiedPayload(EvidenceModel):
+    session_cluster_id: int = Field(ge=1)
+    label: str
+    annotation: str
+    modality: Literal["observed", "inferred", "uncertain"]
+    root_capture_ids: list[str] = Field(min_length=1)
+    model: str = Field(min_length=1)
+    provider: str | None = None
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    cost_usd: float = Field(ge=0.0)
+    latency_ms: float = Field(ge=0.0)
+    validation_error: str | None = None
+
+    @model_validator(mode="after")
+    def validate_capture_ids(self) -> SceneVerifiedPayload:
+        if not self.root_capture_ids:
+            raise ValueError("scene verification must cite at least one viewed frame")
+        if any(
+            not value.startswith("f") or not value[1:].isdigit()
+            for value in self.root_capture_ids
+        ):
+            raise ValueError("scene verification root ids must use f<sequence>")
+        if len(set(self.root_capture_ids)) != len(self.root_capture_ids):
+            raise ValueError("scene verification root ids must be unique")
+        return self
+
+
 EvidencePayload = (
     FastObservationPayload
     | FrameMetricsPayload
@@ -164,6 +192,7 @@ EvidencePayload = (
     | TextObservedPayload
     | OcrFramePayload
     | SceneFingerprintPayload
+    | SceneVerifiedPayload
 )
 
 
@@ -189,6 +218,7 @@ class EvidenceEvent(EvidenceModel):
             "text_observed": TextObservedPayload,
             "ocr_frame": OcrFramePayload,
             "scene_fingerprint": SceneFingerprintPayload,
+            "scene_verified": SceneVerifiedPayload,
         }
         expected = expected_payloads.get(self.kind)
         if expected is None or not isinstance(self.payload, expected):
@@ -200,6 +230,7 @@ class EvidenceEvent(EvidenceModel):
             "text_observed": "ocr",
             "ocr_frame": "ocr",
             "scene_fingerprint": "scene",
+            "scene_verified": "deep",
         }
         if self.source != expected_sources[self.kind]:
             raise ValueError(f"source does not match evidence kind {self.kind!r}")
@@ -216,8 +247,15 @@ class EvidenceEvent(EvidenceModel):
             raise ValueError("evidence_id must match root_capture_id, source, and positive sequence")
         if self.learned_at < self.observed_at:
             raise ValueError("learned_at must not precede observed_at")
-        if self.kind != "fast_observation" and self.outcome != "ok":
+        if self.kind not in {"fast_observation", "scene_verified"} and self.outcome != "ok":
             raise ValueError("mechanical evidence must have outcome=ok")
+        if isinstance(self.payload, SceneVerifiedPayload):
+            if self.outcome == "ok" and self.payload.validation_error is not None:
+                raise ValueError("accepted scene verification cannot have validation_error")
+            if self.outcome == "failed" and not self.payload.validation_error:
+                raise ValueError("rejected scene verification needs validation_error")
+            if self.outcome not in {"ok", "failed"}:
+                raise ValueError("scene verification outcome must be ok or failed")
         if isinstance(self.payload, FastObservationPayload):
             if self.outcome == "ok":
                 if not self.payload.text or self.payload.drop_reason is not None:

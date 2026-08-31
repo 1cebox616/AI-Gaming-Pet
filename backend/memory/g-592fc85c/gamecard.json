@@ -5,54 +5,72 @@
   "perspective": null,
   "scenes": [
     {
-      "cluster_id": "scene:s1",
-      "label": null,
+      "scene_id": "scene:s1",
       "representative_hash": "af32583d0f4e7389",
-      "first_seen": "2026-08-27T21:20:00.962893Z",
-      "last_seen": "2026-08-27T21:20:09.966310Z",
-      "seen_count": 19,
+      "label": "休闲比赛匹配界面",
+      "label_status": "named",
+      "annotation": "玩家选择休闲比赛模式后进入的匹配等待界面，显示队伍状态、模式选项及角色展示。",
+      "dwell_seconds": 9.003416849998757,
       "visit_count": 1,
       "sessions_seen": 1,
+      "first_seen": "2026-08-27T21:20:00.962893Z",
+      "last_seen": "2026-08-27T21:20:09.966310Z",
       "evidence_ids": [
         "f88:scene:1",
         "f89:scene:1",
         "f90:scene:1",
         "f91:scene:1",
         "f92:scene:1"
+      ],
+      "verified_at": "2026-08-31T16:04:32.629456Z",
+      "deep_evidence_ids": [
+        "f89:deep:1"
       ]
     },
     {
-      "cluster_id": "scene:s2",
-      "label": null,
+      "scene_id": "scene:s2",
       "representative_hash": "a8f4d5a5eb092b4d",
-      "first_seen": "2026-08-27T21:20:39.681898Z",
-      "last_seen": "2026-08-27T21:21:04.505176Z",
-      "seen_count": 39,
+      "label": "英雄选择界面",
+      "label_status": "named",
+      "annotation": "比赛正式开始前，玩家选择英雄并等待倒计时结束的准备界面。",
+      "dwell_seconds": 23.54293245000008,
       "visit_count": 2,
       "sessions_seen": 1,
+      "first_seen": "2026-08-27T21:20:39.681898Z",
+      "last_seen": "2026-08-27T21:21:04.505176Z",
       "evidence_ids": [
         "f117:scene:1",
         "f118:scene:1",
         "f119:scene:1",
         "f120:scene:1",
         "f121:scene:1"
+      ],
+      "verified_at": "2026-08-31T16:04:58.237613Z",
+      "deep_evidence_ids": [
+        "f119:deep:1"
       ]
     },
     {
-      "cluster_id": "scene:s3",
-      "label": null,
+      "scene_id": "scene:s3",
       "representative_hash": "de28604b0fdef28d",
-      "first_seen": "2026-08-27T21:31:15.564961Z",
-      "last_seen": "2026-08-27T21:31:25.566327Z",
-      "seen_count": 21,
+      "label": "休闲比赛选择界面",
+      "label_status": "named",
+      "annotation": "游戏主菜单中用于选择休闲比赛类型（如快速比赛）及查看小队信息的界面。",
+      "dwell_seconds": 10.001365150004858,
       "visit_count": 1,
       "sessions_seen": 1,
+      "first_seen": "2026-08-27T21:31:15.564961Z",
+      "last_seen": "2026-08-27T21:31:25.566327Z",
       "evidence_ids": [
         "f610:scene:1",
         "f611:scene:1",
         "f612:scene:1",
         "f613:scene:1",
         "f614:scene:1"
+      ],
+      "verified_at": "2026-08-31T16:05:36.901809Z",
+      "deep_evidence_ids": [
+        "f613:deep:1"
       ]
     }
   ],
@@ -67,6 +85,6 @@
     "source_recordings": [
       "recordings/capture/20260827-171815"
     ],
-    "version": 1
+    "version": 2
   }
 }

@@ -714,7 +714,7 @@ def test_selected_frames_each_emit_one_scene_event_without_changing_markdown(
             encoding="utf-8"
         )
     )
-    assert card["scenes"][0]["seen_count"] == 2
+    assert card["scenes"][0]["dwell_seconds"] == 1.0
 
 
 def test_no_change_polling_frames_advance_scene_stability_without_evidence(
@@ -919,7 +919,7 @@ def test_game_switch_flushes_old_card_before_loading_new_card(tmp_path: Path) ->
             encoding="utf-8"
         )
     )
-    assert first["scenes"][0]["seen_count"] == 2
+    assert first["scenes"][0]["dwell_seconds"] == 1.0
     assert second["scenes"] == []
 
 

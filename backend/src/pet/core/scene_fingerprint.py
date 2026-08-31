@@ -238,6 +238,10 @@ class SceneClusterer:
         if evidence_id not in cluster.evidence_ids:
             cluster.evidence_ids.append(evidence_id)
 
+    def cluster(self, cluster_id: int) -> SceneCluster:
+        """Return one current session cluster for deterministic downstream checks."""
+        return self._cluster(cluster_id)
+
     def _nearest_cluster(self, fingerprint: str) -> tuple[SceneCluster | None, int]:
         if not self._clusters:
             return None, 0

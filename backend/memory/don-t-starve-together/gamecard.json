@@ -5,18 +5,24 @@
   "perspective": null,
   "scenes": [
     {
-      "cluster_id": "scene:s1",
-      "label": null,
+      "scene_id": "scene:s1",
       "representative_hash": "d94267ca2d729bd8",
-      "first_seen": "2026-08-28T00:39:43.397826Z",
-      "last_seen": "2026-08-28T00:40:14.399506Z",
-      "seen_count": 32,
+      "label": "服务器启动界面",
+      "label_status": "named",
+      "annotation": "在创建或加入多人游戏时出现，显示服务器初始化状态及取消选项。",
+      "dwell_seconds": 31.001680350018432,
       "visit_count": 1,
       "sessions_seen": 1,
+      "first_seen": "2026-08-28T00:39:43.397826Z",
+      "last_seen": "2026-08-28T00:40:14.399506Z",
       "evidence_ids": [
         "f13:scene:1",
         "f14:scene:1",
         "f15:scene:1"
+      ],
+      "verified_at": "2026-08-31T16:05:53.762466Z",
+      "deep_evidence_ids": [
+        "f13:deep:1"
       ]
     }
   ],
@@ -31,6 +37,6 @@
     "source_recordings": [
       "recordings/capture/20260827-203925"
     ],
-    "version": 1
+    "version": 2
   }
 }

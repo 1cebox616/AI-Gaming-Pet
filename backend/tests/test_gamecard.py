@@ -98,8 +98,8 @@ def test_qualifying_cluster_promotes_and_periodic_flush_does_not_double_count(
     session.flush(clusterer.clusters)
 
     scene = session.card.scenes[0]
-    assert scene.cluster_id == "scene:s1"
-    assert scene.seen_count == 4
+    assert scene.scene_id == "scene:s1"
+    assert scene.dwell_seconds == 30.0
     assert scene.visit_count == 2
     assert scene.sessions_seen == 1
     assert len(scene.evidence_ids) == 4
@@ -133,8 +133,8 @@ def test_second_session_keeps_session_cluster_one_and_merges_candidate(
     assert second_clusterer.clusters[0].cluster_id == 1
     assert second_clusterer.clusters[0].card_candidate is not None
     scene = second_session.card.scenes[0]
-    assert scene.cluster_id == "scene:s1"
-    assert scene.seen_count == 8
+    assert scene.scene_id == "scene:s1"
+    assert scene.dwell_seconds == 60.0
     assert scene.visit_count == 4
     assert scene.sessions_seen == 2
 
@@ -161,7 +161,7 @@ def test_unmatched_qualifying_cluster_creates_new_scene_and_keeps_old_last_seen(
     )
     session.flush(new_clusterer.clusters)
 
-    assert [scene.cluster_id for scene in session.card.scenes] == ["scene:s1", "scene:s2"]
+    assert [scene.scene_id for scene in session.card.scenes] == ["scene:s1", "scene:s2"]
     assert session.card.scenes[0].last_seen == old_last_seen
 
 

@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pet.core.scene_fingerprint import CardSceneReference, SceneCluster
 
-GAMECARD_VERSION = 1
+GAMECARD_VERSION = 2
 
 
 class GameCardModel(BaseModel):
@@ -24,15 +24,29 @@ class GameCardModel(BaseModel):
 
 
 class GameCardScene(GameCardModel):
-    cluster_id: str = Field(pattern=r"^scene:s[1-9]\d*$")
-    label: str | None = None
+    scene_id: str = Field(pattern=r"^scene:s[1-9]\d*$")
     representative_hash: str = Field(pattern=r"^(?:[0-9a-f]{16}|[0-9a-f]{64})$")
-    first_seen: datetime
-    last_seen: datetime
-    seen_count: int = Field(ge=1)
+    label: str | None = None
+    label_status: Literal["unnamed", "named", "uncertain"] = "unnamed"
+    annotation: str | None = None
+    dwell_seconds: float = Field(ge=0.0)
     visit_count: int = Field(ge=1)
     sessions_seen: int = Field(ge=1)
+    first_seen: datetime
+    last_seen: datetime
     evidence_ids: list[str]
+    verified_at: datetime | None = None
+    deep_evidence_ids: list[str] = Field(default_factory=list)
+
+
+class SceneCardVerification(GameCardModel):
+    """One code-validated naming decision waiting for card promotion."""
+
+    label: str = Field(min_length=1, max_length=24)
+    annotation: str = Field(min_length=1, max_length=160)
+    modality: Literal["observed", "inferred", "uncertain"]
+    verified_at: datetime
+    evidence_id: str = Field(min_length=1)
 
 
 class GameCardHudSlot(GameCardModel):
@@ -112,17 +126,22 @@ def render_gamecard_markdown(card: GameCard) -> str:
     for scene in card.scenes:
         lines.extend(
             (
-                f"### {scene.cluster_id}",
+                f"### {scene.scene_id}",
                 "",
                 f"- 标签：{scene.label or '未标注'}",
+                f"- 标签状态：{scene.label_status}",
+                f"- 注释：{scene.annotation or '未标注'}",
                 f"- 代表指纹：`{scene.representative_hash}`",
                 f"- 首次见到：{_iso(scene.first_seen)}",
                 f"- 最近见到：{_iso(scene.last_seen)}",
-                f"- 累计帧数：{scene.seen_count}",
+                f"- 累计驻留：{scene.dwell_seconds:.3f} 秒",
                 f"- 累计访问段数：{scene.visit_count}",
                 f"- 会话簇次数：{scene.sessions_seen}",
                 "- 证据样本："
                 + (", ".join(f"`{item}`" for item in scene.evidence_ids) or "无"),
+                f"- 命名时间：{_iso(scene.verified_at) if scene.verified_at else '未命名'}",
+                "- 深线证据："
+                + (", ".join(f"`{item}`" for item in scene.deep_evidence_ids) or "无"),
                 "",
             )
         )
@@ -188,7 +207,7 @@ class GameCardRepository:
     def card_references(self, card: GameCard) -> tuple[CardSceneReference, ...]:
         return tuple(
             CardSceneReference(
-                scene_id=scene.cluster_id,
+                scene_id=scene.scene_id,
                 representative_hash=scene.representative_hash,
             )
             for scene in card.scenes
@@ -220,13 +239,14 @@ class GameCardSession:
         self.card_min_dwell_seconds = card_min_dwell_seconds
         self.source_recording = source_recording
         self._cluster_scene_ids: dict[int, str] = {}
-        self._flushed_seen_counts: dict[int, int] = {}
+        self._flushed_dwell_seconds: dict[int, float] = {}
         self._flushed_visit_counts: dict[int, int] = {}
+        self._verifications: dict[int, SceneCardVerification] = {}
 
     def flush(self, clusters: Sequence[SceneCluster]) -> GameCard:
         working = self.card.model_copy(deep=True)
         cluster_scene_ids = dict(self._cluster_scene_ids)
-        flushed_seen_counts = dict(self._flushed_seen_counts)
+        flushed_dwell_seconds = dict(self._flushed_dwell_seconds)
         flushed_visit_counts = dict(self._flushed_visit_counts)
         if self.source_recording is not None and self.source_recording not in working.init.source_recordings:
             working.init.source_recordings.append(self.source_recording)
@@ -247,20 +267,24 @@ class GameCardSession:
                 if scene is None:
                     scene_id = _next_scene_id(working.scenes)
                     scene = GameCardScene(
-                        cluster_id=scene_id,
-                        label=None,
+                        scene_id=scene_id,
                         representative_hash=cluster.representative_hash,
-                        first_seen=self._absolute(cluster.first_seen),
-                        last_seen=self._absolute(cluster.last_seen),
-                        seen_count=cluster.seen_count,
+                        label=None,
+                        label_status="unnamed",
+                        annotation=None,
+                        dwell_seconds=cluster.dwell_seconds,
                         visit_count=cluster.visit_count,
                         sessions_seen=1,
+                        first_seen=self._absolute(cluster.first_seen),
+                        last_seen=self._absolute(cluster.last_seen),
                         evidence_ids=[],
+                        verified_at=None,
+                        deep_evidence_ids=[],
                     )
                     working.scenes.append(scene)
                     created_scene = True
                 else:
-                    scene_id = scene.cluster_id
+                    scene_id = scene.scene_id
                 cluster_scene_ids[cluster.cluster_id] = scene_id
                 if not created_scene:
                     scene.sessions_seen += 1
@@ -269,33 +293,61 @@ class GameCardSession:
                 if scene is None:
                     raise ValueError(f"flushed scene disappeared from game card: {scene_id}")
 
-            previous_count = flushed_seen_counts.get(cluster.cluster_id, 0)
+            previous_dwell = flushed_dwell_seconds.get(cluster.cluster_id, 0.0)
             previous_visits = flushed_visit_counts.get(cluster.cluster_id, 0)
             if created_scene:
-                previous_count = cluster.seen_count
+                previous_dwell = cluster.dwell_seconds
                 previous_visits = cluster.visit_count
-            delta = cluster.seen_count - previous_count
+            dwell_delta = cluster.dwell_seconds - previous_dwell
             visit_delta = cluster.visit_count - previous_visits
-            if delta < 0:
-                raise ValueError("session cluster seen_count must be append-only")
+            if dwell_delta < -1e-9:
+                raise ValueError("session cluster dwell_seconds must be append-only")
             if visit_delta < 0:
                 raise ValueError("session cluster visit_count must be append-only")
-            scene.seen_count += delta
+            scene.dwell_seconds += max(0.0, dwell_delta)
             scene.visit_count += visit_delta
             scene.last_seen = max(scene.last_seen, self._absolute(cluster.last_seen))
             for evidence_id in cluster.evidence_ids:
                 if evidence_id not in scene.evidence_ids and len(scene.evidence_ids) < 5:
                     scene.evidence_ids.append(evidence_id)
-            flushed_seen_counts[cluster.cluster_id] = cluster.seen_count
+            verification = self._verifications.get(cluster.cluster_id)
+            if verification is not None:
+                _apply_verification(scene, verification)
+            flushed_dwell_seconds[cluster.cluster_id] = cluster.dwell_seconds
             flushed_visit_counts[cluster.cluster_id] = cluster.visit_count
 
-        working.scenes.sort(key=lambda scene: _scene_number(scene.cluster_id))
+        working.scenes.sort(key=lambda scene: _scene_number(scene.scene_id))
         self.repository.write(working)
         self.card = working
         self._cluster_scene_ids = cluster_scene_ids
-        self._flushed_seen_counts = flushed_seen_counts
+        self._flushed_dwell_seconds = flushed_dwell_seconds
         self._flushed_visit_counts = flushed_visit_counts
         return working
+
+    def needs_verification(self, cluster: SceneCluster) -> bool:
+        """Return whether this session cluster has no existing naming decision."""
+        if cluster.cluster_id in self._verifications:
+            return False
+        candidate_id = (
+            cluster.card_candidate.scene_id
+            if cluster.card_candidate is not None
+            else self._cluster_scene_ids.get(cluster.cluster_id)
+        )
+        scene = _scene_by_id(self.card.scenes, candidate_id)
+        return scene is None or scene.label_status == "unnamed"
+
+    def record_verification(
+        self,
+        cluster: SceneCluster,
+        verification: SceneCardVerification,
+    ) -> None:
+        """Stage an accepted decision and apply it if the scene is promoted."""
+        if not cluster.stable:
+            raise ValueError("scene verification requires a stable cluster")
+        if cluster.cluster_id in self._verifications:
+            raise ValueError("scene cluster already has a verification decision")
+        self._verifications[cluster.cluster_id] = verification
+        self.flush((cluster,))
 
     def _qualifies(self, cluster: SceneCluster) -> bool:
         return (
@@ -335,11 +387,11 @@ def _scene_by_id(
 ) -> GameCardScene | None:
     if scene_id is None:
         return None
-    return next((scene for scene in scenes if scene.cluster_id == scene_id), None)
+    return next((scene for scene in scenes if scene.scene_id == scene_id), None)
 
 
 def _next_scene_id(scenes: Sequence[GameCardScene]) -> str:
-    next_number = max((_scene_number(scene.cluster_id) for scene in scenes), default=0) + 1
+    next_number = max((_scene_number(scene.scene_id) for scene in scenes), default=0) + 1
     return f"scene:s{next_number}"
 
 
@@ -358,3 +410,17 @@ def _utc(value: datetime) -> datetime:
 
 def _iso(value: datetime) -> str:
     return _utc(value).isoformat()
+
+
+def _apply_verification(
+    scene: GameCardScene,
+    verification: SceneCardVerification,
+) -> None:
+    scene.label = verification.label
+    scene.label_status = (
+        "uncertain" if verification.modality == "uncertain" else "named"
+    )
+    scene.annotation = verification.annotation
+    scene.verified_at = _utc(verification.verified_at)
+    if verification.evidence_id not in scene.deep_evidence_ids:
+        scene.deep_evidence_ids.append(verification.evidence_id)

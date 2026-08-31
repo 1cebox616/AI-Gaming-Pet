@@ -167,6 +167,17 @@ class OcrConfig(BaseModel):
     model_dir: str = "models/ocr"
 
 
+class SceneNamingConfig(BaseModel):
+    """Bounded, off-path deep naming for stable scene clusters."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    enabled: bool = False
+    llm_profile: str = "vision_deep"
+    max_requests_per_session: int = Field(default=8, ge=1, le=64)
+    representative_frame_count: int = Field(default=3, ge=1, le=3)
+
+
 class SceneConfig(BaseModel):
     """Full-frame scene fingerprint and conservative game-card persistence."""
 
@@ -181,6 +192,7 @@ class SceneConfig(BaseModel):
     card_min_dwell_seconds: float = Field(default=8.0, ge=0)
     card_flush_seconds: float = Field(default=120.0, gt=0)
     memory_dir: str = "memory"
+    naming: SceneNamingConfig = Field(default_factory=SceneNamingConfig)
 
     @model_validator(mode="after")
     def validate_hamming_width(self) -> SceneConfig:
@@ -270,6 +282,7 @@ ConfigSection = TypeVar(
     PersonalityConfig,
     GenericVisionConfig,
     SceneConfig,
+    SceneNamingConfig,
     LlmProfileConfig,
     LlmConfig,
 )

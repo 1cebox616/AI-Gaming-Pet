@@ -33,6 +33,7 @@ from pet.core.belief import (
     OcrFramePayload,
     ObservationsMarkdownWriter,
     SceneFingerprintPayload,
+    SceneVerifiedPayload,
     Scope,
     TextObservedPayload,
 )
@@ -40,6 +41,7 @@ from pet.core.config import AdapterConfig, LlmConfig, resolve_llm_profile
 from pet.core.gamecard import (
     GameCardRepository,
     GameCardSession,
+    SceneCardVerification,
     slugify_game_id,
 )
 from pet.core.llm import (
@@ -53,9 +55,17 @@ from pet.core.ocr_probe import OcrFrameResult, OcrLine
 from pet.core.ocr_rapid import ENGINE_NAME, RapidOcrEngine, set_current_thread_below_normal
 from pet.core.ocr_selective import OcrEngine, TextLineCache, normalize_text
 from pet.core.scene_fingerprint import (
+    SceneCluster,
     SceneClusterer,
     SceneFingerprintMatch,
     perceptual_hash,
+)
+from pet.games.generic.deep_read import DeepReadResult, DeepVisionReader
+from pet.games.generic.scene_naming import (
+    SceneNamingFrame,
+    build_scene_naming_request,
+    parse_scene_naming_proposal,
+    validate_scene_naming_proposal,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,6 +167,23 @@ class SceneFrameState:
     fingerprint: str
     match: SceneFingerprintMatch
     elapsed_ms: float
+
+
+@dataclass(slots=True)
+class BufferedSceneFrame:
+    root_capture_id: str
+    image: Image.Image
+    frame_ts: float
+    fingerprint_evidence_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SceneNamingContext:
+    game_name: str
+    cluster: SceneCluster
+    session: GameCardSession
+    frames: tuple[BufferedSceneFrame, ...]
+    trigger_frame_ts: float
 
 
 class WindowTitleMap:
@@ -362,6 +389,21 @@ def _fast_outcome(drop_reason: str | None) -> EvidenceOutcome:
     return "failed"
 
 
+def _representative_scene_frames(
+    frames: Sequence[BufferedSceneFrame],
+    limit: int,
+) -> tuple[BufferedSceneFrame, ...]:
+    if not frames or limit < 1:
+        raise ValueError("representative scene selection needs frames and a positive limit")
+    if len(frames) <= limit:
+        return tuple(frames)
+    if limit == 1:
+        return (frames[len(frames) // 2],)
+    if limit == 2:
+        return (frames[0], frames[-1])
+    return (frames[0], frames[len(frames) // 2], frames[-1])
+
+
 class ObservationLog:
     """Session summary around append-only evidence and its regenerable view."""
 
@@ -396,6 +438,9 @@ class ObservationLog:
         self.dropped = 0
         self.failures = 0
         self.total_cost_usd = 0.0
+        self.deep_calls = 0
+        self.deep_failures = 0
+        self.deep_total_cost_usd = 0.0
         self.visible_output_token_total = 0
         self.visible_output_token_count = 0
         self.truncated = 0
@@ -671,6 +716,66 @@ class ObservationLog:
         )
         return evidence_id
 
+    def append_scene_verified(
+        self,
+        *,
+        trigger_frame_ts: float,
+        learned_ts: float,
+        session_cluster_id: int,
+        label: str,
+        annotation: str,
+        modality: str,
+        root_capture_ids: Sequence[str],
+        fingerprint_evidence_ids: Sequence[str],
+        result: DeepReadResult,
+        validation_error: str | None,
+    ) -> str:
+        if not root_capture_ids:
+            raise ValueError("scene verification requires viewed frame roots")
+        observed_at = self._relative(trigger_frame_ts)
+        learned_at = max(observed_at, self._relative(learned_ts))
+        root_capture_id = root_capture_ids[-1]
+        evidence_id = self._evidence.new_evidence_id(root_capture_id, "deep")
+        self._append_event(
+            EvidenceEvent(
+                evidence_id=evidence_id,
+                source="deep",
+                kind="scene_verified",
+                root_capture_id=root_capture_id,
+                observed_at=observed_at,
+                learned_at=learned_at,
+                scope=None,
+                payload=SceneVerifiedPayload(
+                    session_cluster_id=session_cluster_id,
+                    label=label,
+                    annotation=annotation,
+                    modality=modality,
+                    root_capture_ids=list(root_capture_ids),
+                    model=result.result.model,
+                    provider=result.result.provider,
+                    prompt_tokens=result.result.usage.prompt_tokens,
+                    completion_tokens=result.result.usage.completion_tokens,
+                    cost_usd=result.cost_usd,
+                    latency_ms=result.result.latency_seconds * 1000.0,
+                    validation_error=validation_error,
+                ),
+                derived_from=list(fingerprint_evidence_ids),
+                context_version=None,
+                outcome="failed" if validation_error is not None else "ok",
+            )
+        )
+        self.record_deep_call(result.cost_usd, failed=validation_error is not None)
+        return evidence_id
+
+    def record_deep_call(self, cost_usd: float, *, failed: bool) -> None:
+        if cost_usd < 0:
+            raise ValueError("deep call cost must be nonnegative")
+        self.deep_calls += 1
+        self.deep_failures += int(failed)
+        self.deep_total_cost_usd += cost_usd
+        self.total_cost_usd += cost_usd
+        self._write_session(None)
+
     def close(self) -> None:
         self._write_session(datetime.now(timezone.utc))
         self._markdown.close()
@@ -703,6 +808,9 @@ class ObservationLog:
             "failure_count": self.failures,
             "failure_rate": round(self.failures / self.calls, 6) if self.calls else 0.0,
             "total_cost_usd": round(self.total_cost_usd, 9),
+            "deep_call_count": self.deep_calls,
+            "deep_failure_count": self.deep_failures,
+            "deep_total_cost_usd": round(self.deep_total_cost_usd, 9),
             "truncated_count": self.truncated,
             "reason_counts": {
                 reason: self.reason_counts[reason] for reason in CHANGE_REASONS
@@ -750,6 +858,7 @@ class GenericVisionAdapter:
         capture_backend_factory: CaptureBackendFactory,
         selector_factory: SelectorFactory,
         client_factory: ClientFactory = _default_client_factory,
+        deep_client_factory: ClientFactory | None = None,
         input_listener_factory: InputListenerFactory | None = None,
         title_map: WindowTitleMap | None = None,
         clock: Callable[[], float] = time.perf_counter,
@@ -760,6 +869,7 @@ class GenericVisionAdapter:
         self._capture_backend_factory = capture_backend_factory
         self._selector_factory = selector_factory
         self._client_factory = client_factory
+        self._deep_client_factory = deep_client_factory or client_factory
         self._input_listener_factory = input_listener_factory
         self._title_map = title_map or WindowTitleMap.load()
         self._clock = clock
@@ -798,6 +908,12 @@ class GenericVisionAdapter:
         self._scene_last_flush_at = 0.0
         self._scene_last_selected_cluster_id: int | None = None
         self._scene_changed_since_selected = False
+        self._deep_reader: DeepVisionReader | None = None
+        self._scene_naming_tasks: set[asyncio.Task[None]] = set()
+        self._scene_naming_attempted: set[int] = set()
+        self._scene_naming_request_count = 0
+        self._scene_frame_buffer_cluster_id: int | None = None
+        self._scene_frame_buffer: list[BufferedSceneFrame] = []
 
     async def start(self, core: CoreServices) -> None:
         if self._task is not None:
@@ -937,10 +1053,12 @@ class GenericVisionAdapter:
             await asyncio.gather(*tuple(self._inflight), return_exceptions=True)
         self._close_input_context()
         await self._finish_ocr()
+        await self._finish_scene_naming()
         close_client = getattr(self._client, "close", None)
         if callable(close_client):
             close_client()
         self._client = None
+        self._close_deep_reader()
         if self._log is not None:
             self._close_scene_session()
             self._log.close()
@@ -975,10 +1093,12 @@ class GenericVisionAdapter:
         if self._inflight:
             await asyncio.gather(*self._inflight, return_exceptions=True)
         await self._finish_ocr()
+        await self._finish_scene_naming()
         close_client = getattr(self._client, "close", None)
         if callable(close_client):
             close_client()
         self._client = None
+        self._close_deep_reader()
         if self._log is not None:
             self._close_scene_session()
             self._log.close()
@@ -1149,6 +1269,7 @@ class GenericVisionAdapter:
         self._launch_frame(pending)
 
     def _initialize_scene(self) -> None:
+        self._close_scene_frame_buffer()
         self._scene_session = None
         self._scene_clusterer = None
         self._scene_game_id = None
@@ -1156,6 +1277,9 @@ class GenericVisionAdapter:
         self._scene_last_flush_at = 0.0
         self._scene_last_selected_cluster_id = None
         self._scene_changed_since_selected = False
+        self._scene_naming_attempted.clear()
+        self._scene_naming_request_count = 0
+        self._deep_reader = None
         settings = self._settings.scene
         if not settings.enabled:
             self._scene_repository = None
@@ -1164,6 +1288,29 @@ class GenericVisionAdapter:
         if not memory_root.is_absolute():
             memory_root = BACKEND_DIRECTORY / memory_root
         self._scene_repository = GameCardRepository(memory_root)
+        naming = settings.naming
+        if not naming.enabled:
+            return
+        profile = self._llm_configuration.profiles.get(naming.llm_profile)
+        if profile is None:
+            raise RuntimeError(f"场景命名模型档位不存在：{naming.llm_profile}")
+        effective = resolve_llm_profile(self._llm_configuration, naming.llm_profile)
+        if not effective.enabled or not effective.model.strip():
+            raise RuntimeError(
+                f"场景命名模型档位 {naming.llm_profile} 未启用或未配置型号"
+            )
+        client = self._deep_client_factory(
+            naming.llm_profile,
+            effective.base_url,
+            effective.api_key_env,
+            effective.timeout_seconds,
+        )
+        self._deep_reader = DeepVisionReader(
+            client,
+            effective,
+            input_price_per_million_usd=profile.input_price_per_million_usd,
+            output_price_per_million_usd=profile.output_price_per_million_usd,
+        )
 
     def _observe_scene_frame(
         self,
@@ -1176,6 +1323,9 @@ class GenericVisionAdapter:
         assert self._scene_repository is not None
         if self._scene_game_id != identity.game_id:
             self._close_scene_session()
+            self._scene_naming_attempted.clear()
+            self._scene_naming_request_count = 0
+            self._close_scene_frame_buffer()
             card = self._scene_repository.load_or_create(
                 identity.game_id,
                 identity.display_name,
@@ -1215,6 +1365,11 @@ class GenericVisionAdapter:
         if relative_seconds - self._scene_last_flush_at >= settings.card_flush_seconds:
             self._flush_scene_session()
             self._scene_last_flush_at = relative_seconds
+        if match.stable:
+            self._schedule_scene_naming(
+                identity.context_name,
+                match.cluster_id,
+            )
         return SceneFrameState(
             fingerprint=fingerprint,
             match=match,
@@ -1255,8 +1410,175 @@ class GenericVisionAdapter:
             elapsed_ms=scene_state.elapsed_ms,
         )
         self._scene_clusterer.record_evidence(match.cluster_id, evidence_id)
+        self._buffer_scene_frame(pending, match.cluster_id, evidence_id)
         self._scene_last_selected_cluster_id = match.cluster_id
         self._scene_changed_since_selected = False
+        if match.stable:
+            self._schedule_scene_naming(
+                pending.game,
+                match.cluster_id,
+            )
+
+    def _buffer_scene_frame(
+        self,
+        pending: PendingFrame,
+        cluster_id: int,
+        fingerprint_evidence_id: str,
+    ) -> None:
+        if not self._settings.scene.naming.enabled:
+            return
+        if cluster_id in self._scene_naming_attempted:
+            return
+        if self._scene_frame_buffer_cluster_id != cluster_id:
+            self._close_scene_frame_buffer()
+            self._scene_frame_buffer_cluster_id = cluster_id
+        self._scene_frame_buffer.append(
+            BufferedSceneFrame(
+                root_capture_id=f"f{pending.seq}",
+                image=pending.frame.bitmap.copy(),
+                frame_ts=pending.frame.metadata.monotonic_seconds,
+                fingerprint_evidence_id=fingerprint_evidence_id,
+            )
+        )
+        maximum = self._settings.scene.naming.representative_frame_count * 3
+        while len(self._scene_frame_buffer) > maximum:
+            removed = self._scene_frame_buffer.pop(1)
+            removed.image.close()
+
+    def _schedule_scene_naming(
+        self,
+        game_name: str,
+        cluster_id: int,
+    ) -> None:
+        settings = self._settings.scene.naming
+        reader = self._deep_reader
+        session = self._scene_session
+        clusterer = self._scene_clusterer
+        if not settings.enabled or reader is None or session is None or clusterer is None:
+            return
+        if cluster_id in self._scene_naming_attempted:
+            return
+        cluster = clusterer.cluster(cluster_id)
+        if not session.needs_verification(cluster):
+            self._scene_naming_attempted.add(cluster_id)
+            return
+        if self._scene_naming_request_count >= settings.max_requests_per_session:
+            self._scene_naming_attempted.add(cluster_id)
+            logger.warning(
+                "场景命名达到每会话 %d 次上限；session:c%d 保持未命名",
+                settings.max_requests_per_session,
+                cluster_id,
+            )
+            return
+        if self._scene_frame_buffer_cluster_id != cluster_id or not self._scene_frame_buffer:
+            return
+        chosen = _representative_scene_frames(
+            self._scene_frame_buffer,
+            settings.representative_frame_count,
+        )
+        chosen_ids = {id(frame) for frame in chosen}
+        for frame in self._scene_frame_buffer:
+            if id(frame) not in chosen_ids:
+                frame.image.close()
+        self._scene_frame_buffer = []
+        self._scene_frame_buffer_cluster_id = None
+        self._scene_naming_attempted.add(cluster_id)
+        self._scene_naming_request_count += 1
+        context = SceneNamingContext(
+            game_name=game_name,
+            cluster=cluster,
+            session=session,
+            frames=chosen,
+            trigger_frame_ts=chosen[-1].frame_ts,
+        )
+        task = asyncio.create_task(
+            self._run_scene_naming(context),
+            name=f"generic-scene-naming-{cluster_id}",
+        )
+        self._scene_naming_tasks.add(task)
+        task.add_done_callback(self._scene_naming_tasks.discard)
+
+    async def _run_scene_naming(self, context: SceneNamingContext) -> None:
+        cost_recorded = False
+        deep_result: DeepReadResult | None = None
+        try:
+            assert self._deep_reader is not None
+            stable_ocr_lines: tuple[str, ...] = ()
+            request = build_scene_naming_request(
+                game_name=context.game_name,
+                session_cluster_id=context.cluster.cluster_id,
+                frames=tuple(
+                    SceneNamingFrame(frame.root_capture_id, frame.image)
+                    for frame in context.frames
+                ),
+                stable_ocr_lines=stable_ocr_lines,
+                send_width=self._settings.send_width,
+            )
+            deep_result = await self._deep_reader.read(request)
+            proposal = parse_scene_naming_proposal(deep_result.result.text)
+            decision = validate_scene_naming_proposal(context.cluster, proposal)
+            assert self._log is not None
+            evidence_id = self._log.append_scene_verified(
+                trigger_frame_ts=context.trigger_frame_ts,
+                learned_ts=self._clock(),
+                session_cluster_id=context.cluster.cluster_id,
+                label=decision.label,
+                annotation=decision.annotation,
+                modality=decision.modality,
+                root_capture_ids=tuple(frame.root_capture_id for frame in context.frames),
+                fingerprint_evidence_ids=tuple(
+                    frame.fingerprint_evidence_id for frame in context.frames
+                ),
+                result=deep_result,
+                validation_error=decision.validation_error,
+            )
+            cost_recorded = True
+            if not decision.accepted:
+                logger.warning(
+                    "拒绝 session:c%d 场景命名判决：%s",
+                    context.cluster.cluster_id,
+                    decision.validation_error,
+                )
+                return
+            context.session.record_verification(
+                context.cluster,
+                SceneCardVerification(
+                    label=decision.label,
+                    annotation=decision.annotation,
+                    modality=decision.modality,
+                    verified_at=datetime.now(timezone.utc),
+                    evidence_id=evidence_id,
+                ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.error(
+                "session:c%d 场景深读失败，本会话不重试：%s",
+                context.cluster.cluster_id,
+                _one_line(error),
+            )
+            if not cost_recorded and self._log is not None:
+                self._log.record_deep_call(
+                    deep_result.cost_usd if deep_result is not None else 0.0,
+                    failed=True,
+                )
+        finally:
+            for frame in context.frames:
+                frame.image.close()
+
+    async def _finish_scene_naming(self) -> None:
+        if self._scene_naming_tasks:
+            await asyncio.gather(
+                *tuple(self._scene_naming_tasks),
+                return_exceptions=True,
+            )
+
+    def _close_scene_frame_buffer(self) -> None:
+        for frame in self._scene_frame_buffer:
+            frame.image.close()
+        self._scene_frame_buffer = []
+        self._scene_frame_buffer_cluster_id = None
 
     def _flush_scene_session(self) -> None:
         if self._scene_session is None or self._scene_clusterer is None:
@@ -1268,6 +1590,7 @@ class GenericVisionAdapter:
 
     def _close_scene_session(self) -> None:
         self._flush_scene_session()
+        self._close_scene_frame_buffer()
         self._scene_session = None
         self._scene_clusterer = None
         self._scene_game_id = None
@@ -1275,6 +1598,11 @@ class GenericVisionAdapter:
         self._scene_last_flush_at = 0.0
         self._scene_last_selected_cluster_id = None
         self._scene_changed_since_selected = False
+
+    def _close_deep_reader(self) -> None:
+        reader, self._deep_reader = self._deep_reader, None
+        if reader is not None:
+            reader.close()
 
     def _initialize_ocr(self) -> None:
         settings = self._settings.ocr

@@ -5,20 +5,26 @@
   "perspective": null,
   "scenes": [
     {
-      "cluster_id": "scene:s1",
-      "label": null,
+      "scene_id": "scene:s1",
       "representative_hash": "d2d32dcd2d38352b",
-      "first_seen": "2026-08-28T02:06:29.341330Z",
-      "last_seen": "2026-08-28T02:06:42.343524Z",
-      "seen_count": 10,
+      "label": "奖励选择界面",
+      "label_status": "named",
+      "annotation": "玩家在击败敌人或达成条件后出现的奖励选项界面，包含多个可选增益效果及对应描述。",
+      "dwell_seconds": 8.000834200007375,
       "visit_count": 2,
       "sessions_seen": 1,
+      "first_seen": "2026-08-28T02:06:29.341330Z",
+      "last_seen": "2026-08-28T02:06:42.343524Z",
       "evidence_ids": [
         "f143:scene:1",
         "f144:scene:1",
         "f145:scene:1",
         "f146:scene:1",
         "f149:scene:1"
+      ],
+      "verified_at": "2026-08-31T16:07:56.322661Z",
+      "deep_evidence_ids": [
+        "f146:deep:1"
       ]
     }
   ],
@@ -33,6 +39,6 @@
     "source_recordings": [
       "recordings/capture/20260827-220206"
     ],
-    "version": 1
+    "version": 2
   }
 }
