@@ -130,6 +130,19 @@ def test_stability_uses_content_seconds_not_polling_frame_count() -> None:
     assert two_tenths_hz.clusters[0].longest_run_seconds == 5.0
 
 
+def test_unstable_candidates_never_enter_the_retained_scene_index() -> None:
+    clusterer = SceneClusterer(hamming_threshold=0, stable_min_seconds=4.0)
+
+    first = clusterer.observe("0000000000000000", 0.0)
+    second = clusterer.observe("ffffffffffffffff", 1.0)
+    third = clusterer.observe("0f0f0f0f0f0f0f0f", 2.0)
+
+    assert [first.cluster_id, second.cluster_id, third.cluster_id] == [1, 2, 3]
+    assert clusterer.clusters == ()
+    assert clusterer.candidate_count == 3
+    assert clusterer.discarded_candidate_count == 2
+
+
 def test_loaded_card_only_supplies_candidate_and_session_id_starts_from_one() -> None:
     clusterer = SceneClusterer(
         hamming_threshold=2,

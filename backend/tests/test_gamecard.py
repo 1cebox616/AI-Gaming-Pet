@@ -76,14 +76,13 @@ def test_stable_cluster_with_insufficient_dwell_does_not_promote(
     assert session.card.scenes == []
 
 
-def test_sufficient_dwell_without_a_stable_run_does_not_promote(
+def test_repeated_short_runs_never_enter_the_scene_index_or_promote(
     tmp_path: Path,
 ) -> None:
     repository = GameCardRepository(tmp_path)
     clusterer = _clusterer(run_durations=(4.0,) * 8)
-    assert clusterer.clusters[0].dwell_seconds == 32.0
-    assert clusterer.clusters[0].visit_count == 8
-    assert clusterer.clusters[0].stable is False
+    assert clusterer.clusters == ()
+    assert clusterer.candidate_count == 15
     session = _session(repository, "fixture-game", clusterer)
     session.flush(clusterer.clusters)
     assert session.card.scenes == []

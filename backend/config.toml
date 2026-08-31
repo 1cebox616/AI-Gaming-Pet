@@ -80,9 +80,9 @@ enabled = true
 hash_kind = "phash"
 hash_bits = 64
 hamming_threshold = 8
-stable_min_seconds = 0.0
+stable_min_seconds = 4.0
 # 以下两个值中，驻留门与刷新周期是 TD-28 待实测占位。
-card_min_dwell_seconds = 30
+card_min_dwell_seconds = 8
 card_flush_seconds = 120
 memory_dir = "memory"
 

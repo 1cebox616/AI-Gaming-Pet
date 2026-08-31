@@ -842,7 +842,7 @@ def test_selected_scene_switch_reports_last_selected_cluster_across_intermediate
         for event in EvidenceStore.read(output / "evidence.jsonl")
         if event.kind == "scene_fingerprint"
     ]
-    assert [event.payload.cluster_id for event in scene_events] == [1, 1]  # type: ignore[union-attr]
+    assert [event.payload.cluster_id for event in scene_events] == [1, 4]  # type: ignore[union-attr]
     assert scene_events[0].payload.switched_from is None  # type: ignore[union-attr]
     assert scene_events[1].payload.switched_from == 1  # type: ignore[union-attr]
 

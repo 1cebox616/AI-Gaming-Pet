@@ -3,7 +3,59 @@
   "display_name": "守望先锋",
   "genre": null,
   "perspective": null,
-  "scenes": [],
+  "scenes": [
+    {
+      "cluster_id": "scene:s1",
+      "label": null,
+      "representative_hash": "af32583d0f4e7389",
+      "first_seen": "2026-08-27T21:20:00.962893Z",
+      "last_seen": "2026-08-27T21:20:09.966310Z",
+      "seen_count": 19,
+      "visit_count": 1,
+      "sessions_seen": 1,
+      "evidence_ids": [
+        "f88:scene:1",
+        "f89:scene:1",
+        "f90:scene:1",
+        "f91:scene:1",
+        "f92:scene:1"
+      ]
+    },
+    {
+      "cluster_id": "scene:s2",
+      "label": null,
+      "representative_hash": "a8f4d5a5eb092b4d",
+      "first_seen": "2026-08-27T21:20:39.681898Z",
+      "last_seen": "2026-08-27T21:21:04.505176Z",
+      "seen_count": 39,
+      "visit_count": 2,
+      "sessions_seen": 1,
+      "evidence_ids": [
+        "f117:scene:1",
+        "f118:scene:1",
+        "f119:scene:1",
+        "f120:scene:1",
+        "f121:scene:1"
+      ]
+    },
+    {
+      "cluster_id": "scene:s3",
+      "label": null,
+      "representative_hash": "de28604b0fdef28d",
+      "first_seen": "2026-08-27T21:31:15.564961Z",
+      "last_seen": "2026-08-27T21:31:25.566327Z",
+      "seen_count": 21,
+      "visit_count": 1,
+      "sessions_seen": 1,
+      "evidence_ids": [
+        "f610:scene:1",
+        "f611:scene:1",
+        "f612:scene:1",
+        "f613:scene:1",
+        "f614:scene:1"
+      ]
+    }
+  ],
   "hud_slots": [],
   "keybinds": {},
   "view_constants": {

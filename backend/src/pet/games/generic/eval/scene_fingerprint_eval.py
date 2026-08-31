@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import json
 import math
@@ -36,7 +36,8 @@ TRUTH_PATH = BACKEND_DIRECTORY / "data" / "generic" / "scene-truth" / "spans.tom
 HASH_KIND = "phash"
 HASH_BITS = 64
 HAMMING_THRESHOLD = 8
-CARD_MIN_DWELL_SECONDS = 30.0
+STABLE_MIN_SECONDS = 4.0
+CARD_MIN_DWELL_SECONDS = 8.0
 _RAW_SEQUENCE = re.compile(r"raw-(?P<sequence>\d+)-")
 
 
@@ -82,6 +83,8 @@ class DurationCalibration:
 class ReplayResult:
     clusterer: SceneClusterer
     members: dict[int, tuple[PollingFrame, ...]]
+    candidate_count: int
+    selected_candidate_count: int
     selected_cluster_count: int
     promoted_cluster_ids: tuple[int, ...]
     stable_unpromoted_cluster_ids: tuple[int, ...]
@@ -490,8 +493,11 @@ def _replay_recording(
         cluster_id: tuple(items) for cluster_id, items in member_lists.items()
     }
     representative_rows: list[str] = []
+    retained_by_id = {
+        cluster.cluster_id: cluster for cluster in clusterer.clusters
+    }
     for cluster_id in promoted:
-        cluster = clusterer.clusters[cluster_id - 1]
+        cluster = retained_by_id[cluster_id]
         paths = _copy_representatives(
             output, cluster, members[cluster_id], promoted=True
         )
@@ -499,7 +505,7 @@ def _replay_recording(
             f"- 升格 `session:c{cluster_id}`：`{paths[0]}` / `{paths[1]}` / `{paths[2]}`"
         )
     for cluster_id in stable_unpromoted:
-        cluster = clusterer.clusters[cluster_id - 1]
+        cluster = retained_by_id[cluster_id]
         paths = _copy_representatives(
             output, cluster, members[cluster_id], promoted=False
         )
@@ -509,6 +515,8 @@ def _replay_recording(
     return ReplayResult(
         clusterer=clusterer,
         members=members,
+        candidate_count=clusterer.candidate_count,
+        selected_candidate_count=selected_clusterer.candidate_count,
         selected_cluster_count=len(selected_clusterer.clusters),
         promoted_cluster_ids=promoted,
         stable_unpromoted_cluster_ids=stable_unpromoted,
@@ -528,7 +536,7 @@ def _render_report(
 ) -> str:
     noise_p95 = _percentile(noise_distances, 95.0)
     lines = [
-        "# M5-B-T2-3 全轮询帧场景指纹校准报告",
+        "# M5-B-T2-3 全轮询帧场景指纹人工复核与收敛报告",
         "",
         "## 固定参数与噪声底复核",
         "",
@@ -545,8 +553,9 @@ def _render_report(
         "",
         f"- 连续段总数：{len(calibration.measured_durations)}，其中零时长单帧段 {calibration.zero_duration_count}；两者都按规格进入 P75。",
         f"- 直方图桶宽：{calibration.bin_width_seconds:.3f}s。",
-        f"- 判定：{calibration.method}。",
-        f"- `stable_min_seconds={calibration.stable_min_seconds:.3f}`；{'临时值' if calibration.temporary else '双峰谷值'}，未钳制。",
+        f"- 原无监督判定：{calibration.method}。",
+        f"- 人工独立复核后采用 `stable_min_seconds={calibration.stable_min_seconds:.3f}`；"
+        "未满此时长的候选属于默认游玩画面，不进入会话场景索引。",
         "",
         "| 时长桶（秒） | 段数 |",
         "|---|---:|",
@@ -559,17 +568,28 @@ def _render_report(
     lines.extend(
         (
             "",
+            "## 独立画面复核与阈值网格",
+            "",
+            "- 先按约 5 秒间隔浏览原始录像时间轴，再查看算法簇；没有用现有簇生成答案键。",
+            "- 守望先锋：大厅、英雄选择、地图投票/加载、结算。",
+            "- Don't Starve Together：服务器列表、建世界等待、加载画、角色选择。",
+            "- GZW：主界面、加载、全屏背包、全屏文档阅读。",
+            "- Slay the Spire 2：主菜单、奖励选牌、地图、首领结算。",
+            "- 网格复核选择 `stable_min_seconds=4`、`card_min_dwell_seconds=8`："
+            "能命中上述最明显的全屏状态，同时人工抽查的升格簇中没有游玩画面。",
+            "- pHash64 与汉明阈值 8 保持不变；本轮只修正时间门和候选保留策略。",
+            "",
             "## 全帧时间线 vs 选中帧时间线",
             "",
-            "| 录像 | 全部轮询帧 | 选中帧 | 全帧簇数 | 选中帧簇数 | 稳定簇 | 升格簇 | 稳定未升格 |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
+            "| 录像 | 全部轮询帧 | 选中帧 | 全帧候选 | 选中帧候选 | 全帧保留簇 | 选中帧保留簇 | 升格簇 | 稳定未升格 |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
         )
     )
     for recording, result in zip(recordings, replay_results, strict=True):
         lines.append(
             f"| {recording.label} | {len(recording.polling_frames)} | {len(recording.selected_frames)} | "
+            f"{result.candidate_count} | {result.selected_candidate_count} | "
             f"{len(result.clusterer.clusters)} | {result.selected_cluster_count} | "
-            f"{sum(cluster.stable for cluster in result.clusterer.clusters)} | "
             f"{len(result.promoted_cluster_ids)} | {len(result.stable_unpromoted_cluster_ids)} |"
         )
 
@@ -580,8 +600,8 @@ def _render_report(
                 f"### {recording.label}",
                 "",
                 f"- 录制：`{recording.path}`",
-                f"- 会话簇 / 稳定 / 升格 / 稳定未升格：{len(result.clusterer.clusters)} / "
-                f"{sum(cluster.stable for cluster in result.clusterer.clusters)} / "
+                f"- 原始候选 / 保留簇 / 升格 / 稳定未升格：{result.candidate_count} / "
+                f"{len(result.clusterer.clusters)} / "
                 f"{len(result.promoted_cluster_ids)} / {len(result.stable_unpromoted_cluster_ids)}",
                 "",
                 "| 簇 | 帧数 | dwell | visit_count | longest_run | stable | 升格 |",
@@ -609,7 +629,7 @@ def _render_report(
                 lines.extend(
                     (
                         f"- 本段仍为零场景；最长稳定簇是 `session:c{longest.cluster_id}`，"
-                        f"dwell={longest.dwell_seconds:.3f}s，距 30s 驻留门还差 {gap:.3f}s。",
+                        f"dwell={longest.dwell_seconds:.3f}s，距 {CARD_MIN_DWELL_SECONDS:g}s 驻留门还差 {gap:.3f}s。",
                         "",
                     )
                 )
@@ -672,7 +692,18 @@ def run_evaluation(
         for cluster in clusterer.clusters
         for span in cluster.visit_spans
     )
-    calibration = _derive_stable_min_seconds(durations, _polling_interval(recordings))
+    unsupervised = _derive_stable_min_seconds(
+        durations, _polling_interval(recordings)
+    )
+    calibration = replace(
+        unsupervised,
+        stable_min_seconds=STABLE_MIN_SECONDS,
+        temporary=False,
+        method=(
+            f"{unsupervised.method}；该值受零时长单帧段支配，"
+            "不再作为生产稳定门"
+        ),
+    )
 
     title_map = WindowTitleMap.load()
     identities = tuple(
@@ -750,8 +781,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             for cluster in clusterer.clusters
             for span in cluster.visit_spans
         )
-        calibration = _derive_stable_min_seconds(
+        unsupervised = _derive_stable_min_seconds(
             durations, _polling_interval(recordings)
+        )
+        calibration = replace(
+            unsupervised,
+            stable_min_seconds=STABLE_MIN_SECONDS,
+            temporary=False,
+            method=(
+                f"{unsupervised.method}；该值受零时长单帧段支配，"
+                "不再作为生产稳定门"
+            ),
         )
     else:
         calibration = run_evaluation(recordings, arguments.output, arguments.memory_dir)

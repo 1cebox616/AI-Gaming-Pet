@@ -151,7 +151,7 @@ class SceneFingerprintMatch:
 
 
 class SceneClusterer:
-    """Cluster selected frames within one session without changing representatives."""
+    """Retain only temporally stable full-frame scenes in the session index."""
 
     def __init__(
         self,
@@ -167,12 +167,26 @@ class SceneClusterer:
         self.stable_min_seconds = stable_min_seconds
         self._card_scenes = tuple(card_scenes)
         self._clusters: list[SceneCluster] = []
+        self._pending_cluster: SceneCluster | None = None
+        self._next_cluster_id = 1
+        self._candidate_count = 0
+        self._discarded_candidate_count = 0
         self._previous_cluster_id: int | None = None
         self._last_observed_at: float | None = None
 
     @property
     def clusters(self) -> tuple[SceneCluster, ...]:
         return tuple(self._clusters)
+
+    @property
+    def candidate_count(self) -> int:
+        """Return every provisional scene run created in this session."""
+        return self._candidate_count
+
+    @property
+    def discarded_candidate_count(self) -> int:
+        """Return provisional runs rejected before reaching stability."""
+        return self._discarded_candidate_count
 
     def observe(self, fingerprint: str, observed_at: float) -> SceneFingerprintMatch:
         if observed_at < 0:
@@ -181,12 +195,24 @@ class SceneClusterer:
             raise ValueError("scene observations must arrive in content-time order")
         self._last_observed_at = observed_at
         cluster, distance = self._nearest_cluster(fingerprint)
-        is_new = cluster is None or distance > self.hamming_threshold
-        if is_new:
-            cluster = self._new_cluster(fingerprint, observed_at)
-            distance = 0
-        else:
+        if cluster is not None and distance <= self.hamming_threshold:
+            self._discard_pending_cluster()
             self._append_member(cluster, observed_at, distance)
+            is_new = False
+        elif (
+            self._pending_cluster is not None
+            and hamming(fingerprint, self._pending_cluster.representative_hash)
+            <= self.hamming_threshold
+        ):
+            cluster = self._pending_cluster
+            distance = hamming(fingerprint, cluster.representative_hash)
+            self._append_member(cluster, observed_at, distance)
+            is_new = False
+        else:
+            self._discard_pending_cluster()
+            cluster = self._new_pending_cluster(fingerprint, observed_at)
+            distance = 0
+            is_new = True
 
         previous = self._previous_cluster_id
         switched_from = previous if previous is not None and previous != cluster.cluster_id else None
@@ -195,6 +221,9 @@ class SceneClusterer:
         current_stable = current_run_seconds >= self.stable_min_seconds
         if current_stable:
             cluster.stable = True
+            if cluster is self._pending_cluster:
+                self._clusters.append(cluster)
+                self._pending_cluster = None
         return SceneFingerprintMatch(
             cluster_id=cluster.cluster_id,
             distance=distance,
@@ -219,18 +248,28 @@ class SceneClusterer:
         best_index = min(range(len(distances)), key=distances.__getitem__)
         return self._clusters[best_index], distances[best_index]
 
-    def _new_cluster(self, fingerprint: str, observed_at: float) -> SceneCluster:
+    def _new_pending_cluster(
+        self, fingerprint: str, observed_at: float
+    ) -> SceneCluster:
         candidate = self._nearest_card_scene(fingerprint)
         cluster = SceneCluster(
-            cluster_id=len(self._clusters) + 1,
+            cluster_id=self._next_cluster_id,
             representative_hash=fingerprint,
             first_seen=observed_at,
             last_seen=observed_at,
             visit_spans=[VisitSpan(start=observed_at, end=observed_at)],
             card_candidate=candidate,
         )
-        self._clusters.append(cluster)
+        self._next_cluster_id += 1
+        self._candidate_count += 1
+        self._pending_cluster = cluster
         return cluster
+
+    def _discard_pending_cluster(self) -> None:
+        if self._pending_cluster is None:
+            return
+        self._discarded_candidate_count += 1
+        self._pending_cluster = None
 
     def _append_member(
         self,
@@ -270,6 +309,12 @@ class SceneClusterer:
         )
 
     def _cluster(self, cluster_id: int) -> SceneCluster:
-        if cluster_id < 1 or cluster_id > len(self._clusters):
-            raise ValueError(f"unknown scene cluster id: {cluster_id}")
-        return self._clusters[cluster_id - 1]
+        if (
+            self._pending_cluster is not None
+            and self._pending_cluster.cluster_id == cluster_id
+        ):
+            return self._pending_cluster
+        for cluster in self._clusters:
+            if cluster.cluster_id == cluster_id:
+                return cluster
+        raise ValueError(f"unknown scene cluster id: {cluster_id}")

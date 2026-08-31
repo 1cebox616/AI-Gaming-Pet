@@ -7,13 +7,15 @@ import pytest
 
 from pet.core.config import SceneConfig
 from pet.games.generic.eval.scene_fingerprint_eval import (
+    CARD_MIN_DWELL_SECONDS,
+    STABLE_MIN_SECONDS,
     _derive_stable_min_seconds,
     _noise_floor_distances,
     _threshold_interval,
 )
 
 
-def test_scene_defaults_match_all_frame_duration_report() -> None:
+def test_scene_defaults_match_manual_full_frame_review() -> None:
     settings = SceneConfig()
 
     assert (
@@ -22,7 +24,8 @@ def test_scene_defaults_match_all_frame_duration_report() -> None:
         settings.hamming_threshold,
         settings.stable_min_seconds,
         settings.card_min_dwell_seconds,
-    ) == ("phash", 64, 8, 0.0, 30.0)
+    ) == ("phash", 64, 8, 4.0, 8.0)
+    assert (STABLE_MIN_SECONDS, CARD_MIN_DWELL_SECONDS) == (4.0, 8.0)
 
 
 def test_noise_floor_uses_only_no_change_frame_and_its_predecessor() -> None:
