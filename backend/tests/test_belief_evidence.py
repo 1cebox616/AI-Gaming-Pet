@@ -13,6 +13,7 @@ from pet.core.belief import (
     FastObservationPayload,
     FrameMetricsPayload,
     KeyWindowPayload,
+    MouseMotionPayload,
     OcrFramePayload,
     ObservationsMarkdownWriter,
     Scope,
@@ -125,6 +126,78 @@ def test_evidence_store_has_only_append_only_public_api_and_round_trips(
         key_window,
         fast,
     ]
+
+
+def test_non_frame_mouse_evidence_ids_are_unique_sortable_and_round_trip(
+    tmp_path: Path,
+) -> None:
+    store = EvidenceStore.open(tmp_path)
+    first_id = store.new_evidence_id(None, "mouse")
+    second_id = store.new_evidence_id(None, "mouse")
+    assert first_id == "n000000000001:mouse"
+    assert second_id == "n000000000002:mouse"
+    assert first_id < second_id
+    events = [
+        EvidenceEvent(
+            evidence_id=evidence_id,
+            source="mouse",
+            kind="mouse_motion",
+            root_capture_id=None,
+            observed_at=float(index),
+            learned_at=float(index) + 0.01,
+            scope=None,
+            payload=MouseMotionPayload(
+                window_start=float(index - 1),
+                window_end=float(index),
+                direction="right",
+                magnitude="moderate",
+                raw_count_total=600 + index,
+                estimated_degrees=None,
+            ),
+            derived_from=[],
+            context_version=None,
+            outcome="ok",
+        )
+        for index, evidence_id in enumerate((first_id, second_id), start=1)
+    ]
+    for event in events:
+        store.append(event)
+    store.close()
+
+    assert list(EvidenceStore.read(tmp_path / "evidence.jsonl")) == events
+
+
+def test_non_frame_relaxation_does_not_weaken_frame_evidence_validation() -> None:
+    metrics, _, _ = _events()
+    with pytest.raises(ValidationError, match="frame evidence requires root_capture_id"):
+        EvidenceEvent.model_validate(
+            {
+                **metrics.model_dump(),
+                "evidence_id": "n000000000001:detector",
+                "root_capture_id": None,
+            }
+        )
+    with pytest.raises(ValidationError, match="must not have root_capture_id"):
+        EvidenceEvent(
+            evidence_id="f1:mouse:1",
+            source="mouse",
+            kind="mouse_motion",
+            root_capture_id="f1",
+            observed_at=1.0,
+            learned_at=1.0,
+            scope=None,
+            payload=MouseMotionPayload(
+                window_start=0.0,
+                window_end=1.0,
+                direction="right",
+                magnitude="moderate",
+                raw_count_total=600,
+                estimated_degrees=None,
+            ),
+            derived_from=[],
+            context_version=None,
+            outcome="ok",
+        )
 
 
 def test_observations_markdown_is_regenerable_and_incremental_bytes_match(

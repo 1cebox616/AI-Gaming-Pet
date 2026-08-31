@@ -109,6 +109,7 @@ def test_game_packages_do_not_cross_import_or_reach_eval_from_production() -> No
                         {
                             "belief",
                             "gamecard",
+                            "input_telemetry",
                             "ocr_probe",
                             "ocr_rapid",
                             "ocr_selective",

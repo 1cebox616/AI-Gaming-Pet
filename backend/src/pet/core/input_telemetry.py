@@ -27,11 +27,13 @@ INPUT_WHITELIST_VERSION = "v1"
 MOUSE_SUMMARY_WINDOW_SECONDS = 0.100
 ACTION_INPUT_RETENTION_SECONDS = 65.0
 ACTION_INPUT_EMPTY_TEXT = "此窗口内无玩家输入"
-# The two M5 calibration recordings have per-100 ms movement medians of 43.6
-# and 106.9 raw units.  Five hundred units separates their approximate
-# one-second light/large regimes; this presentation threshold does not affect
-# capture or frame-selection decisions.
-MOUSE_LARGE_MOVEMENT_UNITS = 500.0
+# M5-B-T5 calibration used the existing dispatched-frame input windows from
+# recordings 20260827-171815/203925/215554/220206.  Across 883 non-empty
+# windows, sum(abs(dx) + abs(dy)) had P33=556 and P67=1620 raw counts.  Rounded
+# boundaries keep the contract legible without pretending to more precision.
+# These presentation thresholds never affect capture or frame selection.
+MOUSE_MODERATE_MOVEMENT_UNITS = 550
+MOUSE_LARGE_MOVEMENT_UNITS = 1600
 
 KEYBOARD_INPUT_NAMES = (
     "W",
@@ -80,6 +82,16 @@ INPUT_NAME_WHITELIST = frozenset((*KEYBOARD_INPUT_NAMES, *MOUSE_INPUT_NAMES))
 INPUT_CSV_HEADER = ("时间", "单调秒", "事件类型", "键名", "dx", "dy")
 InputEventType = Literal["按下", "抬起", "滚轮", "移动汇总", "焦点丢失"]
 InputSampleKind = Literal["key", "mouse_button", "wheel", "move"]
+MouseMotionDirection = Literal[
+    "left",
+    "right",
+    "up",
+    "down",
+    "horizontal",
+    "vertical",
+]
+MouseMotionMagnitude = Literal["slight", "moderate", "large"]
+MouseViewMode = Literal["ordinary", "scoped", "vehicle", "2d", "unknown"]
 
 
 class InputTelemetryError(RuntimeError):
@@ -146,6 +158,65 @@ class ActionInputEvent:
     absolute_dx: int = 0
     absolute_dy: int = 0
     direction_known: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class MouseAngleContext:
+    """Optional B-T3 calibration inputs; absent fields suppress angle output."""
+
+    yaw_degrees_per_count: float | None = None
+    user_sensitivity: float | None = None
+    view_mode: MouseViewMode = "unknown"
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("yaw_degrees_per_count", self.yaw_degrees_per_count),
+            ("user_sensitivity", self.user_sensitivity),
+        ):
+            if value is not None and (not math.isfinite(value) or value <= 0):
+                raise ValueError(f"{name} must be finite and positive when provided")
+
+
+@dataclass(frozen=True, slots=True)
+class MouseMotionAggregate:
+    """One privacy-safe relative motion signal for an action-input window."""
+
+    window_start: float | None
+    window_end: float
+    direction: MouseMotionDirection
+    magnitude: MouseMotionMagnitude
+    raw_count_total: int
+    estimated_degrees: float | None
+
+    @property
+    def description(self) -> str:
+        direction = {
+            "left": "向左",
+            "right": "向右",
+            "up": "向上",
+            "down": "向下",
+            "horizontal": "横向",
+            "vertical": "纵向",
+        }[self.direction]
+        magnitude = {
+            "slight": "轻微",
+            "moderate": "中等",
+            "large": "大幅",
+        }[self.magnitude]
+        angle = (
+            ""
+            if self.estimated_degrees is None
+            else f"（约 {self.estimated_degrees:.0f}°）"
+        )
+        return f"鼠标{direction}{magnitude}转动{angle}"
+
+
+@dataclass(frozen=True, slots=True)
+class ActionInputWindow:
+    """Rendered action summary plus its structured mouse evidence, if any."""
+
+    summary: str
+    mouse_motion: MouseMotionAggregate | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -468,6 +539,16 @@ class ActionInputTimeline:
         end_inclusive: float,
     ) -> str:
         """Summarize exactly ``(start, end]`` without exposing raw key rows."""
+        return self.summarize_window_result(start_exclusive, end_inclusive).summary
+
+    def summarize_window_result(
+        self,
+        start_exclusive: float | None,
+        end_inclusive: float,
+        *,
+        angle_context: MouseAngleContext | None = None,
+    ) -> ActionInputWindow:
+        """Return one mechanical summary and its structured mouse aggregate."""
         if not math.isfinite(end_inclusive):
             raise ValueError("action input window end must be finite")
         if start_exclusive is not None:
@@ -481,7 +562,12 @@ class ActionInputTimeline:
                 while self._events and self._events[0].monotonic_seconds < cutoff:
                     self._events.popleft()
             events = tuple(sorted(self._events, key=lambda item: item.monotonic_seconds))
-        return _summarize_action_events(events, start_exclusive, end_inclusive)
+        return _summarize_action_events(
+            events,
+            start_exclusive,
+            end_inclusive,
+            angle_context=angle_context,
+        )
 
     def close(self) -> None:
         """Replay timelines own no OS or file resource."""
@@ -608,7 +694,9 @@ def _summarize_action_events(
     events: tuple[ActionInputEvent, ...],
     start_exclusive: float | None,
     end_inclusive: float,
-) -> str:
+    *,
+    angle_context: MouseAngleContext | None,
+) -> ActionInputWindow:
     start = float("-inf") if start_exclusive is None else start_exclusive
     active: dict[str, float] = {}
     press_times: dict[str, list[float]] = {}
@@ -667,9 +755,18 @@ def _summarize_action_events(
         parts.append(f"滚轮向上 {wheel_counts['WheelUp']} 次")
     if wheel_counts.get("WheelDown"):
         parts.append(f"滚轮向下 {wheel_counts['WheelDown']} 次")
-    if movement:
-        parts.append(_movement_summary(movement))
-    return "；".join(parts) if parts else ACTION_INPUT_EMPTY_TEXT
+    mouse_motion = _mouse_motion(
+        movement,
+        start_exclusive,
+        end_inclusive,
+        angle_context,
+    )
+    if mouse_motion is not None:
+        parts.append(mouse_motion.description)
+    return ActionInputWindow(
+        "；".join(parts) if parts else ACTION_INPUT_EMPTY_TEXT,
+        mouse_motion,
+    )
 
 
 def _click_summary(label: str, press_times: list[float]) -> str:
@@ -681,23 +778,63 @@ def _click_summary(label: str, press_times: list[float]) -> str:
     return value
 
 
-def _movement_summary(events: list[ActionInputEvent]) -> str:
+def _mouse_motion(
+    events: list[ActionInputEvent],
+    window_start: float | None,
+    window_end: float,
+    angle_context: MouseAngleContext | None,
+) -> MouseMotionAggregate | None:
+    if not events:
+        return None
     absolute_x = sum(event.absolute_dx for event in events)
     absolute_y = sum(event.absolute_dy for event in events)
-    magnitude = sum(math.hypot(event.absolute_dx, event.absolute_dy) for event in events)
-    grade = "大幅" if magnitude >= MOUSE_LARGE_MOVEMENT_UNITS else "轻微"
+    raw_count_total = absolute_x + absolute_y
+    if raw_count_total <= 0:
+        return None
+    if raw_count_total >= MOUSE_LARGE_MOVEMENT_UNITS:
+        magnitude: MouseMotionMagnitude = "large"
+    elif raw_count_total >= MOUSE_MODERATE_MOVEMENT_UNITS:
+        magnitude = "moderate"
+    else:
+        magnitude = "slight"
+    net_x = 0
+    net_y = 0
     if all(event.direction_known for event in events):
         net_x = sum(event.dx for event in events)
         net_y = sum(event.dy for event in events)
         if abs(net_x) >= abs(net_y) and net_x:
-            direction = "向右" if net_x > 0 else "向左"
+            direction: MouseMotionDirection = "right" if net_x > 0 else "left"
         elif net_y:
-            direction = "向下" if net_y > 0 else "向上"
+            direction = "down" if net_y > 0 else "up"
         else:
-            direction = "以横向为主" if absolute_x >= absolute_y else "以纵向为主"
+            direction = "horizontal" if absolute_x >= absolute_y else "vertical"
     else:
-        direction = "以横向为主" if absolute_x >= absolute_y else "以纵向为主"
-    return f"鼠标{direction}{grade}移动"
+        direction = "horizontal" if absolute_x >= absolute_y else "vertical"
+    estimated_degrees = _estimated_yaw_degrees(net_x, direction, angle_context)
+    return MouseMotionAggregate(
+        window_start=window_start,
+        window_end=window_end,
+        direction=direction,
+        magnitude=magnitude,
+        raw_count_total=raw_count_total,
+        estimated_degrees=estimated_degrees,
+    )
+
+
+def _estimated_yaw_degrees(
+    net_x: int,
+    direction: MouseMotionDirection,
+    context: MouseAngleContext | None,
+) -> float | None:
+    if (
+        context is None
+        or context.yaw_degrees_per_count is None
+        or context.user_sensitivity is None
+        or context.view_mode != "ordinary"
+        or direction not in {"left", "right"}
+    ):
+        return None
+    return abs(net_x) * context.yaw_degrees_per_count * context.user_sensitivity
 
 
 # Raw Input constants and structures. No hook or input-writing API is declared.
@@ -1359,6 +1496,19 @@ class ActionInputListener:
     ) -> str:
         return self.timeline.summarize_window(start_exclusive, end_inclusive)
 
+    def summarize_window_result(
+        self,
+        start_exclusive: float | None,
+        end_inclusive: float,
+        *,
+        angle_context: MouseAngleContext | None = None,
+    ) -> ActionInputWindow:
+        return self.timeline.summarize_window_result(
+            start_exclusive,
+            end_inclusive,
+            angle_context=angle_context,
+        )
+
     def close(self) -> None:
         if self._closed:
             return
@@ -1370,7 +1520,11 @@ class ActionInputListener:
             self._closed = True
 
 
-def load_action_input_csv(session_directory: Path) -> LoadedActionInput:
+def load_action_input_csv(
+    session_directory: Path,
+    *,
+    use_wall_clock: bool = False,
+) -> LoadedActionInput:
     """Load a replay CSV through the same action allowlist used in production.
 
     Historical probe CSVs stored absolute horizontal/vertical movement only,
@@ -1395,11 +1549,13 @@ def load_action_input_csv(session_directory: Path) -> LoadedActionInput:
                 if name and name not in INPUT_NAME_WHITELIST:
                     continue
                 monotonic_text = row.get("单调秒", "") if has_monotonic else ""
-                monotonic = (
-                    float(monotonic_text)
-                    if monotonic_text
-                    else datetime.fromisoformat(row["时间"]).timestamp()
-                )
+                if use_wall_clock or not monotonic_text:
+                    wall_time = datetime.fromisoformat(row["时间"])
+                    if wall_time.tzinfo is None:
+                        raise ValueError("input wall timestamp lacks timezone")
+                    monotonic = wall_time.timestamp()
+                else:
+                    monotonic = float(monotonic_text)
                 if not math.isfinite(monotonic):
                     raise ValueError("non-finite monotonic timestamp")
                 if event_type == "移动汇总":

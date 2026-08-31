@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -19,6 +20,18 @@ EvidenceSource = Literal[
 ]
 EvidenceOutcome = Literal["ok", "dropped", "superseded", "failed"]
 ChangeReason = Literal["sparse", "coarse", "large", "forced"]
+MouseMotionDirection = Literal[
+    "left",
+    "right",
+    "up",
+    "down",
+    "horizontal",
+    "vertical",
+]
+MouseMotionMagnitude = Literal["slight", "moderate", "large"]
+
+_FRAME_ROOT_PATTERN = re.compile(r"f[1-9]\d*\Z")
+_NON_FRAME_ID_PATTERN = re.compile(r"n(?P<sequence>\d{12}):(?P<source>[a-z][a-z0-9_]*)\Z")
 
 
 class EvidenceModel(BaseModel):
@@ -93,6 +106,21 @@ class KeyWindowPayload(EvidenceModel):
     def validate_window(self) -> KeyWindowPayload:
         if self.window_start is not None and self.window_start > self.window_end:
             raise ValueError("key window start must not be later than its end")
+        return self
+
+
+class MouseMotionPayload(EvidenceModel):
+    window_start: float | None = Field(default=None, ge=0.0)
+    window_end: float = Field(ge=0.0)
+    direction: MouseMotionDirection
+    magnitude: MouseMotionMagnitude
+    raw_count_total: int = Field(ge=1)
+    estimated_degrees: float | None = Field(default=None, ge=0.0)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> MouseMotionPayload:
+        if self.window_start is not None and self.window_start > self.window_end:
+            raise ValueError("mouse window start must not be later than its end")
         return self
 
 
@@ -209,6 +237,7 @@ EvidencePayload = (
     FastObservationPayload
     | FrameMetricsPayload
     | KeyWindowPayload
+    | MouseMotionPayload
     | TextObservedPayload
     | OcrFramePayload
     | SceneFingerprintPayload
@@ -235,6 +264,7 @@ class EvidenceEvent(EvidenceModel):
             "fast_observation": FastObservationPayload,
             "frame_metrics": FrameMetricsPayload,
             "key_window": KeyWindowPayload,
+            "mouse_motion": MouseMotionPayload,
             "text_observed": TextObservedPayload,
             "ocr_frame": OcrFramePayload,
             "scene_fingerprint": SceneFingerprintPayload,
@@ -247,6 +277,7 @@ class EvidenceEvent(EvidenceModel):
             "fast_observation": "fast",
             "frame_metrics": "detector",
             "key_window": "input",
+            "mouse_motion": "mouse",
             "text_observed": "ocr",
             "ocr_frame": "ocr",
             "scene_fingerprint": "scene",
@@ -254,17 +285,34 @@ class EvidenceEvent(EvidenceModel):
         }
         if self.source != expected_sources[self.kind]:
             raise ValueError(f"source does not match evidence kind {self.kind!r}")
-        if self.root_capture_id is None:
-            raise ValueError("frame evidence requires root_capture_id")
-        identifier_parts = self.evidence_id.split(":")
-        if (
-            len(identifier_parts) != 3
-            or identifier_parts[0] != self.root_capture_id
-            or identifier_parts[1] != self.source
-            or not identifier_parts[2].isdigit()
-            or int(identifier_parts[2]) < 1
-        ):
-            raise ValueError("evidence_id must match root_capture_id, source, and positive sequence")
+        if self.kind == "mouse_motion":
+            if self.root_capture_id is not None:
+                raise ValueError("non-frame mouse evidence must not have root_capture_id")
+            match = _NON_FRAME_ID_PATTERN.fullmatch(self.evidence_id)
+            if (
+                match is None
+                or match.group("source") != self.source
+                or int(match.group("sequence")) < 1
+            ):
+                raise ValueError(
+                    "non-frame evidence_id must use n<12-digit sequence>:<source>"
+                )
+        else:
+            if self.root_capture_id is None:
+                raise ValueError("frame evidence requires root_capture_id")
+            if _FRAME_ROOT_PATTERN.fullmatch(self.root_capture_id) is None:
+                raise ValueError("frame root_capture_id must use f<positive sequence>")
+            identifier_parts = self.evidence_id.split(":")
+            if (
+                len(identifier_parts) != 3
+                or identifier_parts[0] != self.root_capture_id
+                or identifier_parts[1] != self.source
+                or not identifier_parts[2].isdigit()
+                or int(identifier_parts[2]) < 1
+            ):
+                raise ValueError(
+                    "evidence_id must match root_capture_id, source, and positive sequence"
+                )
         if self.learned_at < self.observed_at:
             raise ValueError("learned_at must not precede observed_at")
         if self.kind not in {"fast_observation", "scene_verified"} and self.outcome != "ok":

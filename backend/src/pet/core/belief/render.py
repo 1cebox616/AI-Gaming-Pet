@@ -33,6 +33,8 @@ def _group_events(
 ) -> dict[int, dict[str, list[EvidenceEvent]]]:
     grouped: dict[int, dict[str, list[EvidenceEvent]]] = {}
     for event in events:
+        if event.kind not in _RENDERED_KINDS:
+            continue
         sequence = _sequence(event.root_capture_id)
         frame = grouped.setdefault(sequence, {})
         frame.setdefault(event.kind, []).append(event)
@@ -99,10 +101,10 @@ class ObservationsMarkdownWriter:
         self._next_sequence = 1
 
     def append(self, event: EvidenceEvent) -> None:
+        if event.kind not in _RENDERED_KINDS:
+            return
         sequence = _sequence(event.root_capture_id)
         if sequence < self._next_sequence:
-            if event.kind not in _RENDERED_KINDS:
-                return
             raise ValueError(f"late rendered evidence for frame f{sequence}")
         frame = self._pending.setdefault(sequence, {})
         frame.setdefault(event.kind, []).append(event)

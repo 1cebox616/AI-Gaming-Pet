@@ -21,6 +21,7 @@ from pet.core.belief import (
     FastObservationPayload,
     FrameMetricsPayload,
     KeyWindowPayload,
+    MouseMotionPayload,
     SceneFingerprintPayload,
     render_observations_markdown,
 )
@@ -297,7 +298,8 @@ def _legacy_observation_rows(directory: Path) -> list[dict[str, object]]:
     origin = float(session["origin_monotonic"])
     grouped: dict[str, dict[str, object]] = {}
     for event in EvidenceStore.read(directory / "evidence.jsonl"):
-        assert event.root_capture_id is not None
+        if event.root_capture_id is None:
+            continue
         grouped.setdefault(event.root_capture_id, {})[event.kind] = event
     rows: list[dict[str, object]] = []
     for root_capture_id in sorted(grouped, key=lambda value: int(value[1:])):
@@ -1318,6 +1320,14 @@ def test_b_t1_old_fake_client_scenario_covers_markdown_contract(
     input_timeline = ActionInputTimeline(retention_seconds=None)
     input_timeline.append(ActionInputEvent(0.2, "按下", "W"))
     input_timeline.append(ActionInputEvent(0.8, "抬起", "W"))
+    input_timeline.append(
+        ActionInputEvent(
+            0.9,
+            "移动汇总",
+            dx=1600,
+            absolute_dx=1600,
+        )
+    )
     adapter = GenericVisionAdapter(
         adapter_config,
         llm_config,
@@ -1397,7 +1407,7 @@ def test_b_t1_old_fake_client_scenario_covers_markdown_contract(
     assert "【局部｜区域占比1%】（区域像素变化60%）左上对象正在移动" in markdown
     assert "【推测】似乎正在查看界面" in markdown
     assert "【全局画面】（全局像素变化0.0%）定时快照保持稳定" in markdown
-    assert "【玩家输入】W 按住 0.6 秒" in markdown
+    assert "【玩家输入】W 按住 0.6 秒；鼠标向右大幅转动" in markdown
     assert len(client.calls) == 3
     request_signatures = []
     for call in client.calls:
@@ -1433,7 +1443,7 @@ def test_b_t1_old_fake_client_scenario_covers_markdown_contract(
         ).encode("utf-8")
         request_signatures.append(hashlib.sha256(serialized).hexdigest())
     assert request_signatures == [
-        "2ed4930f41dc7a37cbbe152da190d9798f74377fb980d15b795474790988d0de",
+        "1824bbc187f3d80b30da424dbb6c153dd0a581b45ff471733156f2e39dc1eb87",
         "b62370ecf5a63ebbaf0d63e130f93d22ab7d07b44c017c6167358e1e17e65d54",
         "d3d6a695e273aa1dbbbfdf67bff8ef19b51b6d1bc58f6d665d255e08ea352c07",
     ]
@@ -1446,14 +1456,39 @@ def test_b_t1_old_fake_client_scenario_covers_markdown_contract(
     assert markdown_path.read_bytes() == baseline_path.read_bytes()
     events = list(EvidenceStore.read(output / "evidence.jsonl"))
     grouped: dict[str, dict[str, object]] = {}
+    mouse_events = []
     for event in events:
-        assert event.root_capture_id is not None
+        if event.root_capture_id is None:
+            mouse_events.append(event)
+            continue
         grouped.setdefault(event.root_capture_id, {})[event.kind] = event
     assert set(grouped) == {"f1", "f2", "f3", "f4"}
     assert all(
         set(frame) == {"frame_metrics", "key_window", "fast_observation"}
         for frame in grouped.values()
     )
+    assert len(mouse_events) == 1
+    mouse_event = mouse_events[0]
+    assert mouse_event.evidence_id == "n000000000001:mouse"
+    assert mouse_event.source == "mouse"
+    assert mouse_event.kind == "mouse_motion"
+    assert mouse_event.root_capture_id is None
+    assert isinstance(mouse_event.payload, MouseMotionPayload)
+    assert mouse_event.payload.direction == "right"
+    assert mouse_event.payload.magnitude == "large"
+    assert mouse_event.payload.raw_count_total == 1600
+    assert mouse_event.payload.estimated_degrees is None
+    assert mouse_event.payload.window_end == 0.0
+    assert set(mouse_event.payload.model_dump()) == {
+        "window_start",
+        "window_end",
+        "direction",
+        "magnitude",
+        "raw_count_total",
+        "estimated_degrees",
+    }
+    assert "1600" not in markdown
+    assert "1600" not in str(client.calls[0]["user_prompt"])
     # ROOT CAUSE: concurrent replacement once discarded every mechanical fact for
     # that frame; belief must still advance when a model result never exists.
     for root_capture_id in ("f2", "f3"):
@@ -1472,6 +1507,8 @@ def test_b_t1_old_fake_client_scenario_covers_markdown_contract(
     for event in events:
         if event.kind in {"frame_metrics", "key_window"}:
             assert event.learned_at == event.observed_at
+        if event.kind == "mouse_motion":
+            assert event.learned_at >= event.observed_at
         if event.kind == "fast_observation":
             payload = event.payload
             assert isinstance(payload, FastObservationPayload)

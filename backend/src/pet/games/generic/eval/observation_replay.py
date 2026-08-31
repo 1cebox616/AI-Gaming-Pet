@@ -259,7 +259,10 @@ def _prepare_replay(
     if not included_count or source_size is None:
         raise ObservationReplayError(f"指定区间没有帧：{session}")
     actual_width = min(requested_width, source_size[0])
-    loaded_input = load_action_input_csv(session)
+    loaded_input = load_action_input_csv(
+        session,
+        use_wall_clock=not all(item.recorded_monotonic for item in timings),
+    )
     return PreparedReplay(
         session=session,
         name=_session_label(payload, session),

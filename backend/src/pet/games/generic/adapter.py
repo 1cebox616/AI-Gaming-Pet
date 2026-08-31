@@ -30,6 +30,7 @@ from pet.core.belief import (
     FastObservationPayload,
     FrameMetricsPayload,
     KeyWindowPayload,
+    MouseMotionPayload,
     OcrFramePayload,
     ObservationsMarkdownWriter,
     SceneFingerprintPayload,
@@ -37,6 +38,7 @@ from pet.core.belief import (
     Scope,
     TextObservedPayload,
 )
+from pet.core.input_telemetry import ActionInputWindow, MouseMotionAggregate
 from pet.core.config import AdapterConfig, LlmConfig, resolve_llm_profile
 from pet.core.gamecard import (
     GameCardRepository,
@@ -134,11 +136,11 @@ class FrameSelectorLike(Protocol):
 
 
 class InputContextLike(Protocol):
-    def summarize_window(
+    def summarize_window_result(
         self,
         start_exclusive: float | None,
         end_inclusive: float,
-    ) -> str: ...
+    ) -> ActionInputWindow: ...
 
     def close(self) -> None: ...
 
@@ -522,6 +524,44 @@ class ObservationLog:
             outcome="ok",
         )
         self._append_event(event)
+
+    def append_mouse_motion(
+        self,
+        motion: MouseMotionAggregate,
+        *,
+        learned_ts: float,
+    ) -> str:
+        observed_at = self._relative(motion.window_end)
+        learned_at = max(observed_at, self._relative(learned_ts))
+        relative_start = (
+            max(0.0, motion.window_start - self._origin())
+            if motion.window_start is not None
+            else None
+        )
+        evidence_id = self._evidence.new_evidence_id(None, "mouse")
+        self._append_event(
+            EvidenceEvent(
+                evidence_id=evidence_id,
+                source="mouse",
+                kind="mouse_motion",
+                root_capture_id=None,
+                observed_at=observed_at,
+                learned_at=learned_at,
+                scope=None,
+                payload=MouseMotionPayload(
+                    window_start=relative_start,
+                    window_end=observed_at,
+                    direction=motion.direction,
+                    magnitude=motion.magnitude,
+                    raw_count_total=motion.raw_count_total,
+                    estimated_degrees=motion.estimated_degrees,
+                ),
+                derived_from=[],
+                context_version=None,
+                outcome="ok",
+            )
+        )
+        return evidence_id
 
     def append(self, record: ObservationRecord) -> None:
         observed_at = self._relative(record.frame_ts)
@@ -1849,16 +1889,28 @@ class GenericVisionAdapter:
     def _launch_frame(self, pending: PendingFrame) -> None:
         frame_ts = pending.frame.metadata.monotonic_seconds
         input_summary: str | None = None
+        input_window: ActionInputWindow | None = None
         window_start = self._last_dispatched_frame_ts
         if self._settings.input_context:
             if self._input_context is None:
                 raise RuntimeError("输入上下文已启用但监听器未初始化")
-            input_summary = self._input_context.summarize_window(
+            input_window = self._input_context.summarize_window_result(
                 self._last_dispatched_frame_ts,
                 frame_ts,
             )
+            input_summary = input_window.summary
             self._last_dispatched_frame_ts = frame_ts
         logged_input = _logged_input(input_summary)
+        if input_window is not None and input_window.mouse_motion is not None:
+            assert self._log is not None
+            aggregation_elapsed = max(
+                0.0,
+                self._clock() - pending.scheduled_at_clock,
+            )
+            self._log.append_mouse_motion(
+                input_window.mouse_motion,
+                learned_ts=frame_ts + aggregation_elapsed,
+            )
         self._record_key_window(pending, logged_input, window_start)
         baseline_seconds_ago = frame_ts - pending.baseline_monotonic_seconds
         if baseline_seconds_ago < -1e-6:

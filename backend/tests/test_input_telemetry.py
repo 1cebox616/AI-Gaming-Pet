@@ -21,10 +21,13 @@ from pet.core.input_telemetry import (
     ClockAnchor,
     INPUT_CSV_HEADER,
     INPUT_NAME_WHITELIST,
+    MOUSE_LARGE_MOVEMENT_UNITS,
+    MOUSE_MODERATE_MOVEMENT_UNITS,
     InputEventProcessor,
     InputSample,
     InputTelemetryError,
     InputTelemetryRecorder,
+    MouseAngleContext,
     WindowsRawInputBackend,
     load_action_input_csv,
 )
@@ -298,7 +301,7 @@ def test_action_context_preserves_window_boundaries_clicks_holds_and_direction()
 
     assert "W 按住 1.0 秒" in summary
     assert "左键点击 2 次（平均间隔约 0.15 秒）" in summary
-    assert "鼠标向上轻微移动" in summary
+    assert "鼠标向上轻微转动" in summary
     assert "B" not in summary
     assert "A" not in summary
 
@@ -334,7 +337,147 @@ def test_replay_csv_filters_full_keyboard_and_marks_legacy_mouse_axis(
     assert loaded.direction_available is False
     assert "W 按住 0.5 秒" in summary
     assert "B" not in summary
-    assert "鼠标以横向为主大幅移动" in summary
+    assert "鼠标横向中等转动" in summary
+
+
+@pytest.mark.parametrize(
+    ("raw_count_total", "expected_magnitude"),
+    [
+        (MOUSE_MODERATE_MOVEMENT_UNITS - 1, "slight"),
+        (MOUSE_MODERATE_MOVEMENT_UNITS, "moderate"),
+        (MOUSE_LARGE_MOVEMENT_UNITS - 1, "moderate"),
+        (MOUSE_LARGE_MOVEMENT_UNITS, "large"),
+    ],
+)
+def test_mouse_motion_magnitude_boundaries(
+    raw_count_total: int,
+    expected_magnitude: str,
+) -> None:
+    timeline = ActionInputTimeline(retention_seconds=None)
+    timeline.append(
+        ActionInputEvent(
+            1.0,
+            "移动汇总",
+            dx=raw_count_total,
+            absolute_dx=raw_count_total,
+        )
+    )
+
+    result = timeline.summarize_window_result(0.0, 1.0)
+
+    assert result.mouse_motion is not None
+    assert result.mouse_motion.magnitude == expected_magnitude
+    assert result.mouse_motion.raw_count_total == raw_count_total
+    assert str(raw_count_total) not in result.summary
+
+
+def test_empty_mouse_window_emits_no_motion_aggregate() -> None:
+    timeline = ActionInputTimeline(retention_seconds=None)
+
+    result = timeline.summarize_window_result(0.0, 1.0)
+
+    assert result.mouse_motion is None
+    assert result.summary == ACTION_INPUT_EMPTY_TEXT
+
+
+@pytest.mark.parametrize(
+    ("dx", "dy", "expected_direction", "expected_text"),
+    [
+        (-600, 10, "left", "鼠标向左中等转动"),
+        (600, 10, "right", "鼠标向右中等转动"),
+        (10, -600, "up", "鼠标向上中等转动"),
+        (10, 600, "down", "鼠标向下中等转动"),
+    ],
+)
+def test_mouse_motion_preserves_four_signed_directions(
+    dx: int,
+    dy: int,
+    expected_direction: str,
+    expected_text: str,
+) -> None:
+    timeline = ActionInputTimeline(retention_seconds=None)
+    timeline.append(
+        ActionInputEvent(
+            1.0,
+            "移动汇总",
+            dx=dx,
+            dy=dy,
+            absolute_dx=abs(dx),
+            absolute_dy=abs(dy),
+        )
+    )
+
+    result = timeline.summarize_window_result(0.0, 1.0)
+
+    assert result.mouse_motion is not None
+    assert result.mouse_motion.direction == expected_direction
+    assert result.summary == expected_text
+
+
+def test_absolute_angle_requires_complete_ordinary_view_context() -> None:
+    timeline = ActionInputTimeline(retention_seconds=None)
+    timeline.append(
+        ActionInputEvent(
+            1.0,
+            "移动汇总",
+            dx=-2045,
+            absolute_dx=2045,
+        )
+    )
+    contexts = (
+        None,
+        MouseAngleContext(yaw_degrees_per_count=0.022, view_mode="ordinary"),
+        MouseAngleContext(user_sensitivity=2.0, view_mode="ordinary"),
+        MouseAngleContext(
+            yaw_degrees_per_count=0.022,
+            user_sensitivity=2.0,
+            view_mode="scoped",
+        ),
+    )
+    for context in contexts:
+        result = timeline.summarize_window_result(
+            0.0,
+            1.0,
+            angle_context=context,
+        )
+        assert result.mouse_motion is not None
+        assert result.mouse_motion.estimated_degrees is None
+        assert "°" not in result.summary
+
+    calibrated = timeline.summarize_window_result(
+        0.0,
+        1.0,
+        angle_context=MouseAngleContext(
+            yaw_degrees_per_count=0.022,
+            user_sensitivity=2.0,
+            view_mode="ordinary",
+        ),
+    )
+    assert calibrated.mouse_motion is not None
+    assert calibrated.mouse_motion.estimated_degrees == pytest.approx(89.98)
+    assert calibrated.summary == "鼠标向左大幅转动（约 90°）"
+
+
+def test_replay_csv_can_align_input_to_legacy_wall_clock(tmp_path: Path) -> None:
+    wall = STARTED + timedelta(seconds=2)
+    with (tmp_path / "input.csv").open(
+        "w", encoding="utf-8-sig", newline=""
+    ) as stream:
+        writer = csv.writer(stream)
+        writer.writerow(INPUT_CSV_HEADER)
+        writer.writerow((wall.isoformat(), "123.0", "移动汇总", "", 600, 0))
+
+    loaded = load_action_input_csv(tmp_path, use_wall_clock=True)
+    result = loaded.timeline.summarize_window_result(
+        wall.timestamp() - 0.1,
+        wall.timestamp(),
+    )
+
+    assert result.mouse_motion is not None
+    assert result.mouse_motion.direction == "horizontal"
+    assert result.mouse_motion.magnitude == "moderate"
+    assert result.mouse_motion.estimated_degrees is None
+    assert result.mouse_motion.raw_count_total == 600
 
 
 def test_missing_replay_csv_produces_explicit_no_input_signal(tmp_path: Path) -> None:

@@ -225,7 +225,7 @@ def test_metric_echo_detection_only_matches_renderer_values() -> None:
     assert _echoed_metric_values(row) == ("38%",)
 
 
-def test_local_1080p_replay_emits_three_evidence_kinds_per_selected_frame(
+def test_local_1080p_replay_emits_frame_and_mouse_evidence(
     tmp_path: Path,
 ) -> None:
     session = (
@@ -317,10 +317,14 @@ def test_local_1080p_replay_emits_three_evidence_kinds_per_selected_frame(
 
     asyncio.run(scenario())
     events = list(EvidenceStore.read(output / "evidence.jsonl"))
-    assert len(events) == len(prepared.selected) * 4
+    mouse_events = [event for event in events if event.kind == "mouse_motion"]
+    assert mouse_events
+    assert len(events) == len(prepared.selected) * 4 + len(mouse_events)
     roots: dict[str, set[str]] = {}
     for event in events:
-        assert event.root_capture_id is not None
+        if event.root_capture_id is None:
+            assert event.source == "mouse"
+            continue
         roots.setdefault(event.root_capture_id, set()).add(event.kind)
     assert all(
         kinds
