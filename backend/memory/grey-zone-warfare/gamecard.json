@@ -7,9 +7,10 @@
     {
       "scene_id": "scene:s1",
       "representative_hash": "85b1a9d45e89da9e",
-      "label": "游戏大厅",
+      "label": "主菜单大厅",
       "label_status": "named",
-      "annotation": "显示角色模型、模式选择及服务器列表的主菜单界面，玩家在此处准备开始游戏。",
+      "needs_review": false,
+      "annotation": "游戏启动后的主界面，展示角色模型、模式选择卡片（战争/联合行动）及开始游戏按钮。",
       "dwell_seconds": 9.997232699999586,
       "visit_count": 2,
       "sessions_seen": 1,
@@ -22,7 +23,7 @@
         "f4:scene:1",
         "f5:scene:1"
       ],
-      "verified_at": "2026-08-31T16:07:10.905831Z",
+      "verified_at": "2026-08-31T19:07:47.865309Z",
       "deep_evidence_ids": [
         "f4:deep:1"
       ]
@@ -30,9 +31,10 @@
     {
       "scene_id": "scene:s2",
       "representative_hash": "c0c0c4c5fcdd5d79",
-      "label": "加载对局界面",
+      "label": "加载界面",
       "label_status": "named",
-      "annotation": "显示连接服务器与加载进度的过渡画面，出现在进入实际对战前的准备阶段。",
+      "needs_review": false,
+      "annotation": "画面显示士兵乘坐直升机的背景，并带有“正在连接服务器”、“正在加载对局”文字及进度条，表明游戏正处于进入对局的加载阶段。",
       "dwell_seconds": 17.02286950001144,
       "visit_count": 1,
       "sessions_seen": 1,
@@ -43,7 +45,7 @@
         "f11:scene:1",
         "f12:scene:1"
       ],
-      "verified_at": "2026-08-31T16:07:18.997218Z",
+      "verified_at": "2026-08-31T19:07:47.876132Z",
       "deep_evidence_ids": [
         "f10:deep:1"
       ]
@@ -53,7 +55,8 @@
       "representative_hash": "a46a0f2bb9e8e8ad",
       "label": "角色装备界面",
       "label_status": "named",
-      "annotation": "用于在进入对局前查看角色状态、穿戴装备及整理背包的菜单界面。",
+      "needs_review": false,
+      "annotation": "画面显示顶部的“角色”与“装备”标签页，左侧为角色模型及穿戴槽位，右侧为储物柜物品栏，属于游戏大厅中的角色配置菜单。",
       "dwell_seconds": 14.002422349964036,
       "visit_count": 3,
       "sessions_seen": 1,
@@ -66,7 +69,7 @@
         "f55:scene:1",
         "f56:scene:1"
       ],
-      "verified_at": "2026-08-31T16:07:39.945321Z",
+      "verified_at": "2026-08-31T19:07:47.891050Z",
       "deep_evidence_ids": [
         "f54:deep:1"
       ]

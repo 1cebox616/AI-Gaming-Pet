@@ -162,6 +162,13 @@ class SceneVerifiedPayload(EvidenceModel):
     label: str
     annotation: str
     modality: Literal["observed", "inferred", "uncertain"]
+    matches_existing: bool | None
+    candidate_scene_id: str | None = Field(
+        default=None,
+        pattern=r"^scene:s[1-9]\d*$",
+    )
+    candidate_label: str | None = None
+    action: Literal["new", "reused", "replaced", "rejected"]
     root_capture_ids: list[str] = Field(min_length=1)
     model: str = Field(min_length=1)
     provider: str | None = None
@@ -182,6 +189,19 @@ class SceneVerifiedPayload(EvidenceModel):
             raise ValueError("scene verification root ids must use f<sequence>")
         if len(set(self.root_capture_ids)) != len(self.root_capture_ids):
             raise ValueError("scene verification root ids must be unique")
+        has_candidate = self.candidate_scene_id is not None
+        if has_candidate != (self.candidate_label is not None):
+            raise ValueError("scene verification candidate id and label must coexist")
+        if self.action == "new" and (has_candidate or self.matches_existing is not None):
+            raise ValueError("new scene verification cannot cite a card candidate")
+        if self.action == "reused" and (
+            not has_candidate or self.matches_existing is not True
+        ):
+            raise ValueError("reused scene verification requires a matching candidate")
+        if self.action == "replaced" and (
+            not has_candidate or self.matches_existing is not False
+        ):
+            raise ValueError("replaced scene verification requires a rejected candidate")
         return self
 
 
@@ -256,6 +276,8 @@ class EvidenceEvent(EvidenceModel):
                 raise ValueError("rejected scene verification needs validation_error")
             if self.outcome not in {"ok", "failed"}:
                 raise ValueError("scene verification outcome must be ok or failed")
+            if (self.payload.action == "rejected") != (self.outcome == "failed"):
+                raise ValueError("rejected scene verification must use outcome=failed")
         if isinstance(self.payload, FastObservationPayload):
             if self.outcome == "ok":
                 if not self.payload.text or self.payload.drop_reason is not None:

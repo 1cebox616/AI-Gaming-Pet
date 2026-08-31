@@ -28,6 +28,7 @@ class GameCardScene(GameCardModel):
     representative_hash: str = Field(pattern=r"^(?:[0-9a-f]{16}|[0-9a-f]{64})$")
     label: str | None = None
     label_status: Literal["unnamed", "named", "uncertain"] = "unnamed"
+    needs_review: bool = False
     annotation: str | None = None
     dwell_seconds: float = Field(ge=0.0)
     visit_count: int = Field(ge=1)
@@ -45,6 +46,8 @@ class SceneCardVerification(GameCardModel):
     label: str = Field(min_length=1, max_length=24)
     annotation: str = Field(min_length=1, max_length=160)
     modality: Literal["observed", "inferred", "uncertain"]
+    label_status: Literal["named", "uncertain"]
+    needs_review: bool
     verified_at: datetime
     evidence_id: str = Field(min_length=1)
 
@@ -130,6 +133,7 @@ def render_gamecard_markdown(card: GameCard) -> str:
                 "",
                 f"- 标签：{scene.label or '未标注'}",
                 f"- 标签状态：{scene.label_status}",
+                f"- 待复查：{'是' if scene.needs_review else '否'}",
                 f"- 注释：{scene.annotation or '未标注'}",
                 f"- 代表指纹：`{scene.representative_hash}`",
                 f"- 首次见到：{_iso(scene.first_seen)}",
@@ -228,15 +232,11 @@ class GameCardSession:
         card: GameCard,
         started_at: datetime,
         *,
-        card_min_dwell_seconds: float,
         source_recording: str | None = None,
     ) -> None:
-        if card_min_dwell_seconds < 0:
-            raise ValueError("card_min_dwell_seconds must be nonnegative")
         self.repository = repository
         self.card = card
         self.started_at = _utc(started_at)
-        self.card_min_dwell_seconds = card_min_dwell_seconds
         self.source_recording = source_recording
         self._cluster_scene_ids: dict[int, str] = {}
         self._flushed_dwell_seconds: dict[int, float] = {}
@@ -271,6 +271,7 @@ class GameCardSession:
                         representative_hash=cluster.representative_hash,
                         label=None,
                         label_status="unnamed",
+                        needs_review=False,
                         annotation=None,
                         dwell_seconds=cluster.dwell_seconds,
                         visit_count=cluster.visit_count,
@@ -355,10 +356,33 @@ class GameCardSession:
         self._verifications[cluster.cluster_id] = verification
         self.flush((cluster,))
 
+    def mark_candidate_for_review(
+        self,
+        cluster: SceneCluster,
+        evidence_id: str,
+    ) -> None:
+        """Retain an existing name while marking an uncertain mismatch for review."""
+        candidate_id = (
+            cluster.card_candidate.scene_id
+            if cluster.card_candidate is not None
+            else self._cluster_scene_ids.get(cluster.cluster_id)
+        )
+        working = self.card.model_copy(deep=True)
+        scene = _scene_by_id(working.scenes, candidate_id)
+        if scene is None or scene.label_status == "unnamed":
+            raise ValueError("scene review marker requires a named card candidate")
+        scene.needs_review = True
+        if evidence_id not in scene.deep_evidence_ids:
+            scene.deep_evidence_ids.append(evidence_id)
+        self.repository.write(working)
+        self.card = working
+
     def _qualifies(self, cluster: SceneCluster) -> bool:
+        verification = self._verifications.get(cluster.cluster_id)
         return (
             cluster.stable
-            and cluster.dwell_seconds >= self.card_min_dwell_seconds
+            and verification is not None
+            and not is_ordinary_gameplay_label(verification.label)
         )
 
     def _absolute(self, relative_seconds: float) -> datetime:
@@ -423,10 +447,24 @@ def _apply_verification(
     verification: SceneCardVerification,
 ) -> None:
     scene.label = verification.label
-    scene.label_status = (
-        "uncertain" if verification.modality == "uncertain" else "named"
-    )
+    scene.label_status = verification.label_status
+    scene.needs_review = verification.needs_review
     scene.annotation = verification.annotation
     scene.verified_at = _utc(verification.verified_at)
     if verification.evidence_id not in scene.deep_evidence_ids:
         scene.deep_evidence_ids.append(verification.evidence_id)
+
+
+def is_ordinary_gameplay_label(label: str) -> bool:
+    """Return whether the model named a normal-play view rather than a UI scene."""
+    normalized = "".join(label.split())
+    if "普通游玩画面" in normalized:
+        return True
+    return normalized in {
+        "普通游戏画面",
+        "游戏画面",
+        "游玩画面",
+        "战斗画面",
+        "战斗界面",
+        "战斗场景",
+    }

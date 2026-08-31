@@ -126,7 +126,6 @@ def _configuration(memory: Path) -> tuple[AdapterConfig, LlmConfig]:
                 hash_bits=64,
                 hamming_threshold=0,
                 stable_min_seconds=1.0,
-                card_min_dwell_seconds=1.0,
                 card_flush_seconds=999.0,
                 memory_dir=str(memory),
                 naming=SceneNamingConfig(
@@ -230,6 +229,7 @@ def test_stable_cluster_is_named_once_and_uncertain_is_preserved(
     scene = card["scenes"][0]
     assert scene["label"] == "主菜单"
     assert scene["label_status"] == "uncertain"
+    assert scene["needs_review"] is True
     assert len(scene["deep_evidence_ids"]) == 1
     events = list(EvidenceStore.read(output / "evidence.jsonl"))
     verified = [event for event in events if event.kind == "scene_verified"]
@@ -239,6 +239,10 @@ def test_stable_cluster_is_named_once_and_uncertain_is_preserved(
     assert isinstance(verified[0].payload, SceneVerifiedPayload)
     assert verified[0].payload.root_capture_ids == ["f1"]
     assert verified[0].payload.cost_usd == 0.0123
+    assert verified[0].payload.matches_existing is None
+    assert verified[0].payload.candidate_scene_id is None
+    assert verified[0].payload.candidate_label is None
+    assert verified[0].payload.action == "new"
 
 
 def test_unstable_cluster_proposal_is_rejected_and_persisted_as_failed_evidence(
@@ -282,6 +286,7 @@ def test_unstable_cluster_proposal_is_rejected_and_persisted_as_failed_evidence(
     assert verified[0].outcome == "failed"
     assert isinstance(verified[0].payload, SceneVerifiedPayload)
     assert "stable gate" in (verified[0].payload.validation_error or "")
+    assert verified[0].payload.action == "rejected"
     card = json.loads(
         (tmp_path / "memory" / "fixture-game" / "gamecard.json").read_text(
             encoding="utf-8"
@@ -308,11 +313,11 @@ def test_deep_failure_does_not_retry_in_session_and_next_session_can_retry(
     first_card = json.loads(
         (memory / "fixture-game" / "gamecard.json").read_text(encoding="utf-8")
     )
-    assert first_card["scenes"][0]["label_status"] == "unnamed"
+    assert first_card["scenes"] == []
 
     succeeding = DeepClient(
-        '{"matches_existing":null,"label":"普通游玩画面",'
-        '"annotation":"玩家正常操控游戏世界时显示。",'
+        '{"matches_existing":null,"label":"主菜单",'
+        '"annotation":"游戏启动后用于选择功能的主界面。",'
         '"modality":"observed"}'
     )
     second = _adapter(memory, succeeding)
@@ -328,7 +333,7 @@ def test_deep_failure_does_not_retry_in_session_and_next_session_can_retry(
     second_card = json.loads(
         (memory / "fixture-game" / "gamecard.json").read_text(encoding="utf-8")
     )
-    assert second_card["scenes"][0]["label"] == "普通游玩画面"
+    assert second_card["scenes"][0]["label"] == "主菜单"
     assert second_card["scenes"][0]["label_status"] == "named"
 
     already_named = DeepClient(
@@ -347,11 +352,11 @@ def test_deep_failure_does_not_retry_in_session_and_next_session_can_retry(
     asyncio.run(third_session())
     assert len(already_named.calls) == 1
     prompt = str(already_named.calls[0]["user_prompt"])
-    assert "当前短名：普通游玩画面" in prompt
+    assert "当前短名：主菜单" in prompt
     third_card = json.loads(
         (memory / "fixture-game" / "gamecard.json").read_text(encoding="utf-8")
     )
-    assert third_card["scenes"][0]["label"] == "普通游玩画面"
+    assert third_card["scenes"][0]["label"] == "主菜单"
     third_evidence_path = tmp_path / "already-named" / "evidence.jsonl"
     third_verified = [
         event
@@ -360,7 +365,11 @@ def test_deep_failure_does_not_retry_in_session_and_next_session_can_retry(
     ]
     assert len(third_verified) == 1
     assert isinstance(third_verified[0].payload, SceneVerifiedPayload)
-    assert third_verified[0].payload.label == "普通游玩画面"
+    assert third_verified[0].payload.label == "错误的新名字"
+    assert third_verified[0].payload.matches_existing is True
+    assert third_verified[0].payload.candidate_scene_id == "scene:s1"
+    assert third_verified[0].payload.candidate_label == "主菜单"
+    assert third_verified[0].payload.action == "reused"
 
     changed = DeepClient(
         '{"matches_existing":false,"label":"设置菜单",'
@@ -390,6 +399,69 @@ def test_deep_failure_does_not_retry_in_session_and_next_session_can_retry(
     assert len(fourth_verified) == 1
     assert isinstance(fourth_verified[0].payload, SceneVerifiedPayload)
     assert fourth_verified[0].payload.label == "设置菜单"
+    assert fourth_verified[0].payload.matches_existing is False
+    assert fourth_verified[0].payload.candidate_scene_id == "scene:s1"
+    assert fourth_verified[0].payload.candidate_label == "主菜单"
+    assert fourth_verified[0].payload.action == "replaced"
+
+
+def test_uncertain_mismatch_keeps_existing_name_and_marks_review(
+    tmp_path: Path,
+) -> None:
+    memory = tmp_path / "memory"
+    initial = _adapter(
+        memory,
+        DeepClient(
+            '{"matches_existing":null,"label":"主菜单",'
+            '"annotation":"游戏启动后用于选择功能的主界面。",'
+            '"modality":"observed"}'
+        ),
+    )
+
+    async def create_card() -> None:
+        initial.start_replay(tmp_path / "initial", input_context=None)
+        for moment in (0.0, 1.0):
+            await _submit(initial, moment)
+        await initial.finish_replay()
+
+    asyncio.run(create_card())
+    uncertain = _adapter(
+        memory,
+        DeepClient(
+            '{"matches_existing":false,"label":"设置菜单",'
+            '"annotation":"画面可能是设置界面，但证据不足。",'
+            '"modality":"uncertain"}'
+        ),
+    )
+
+    async def recheck() -> None:
+        uncertain.start_replay(tmp_path / "uncertain", input_context=None)
+        for moment in (10.0, 11.0):
+            await _submit(uncertain, moment)
+        await uncertain.finish_replay()
+
+    asyncio.run(recheck())
+    card = json.loads(
+        (memory / "fixture-game" / "gamecard.json").read_text(encoding="utf-8")
+    )
+    assert card["scenes"][0]["label"] == "主菜单"
+    assert card["scenes"][0]["annotation"] == "游戏启动后用于选择功能的主界面。"
+    assert card["scenes"][0]["needs_review"] is True
+    verified = [
+        event
+        for event in EvidenceStore.read(tmp_path / "uncertain" / "evidence.jsonl")
+        if event.kind == "scene_verified"
+    ]
+    assert len(verified) == 1
+    assert verified[0].outcome == "failed"
+    assert isinstance(verified[0].payload, SceneVerifiedPayload)
+    assert verified[0].payload.matches_existing is False
+    assert verified[0].payload.candidate_scene_id == "scene:s1"
+    assert verified[0].payload.candidate_label == "主菜单"
+    assert verified[0].payload.action == "rejected"
+    assert "uncertain proposal cannot replace" in (
+        verified[0].payload.validation_error or ""
+    )
 
 
 def test_deep_reader_enforces_wall_clock_timeout() -> None:

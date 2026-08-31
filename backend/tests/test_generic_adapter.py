@@ -659,7 +659,6 @@ def test_selected_frames_each_emit_one_scene_event_without_changing_markdown(
         hash_bits=64,
         hamming_threshold=1,
         stable_min_seconds=1.0,
-        card_min_dwell_seconds=1.0,
         card_flush_seconds=999.0,
         memory_dir=str(tmp_path / "memory"),
     )
@@ -714,7 +713,7 @@ def test_selected_frames_each_emit_one_scene_event_without_changing_markdown(
             encoding="utf-8"
         )
     )
-    assert card["scenes"][0]["dwell_seconds"] == 1.0
+    assert card["scenes"] == []
 
 
 def test_no_change_polling_frames_advance_scene_stability_without_evidence(
@@ -727,7 +726,6 @@ def test_no_change_polling_frames_advance_scene_stability_without_evidence(
         hash_bits=64,
         hamming_threshold=1,
         stable_min_seconds=5.0,
-        card_min_dwell_seconds=30.0,
         card_flush_seconds=999.0,
         memory_dir=str(tmp_path / "memory"),
     )
@@ -772,7 +770,6 @@ def test_selected_scene_switch_reports_last_selected_cluster_across_intermediate
         hash_bits=64,
         hamming_threshold=0,
         stable_min_seconds=1.0,
-        card_min_dwell_seconds=30.0,
         card_flush_seconds=999.0,
         memory_dir=str(tmp_path / "memory"),
     )
@@ -855,7 +852,6 @@ def test_game_switch_flushes_old_card_before_loading_new_card(tmp_path: Path) ->
         hash_bits=64,
         hamming_threshold=1,
         stable_min_seconds=1.0,
-        card_min_dwell_seconds=1.0,
         card_flush_seconds=999.0,
         memory_dir=str(tmp_path / "memory"),
     )
@@ -919,7 +915,7 @@ def test_game_switch_flushes_old_card_before_loading_new_card(tmp_path: Path) ->
             encoding="utf-8"
         )
     )
-    assert first["scenes"][0]["dwell_seconds"] == 1.0
+    assert first["scenes"] == []
     assert second["scenes"] == []
 
 

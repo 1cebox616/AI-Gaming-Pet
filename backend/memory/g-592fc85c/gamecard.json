@@ -7,9 +7,10 @@
     {
       "scene_id": "scene:s1",
       "representative_hash": "af32583d0f4e7389",
-      "label": "休闲比赛匹配界面",
+      "label": "主菜单匹配界面",
       "label_status": "named",
-      "annotation": "玩家选择休闲比赛模式后进入的匹配等待界面，显示队伍状态、模式选项及角色展示。",
+      "needs_review": false,
+      "annotation": "守望先锋游戏大厅主菜单，当前选中休闲比赛模式并显示正在搜索状态。",
       "dwell_seconds": 9.003416849998757,
       "visit_count": 1,
       "sessions_seen": 1,
@@ -22,7 +23,7 @@
         "f91:scene:1",
         "f92:scene:1"
       ],
-      "verified_at": "2026-08-31T16:04:32.629456Z",
+      "verified_at": "2026-08-31T19:07:47.726476Z",
       "deep_evidence_ids": [
         "f89:deep:1"
       ]
@@ -32,7 +33,8 @@
       "representative_hash": "a8f4d5a5eb092b4d",
       "label": "英雄选择界面",
       "label_status": "named",
-      "annotation": "比赛正式开始前，玩家选择英雄并等待倒计时结束的准备界面。",
+      "needs_review": false,
+      "annotation": "这是守望先锋对局开始前的英雄选择阶段，玩家正在挑选角色并查看队伍阵容。",
       "dwell_seconds": 23.54293245000008,
       "visit_count": 2,
       "sessions_seen": 1,
@@ -45,7 +47,7 @@
         "f120:scene:1",
         "f121:scene:1"
       ],
-      "verified_at": "2026-08-31T16:04:58.237613Z",
+      "verified_at": "2026-08-31T19:07:47.741772Z",
       "deep_evidence_ids": [
         "f119:deep:1"
       ]
@@ -53,9 +55,10 @@
     {
       "scene_id": "scene:s3",
       "representative_hash": "de28604b0fdef28d",
-      "label": "休闲比赛选择界面",
+      "label": "主菜单休闲比赛界面",
       "label_status": "named",
-      "annotation": "游戏主菜单中用于选择休闲比赛类型（如快速比赛）及查看小队信息的界面。",
+      "needs_review": false,
+      "annotation": "守望先锋游戏大厅的主菜单，当前选中“休闲比赛”标签页，展示模式选择、英雄预览及小队列表。",
       "dwell_seconds": 10.001365150004858,
       "visit_count": 1,
       "sessions_seen": 1,
@@ -68,7 +71,7 @@
         "f613:scene:1",
         "f614:scene:1"
       ],
-      "verified_at": "2026-08-31T16:05:36.901809Z",
+      "verified_at": "2026-08-31T19:07:47.756418Z",
       "deep_evidence_ids": [
         "f613:deep:1"
       ]

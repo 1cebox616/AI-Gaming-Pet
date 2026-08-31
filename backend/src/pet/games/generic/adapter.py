@@ -15,7 +15,7 @@ from pathlib import Path
 import re
 import time
 import tomllib
-from typing import Protocol
+from typing import Literal, Protocol
 
 import numpy as np
 from fastapi import APIRouter
@@ -727,6 +727,10 @@ class ObservationLog:
         label: str,
         annotation: str,
         modality: str,
+        matches_existing: bool | None,
+        candidate_scene_id: str | None,
+        candidate_label: str | None,
+        action: Literal["new", "reused", "replaced", "rejected"],
         root_capture_ids: Sequence[str],
         fingerprint_evidence_ids: Sequence[str],
         result: DeepReadResult,
@@ -752,6 +756,10 @@ class ObservationLog:
                     label=label,
                     annotation=annotation,
                     modality=modality,
+                    matches_existing=matches_existing,
+                    candidate_scene_id=candidate_scene_id,
+                    candidate_label=candidate_label,
+                    action=action,
                     root_capture_ids=list(root_capture_ids),
                     model=result.result.model,
                     provider=result.result.provider,
@@ -763,7 +771,7 @@ class ObservationLog:
                 ),
                 derived_from=list(fingerprint_evidence_ids),
                 context_version=None,
-                outcome="failed" if validation_error is not None else "ok",
+                outcome="failed" if action == "rejected" else "ok",
             )
         )
         self.record_deep_call(result.cost_usd, failed=validation_error is not None)
@@ -1338,7 +1346,6 @@ class GenericVisionAdapter:
                 self._scene_repository,
                 card,
                 frame.metadata.captured_at,
-                card_min_dwell_seconds=settings.card_min_dwell_seconds,
             )
             self._scene_clusterer = SceneClusterer(
                 settings.hamming_threshold,
@@ -1545,6 +1552,10 @@ class GenericVisionAdapter:
                 label=decision.label,
                 annotation=decision.annotation,
                 modality=decision.modality,
+                matches_existing=decision.matches_existing,
+                candidate_scene_id=decision.candidate_scene_id,
+                candidate_label=decision.candidate_label,
+                action=decision.action,
                 root_capture_ids=tuple(frame.root_capture_id for frame in context.frames),
                 fingerprint_evidence_ids=tuple(
                     frame.fingerprint_evidence_id for frame in context.frames
@@ -1554,18 +1565,28 @@ class GenericVisionAdapter:
             )
             cost_recorded = True
             if not decision.accepted:
+                if decision.needs_review and context.existing_scene is not None:
+                    context.session.mark_candidate_for_review(
+                        context.cluster,
+                        evidence_id,
+                    )
                 logger.warning(
                     "拒绝 session:c%d 场景命名判决：%s",
                     context.cluster.cluster_id,
                     decision.validation_error,
                 )
                 return
+            assert decision.applied_label is not None
+            assert decision.applied_annotation is not None
+            assert decision.applied_label_status is not None
             context.session.record_verification(
                 context.cluster,
                 SceneCardVerification(
-                    label=decision.label,
-                    annotation=decision.annotation,
+                    label=decision.applied_label,
+                    annotation=decision.applied_annotation,
                     modality=decision.modality,
+                    label_status=decision.applied_label_status,
+                    needs_review=decision.needs_review,
                     verified_at=datetime.now(timezone.utc),
                     evidence_id=evidence_id,
                 ),

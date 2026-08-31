@@ -12,6 +12,8 @@ import pet.core.gamecard as gamecard_module
 from pet.core.gamecard import (
     GameCardRepository,
     GameCardSession,
+    SceneCardVerification,
+    is_ordinary_gameplay_label,
     render_gamecard_markdown,
     slugify_game_id,
 )
@@ -55,7 +57,22 @@ def _session(
         repository,
         card,
         STARTED,
-        card_min_dwell_seconds=30.0,
+    )
+
+
+def _verification(
+    label: str = "主菜单",
+    *,
+    evidence_id: str = "f1:deep:1",
+) -> SceneCardVerification:
+    return SceneCardVerification(
+        label=label,
+        annotation="用于选择功能的固定界面。",
+        modality="observed",
+        label_status="named",
+        needs_review=False,
+        verified_at=STARTED,
+        evidence_id=evidence_id,
     )
 
 
@@ -66,7 +83,7 @@ def test_slug_rule_is_ascii_lowercase_collapsed_and_hashes_empty_results() -> No
     assert slugify_game_id("---", "!!!") == "g-9a7b006d"
 
 
-def test_stable_cluster_with_insufficient_dwell_does_not_promote(
+def test_stable_cluster_without_semantic_verification_does_not_promote(
     tmp_path: Path,
 ) -> None:
     repository = GameCardRepository(tmp_path)
@@ -74,6 +91,34 @@ def test_stable_cluster_with_insufficient_dwell_does_not_promote(
     session = _session(repository, "fixture-game", clusterer)
     session.flush(clusterer.clusters)
     assert session.card.scenes == []
+
+
+def test_short_dwell_interface_promotes_after_semantic_verification(
+    tmp_path: Path,
+) -> None:
+    repository = GameCardRepository(tmp_path)
+    clusterer = _clusterer(run_durations=(5.0,))
+    session = _session(repository, "fixture-game", clusterer)
+    session.record_verification(clusterer.clusters[0], _verification())
+
+    assert len(session.card.scenes) == 1
+    assert session.card.scenes[0].dwell_seconds == 5.0
+
+
+def test_ordinary_gameplay_label_is_filtered_from_game_card(tmp_path: Path) -> None:
+    repository = GameCardRepository(tmp_path)
+    clusterer = _clusterer(run_durations=(30.0,))
+    session = _session(repository, "fixture-game", clusterer)
+    session.record_verification(
+        clusterer.clusters[0],
+        _verification("普通游玩画面（战斗中）"),
+    )
+
+    assert session.card.scenes == []
+    assert is_ordinary_gameplay_label(" 普通 游玩画面（战斗中）") is True
+    assert is_ordinary_gameplay_label("战斗界面") is True
+    assert is_ordinary_gameplay_label("战斗场景") is True
+    assert is_ordinary_gameplay_label("战斗结算界面") is False
 
 
 def test_repeated_short_runs_never_enter_the_scene_index_or_promote(
@@ -94,6 +139,7 @@ def test_qualifying_cluster_promotes_and_periodic_flush_does_not_double_count(
     repository = GameCardRepository(tmp_path)
     clusterer = _clusterer(run_durations=(15.0, 15.0))
     session = _session(repository, "fixture-game", clusterer)
+    session.record_verification(clusterer.clusters[0], _verification())
     session.flush(clusterer.clusters)
     session.flush(clusterer.clusters)
 
@@ -115,7 +161,7 @@ def test_second_session_keeps_session_cluster_one_and_merges_candidate(
     repository = GameCardRepository(tmp_path)
     first_clusterer = _clusterer(run_durations=(15.0, 15.0))
     first_session = _session(repository, "fixture-game", first_clusterer)
-    first_session.flush(first_clusterer.clusters)
+    first_session.record_verification(first_clusterer.clusters[0], _verification())
 
     loaded = repository.load_or_create("fixture-game", "Fixture Game", STARTED)
     second_clusterer = _clusterer(
@@ -126,9 +172,11 @@ def test_second_session_keeps_session_cluster_one_and_merges_candidate(
         repository,
         loaded,
         STARTED,
-        card_min_dwell_seconds=30.0,
     )
-    second_session.flush(second_clusterer.clusters)
+    second_session.record_verification(
+        second_clusterer.clusters[0],
+        _verification(evidence_id="f2:deep:1"),
+    )
 
     assert second_clusterer.clusters[0].cluster_id == 1
     assert second_clusterer.clusters[0].card_candidate is not None
@@ -145,7 +193,7 @@ def test_unmatched_qualifying_cluster_creates_new_scene_and_keeps_old_last_seen(
     repository = GameCardRepository(tmp_path)
     first_clusterer = _clusterer(run_durations=(30.0,))
     first_session = _session(repository, "fixture-game", first_clusterer)
-    first_session.flush(first_clusterer.clusters)
+    first_session.record_verification(first_clusterer.clusters[0], _verification())
     old_last_seen = first_session.card.scenes[0].last_seen
 
     loaded = repository.load_or_create("fixture-game", "Fixture Game", STARTED)
@@ -157,9 +205,11 @@ def test_unmatched_qualifying_cluster_creates_new_scene_and_keeps_old_last_seen(
         repository,
         loaded,
         STARTED,
-        card_min_dwell_seconds=30.0,
     )
-    session.flush(new_clusterer.clusters)
+    session.record_verification(
+        new_clusterer.clusters[0],
+        _verification("加载界面", evidence_id="f2:deep:1"),
+    )
 
     assert [scene.scene_id for scene in session.card.scenes] == ["scene:s1", "scene:s2"]
     assert session.card.scenes[0].last_seen == old_last_seen

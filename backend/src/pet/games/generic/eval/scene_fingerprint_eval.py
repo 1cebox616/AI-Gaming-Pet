@@ -412,7 +412,6 @@ def _replay_recording(
         repository,
         card,
         recording.polling_frames[0].captured_at,
-        card_min_dwell_seconds=CARD_MIN_DWELL_SECONDS,
         source_recording=source,
     )
     member_lists: dict[int, list[PollingFrame]] = {}

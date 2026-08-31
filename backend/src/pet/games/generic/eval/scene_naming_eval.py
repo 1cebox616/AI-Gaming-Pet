@@ -1,4 +1,4 @@
-"""Replay the four calibrated recordings through stable-cluster scene naming."""
+"""Regenerate game cards through semantic scene verification."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from pet.core.gamecard import (
     GameCardRepository,
     GameCardSession,
     SceneCardVerification,
+    is_ordinary_gameplay_label,
 )
 from pet.core.llm import OpenRouterClient
 from pet.core.scene_fingerprint import SceneCluster, SceneClusterer
@@ -29,7 +30,6 @@ from pet.games.generic.adapter import WindowTitleMap
 from pet.games.generic.deep_read import DeepReadResult, DeepVisionReader
 from pet.games.generic.eval.scene_fingerprint_eval import (
     BACKEND_DIRECTORY,
-    CARD_MIN_DWELL_SECONDS,
     DEFAULT_MEMORY,
     DEFAULT_RECORDINGS,
     HAMMING_THRESHOLD,
@@ -52,7 +52,7 @@ from pet.games.generic.scene_naming import (
     validate_scene_naming_proposal,
 )
 
-DEFAULT_OUTPUT = BACKEND_DIRECTORY / "eval-reports" / "m5-b-t2-4"
+DEFAULT_OUTPUT = BACKEND_DIRECTORY / "eval-reports" / "m5-b-t2-5"
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +75,10 @@ class AttemptResult:
     label: str | None
     annotation: str | None
     modality: str | None
+    matches_existing: bool | None
+    candidate_scene_id: str | None
+    candidate_label: str | None
+    action: str | None
     evidence_id: str | None
     model: str | None
     provider: str | None
@@ -93,6 +97,29 @@ class RecordingResult:
     promoted_cluster_ids: tuple[int, ...]
     attempts: tuple[AttemptResult, ...]
     card_path: Path
+    old_scene_count: int
+
+
+def _load_recorded_verifications(
+    paths: Sequence[Path],
+) -> dict[tuple[str, int], EvidenceEvent]:
+    recorded: dict[tuple[str, int], EvidenceEvent] = {}
+    for path in paths:
+        recording_label = path.parent.parent.name
+        for line in path.read_text(encoding="utf-8").splitlines():
+            event = EvidenceEvent.model_validate_json(line)
+            if not isinstance(event.payload, SceneVerifiedPayload):
+                continue
+            if event.outcome != "ok":
+                continue
+            key = (recording_label, event.payload.session_cluster_id)
+            if key in recorded:
+                raise ValueError(
+                    "multiple recorded decisions supplied for "
+                    f"{recording_label} session:c{event.payload.session_cluster_id}"
+                )
+            recorded[key] = event
+    return recorded
 
 
 def _choose_trigger_frames(
@@ -278,6 +305,10 @@ async def _name_trigger(
                     label=decision.label,
                     annotation=decision.annotation,
                     modality=decision.modality,
+                    matches_existing=decision.matches_existing,
+                    candidate_scene_id=decision.candidate_scene_id,
+                    candidate_label=decision.candidate_label,
+                    action=decision.action,
                     root_capture_ids=[item.root_capture_id for item in trigger.frames],
                     model=deep_result.result.model,
                     provider=deep_result.result.provider,
@@ -291,16 +322,21 @@ async def _name_trigger(
                     item.fingerprint_evidence_id for item in trigger.frames
                 ],
                 context_version=None,
-                outcome="ok" if decision.accepted else "failed",
+                outcome="failed" if decision.action == "rejected" else "ok",
             )
         )
         if decision.accepted:
+            assert decision.applied_label is not None
+            assert decision.applied_annotation is not None
+            assert decision.applied_label_status is not None
             session.record_verification(
                 trigger.cluster,
                 SceneCardVerification(
-                    label=decision.label,
-                    annotation=decision.annotation,
+                    label=decision.applied_label,
+                    annotation=decision.applied_annotation,
                     modality=decision.modality,
+                    label_status=decision.applied_label_status,
+                    needs_review=decision.needs_review,
                     verified_at=datetime.now(timezone.utc),
                     evidence_id=evidence_id,
                 ),
@@ -311,6 +347,10 @@ async def _name_trigger(
             label=decision.label,
             annotation=decision.annotation,
             modality=decision.modality,
+            matches_existing=decision.matches_existing,
+            candidate_scene_id=decision.candidate_scene_id,
+            candidate_label=decision.candidate_label,
+            action=decision.action,
             evidence_id=evidence_id,
             model=deep_result.result.model,
             provider=deep_result.result.provider,
@@ -327,6 +367,10 @@ async def _name_trigger(
             label=None,
             annotation=None,
             modality=None,
+            matches_existing=None,
+            candidate_scene_id=None,
+            candidate_label=None,
+            action=None,
             evidence_id=None,
             model=None,
             provider=None,
@@ -338,40 +382,122 @@ async def _name_trigger(
         )
 
 
+def _apply_recorded_trigger(
+    *,
+    source_event: EvidenceEvent,
+    store: EvidenceStore,
+    session: GameCardSession,
+    recording: Recording,
+    trigger: NamingTrigger,
+    output: Path,
+) -> AttemptResult:
+    representative_paths = _copy_representatives(output, recording, trigger)
+    payload = source_event.payload
+    if not isinstance(payload, SceneVerifiedPayload) or source_event.outcome != "ok":
+        raise ValueError("recorded scene verification must be an accepted event")
+    if payload.session_cluster_id != trigger.cluster.cluster_id:
+        raise ValueError("recorded scene verification references the wrong cluster")
+    if payload.action != "new":
+        raise ValueError("from-zero recorded regeneration requires action=new")
+    anchor = trigger.frames[-1]
+    evidence_id = store.new_evidence_id(anchor.root_capture_id, "deep")
+    root_capture_ids = [item.root_capture_id for item in trigger.frames]
+    store.append(
+        EvidenceEvent(
+            evidence_id=evidence_id,
+            source="deep",
+            kind="scene_verified",
+            root_capture_id=anchor.root_capture_id,
+            observed_at=anchor.frame.relative_seconds,
+            learned_at=max(anchor.frame.relative_seconds, trigger.cluster.last_seen),
+            scope=None,
+            payload=payload.model_copy(update={"root_capture_ids": root_capture_ids}),
+            derived_from=[
+                item.fingerprint_evidence_id for item in trigger.frames
+            ],
+            context_version=None,
+            outcome="ok",
+        )
+    )
+    needs_review = payload.modality == "uncertain"
+    session.record_verification(
+        trigger.cluster,
+        SceneCardVerification(
+            label=payload.label,
+            annotation=payload.annotation,
+            modality=payload.modality,
+            label_status="uncertain" if needs_review else "named",
+            needs_review=needs_review,
+            verified_at=datetime.now(timezone.utc),
+            evidence_id=evidence_id,
+        ),
+    )
+    return AttemptResult(
+        cluster_id=trigger.cluster.cluster_id,
+        accepted=True,
+        label=payload.label,
+        annotation=payload.annotation,
+        modality=payload.modality,
+        matches_existing=payload.matches_existing,
+        candidate_scene_id=payload.candidate_scene_id,
+        candidate_label=payload.candidate_label,
+        action=payload.action,
+        evidence_id=evidence_id,
+        model=payload.model,
+        provider=payload.provider,
+        cost_usd=payload.cost_usd,
+        latency_ms=payload.latency_ms,
+        validation_error=None,
+        error=None,
+        representative_paths=representative_paths,
+    )
+
+
 async def run_evaluation(
     recordings: Sequence[Recording],
     output: Path,
     memory_root: Path,
+    *,
+    reset_cards: bool = True,
+    cluster_ids: frozenset[int] | None = None,
+    recorded_evidence_paths: Sequence[Path] = (),
+    recorded_only: bool = False,
 ) -> tuple[RecordingResult, ...]:
     configuration = load_config(strict=True)
     generic = configuration.games["generic"].generic
     naming = generic.scene.naming
     profile = configuration.llm.profiles[naming.llm_profile]
     effective = resolve_llm_profile(configuration.llm, naming.llm_profile)
-    client = OpenRouterClient.from_profile(
-        profile_name=naming.llm_profile,
-        base_url=effective.base_url,
-        api_key_env=effective.api_key_env,
-        timeout_seconds=effective.timeout_seconds,
-    )
-    reader = DeepVisionReader(
-        client,
-        effective,
-        input_price_per_million_usd=profile.input_price_per_million_usd,
-        output_price_per_million_usd=profile.output_price_per_million_usd,
-        reasoning_effort="none",
-    )
+    recorded = _load_recorded_verifications(recorded_evidence_paths)
+    if recorded_only and not recorded:
+        raise ValueError("recorded-only regeneration requires scene_verified evidence")
+    reader: DeepVisionReader | None = None
+    if not recorded_only:
+        client = OpenRouterClient.from_profile(
+            profile_name=naming.llm_profile,
+            base_url=effective.base_url,
+            api_key_env=effective.api_key_env,
+            timeout_seconds=effective.timeout_seconds,
+        )
+        reader = DeepVisionReader(
+            client,
+            effective,
+            input_price_per_million_usd=profile.input_price_per_million_usd,
+            output_price_per_million_usd=profile.output_price_per_million_usd,
+            reasoning_effort="none",
+        )
     grouped_hashes, grouped_timings = _hash_recordings(recordings)
     title_map = WindowTitleMap.load()
     identities = tuple(
         _recording_identity(recording, title_map) for recording in recordings
     )
-    _old_counts, old_directories = _old_card_inventory(recordings, memory_root)
-    _reset_calibration_cards(
-        memory_root,
-        old_directories,
-        tuple(game_id for game_id, _display_name in identities),
-    )
+    old_counts, old_directories = _old_card_inventory(recordings, memory_root)
+    if reset_cards:
+        _reset_calibration_cards(
+            memory_root,
+            old_directories,
+            tuple(game_id for game_id, _display_name in identities),
+        )
     if output.is_dir():
         shutil.rmtree(output)
     output.mkdir(parents=True)
@@ -398,7 +524,6 @@ async def run_evaluation(
                 repository,
                 card,
                 recording.polling_frames[0].captured_at,
-                card_min_dwell_seconds=CARD_MIN_DWELL_SECONDS,
                 source_recording=source,
             )
             replay_directory = output / recording.label / "production-replay"
@@ -413,27 +538,55 @@ async def run_evaluation(
                     representative_limit=naming.representative_frame_count,
                     request_limit=naming.max_requests_per_session,
                 )
-                attempts = tuple(
-                    [
-                        await _name_trigger(
-                            reader=reader,
-                            store=store,
-                            session=session,
-                            recording=recording,
-                            trigger=trigger,
-                            output=output,
-                            send_width=naming.upload_width,
-                        )
+                if cluster_ids is not None:
+                    triggers = tuple(
+                        trigger
                         for trigger in triggers
-                    ]
-                )
+                        if trigger.cluster.cluster_id in cluster_ids
+                    )
+                attempts_list: list[AttemptResult] = []
+                for trigger in triggers:
+                    source_event = recorded.get(
+                        (recording.label, trigger.cluster.cluster_id)
+                    )
+                    if source_event is not None:
+                        attempts_list.append(
+                            _apply_recorded_trigger(
+                                source_event=source_event,
+                                store=store,
+                                session=session,
+                                recording=recording,
+                                trigger=trigger,
+                                output=output,
+                            )
+                        )
+                    elif recorded_only:
+                        raise ValueError(
+                            "missing recorded decision for "
+                            f"{recording.label} session:c{trigger.cluster.cluster_id}"
+                        )
+                    else:
+                        assert reader is not None
+                        attempts_list.append(
+                            await _name_trigger(
+                                reader=reader,
+                                store=store,
+                                session=session,
+                                recording=recording,
+                                trigger=trigger,
+                                output=output,
+                                send_width=naming.upload_width,
+                            )
+                        )
+                attempts = tuple(attempts_list)
             finally:
                 store.close()
             session.flush(clusterer.clusters)
+            promoted_hashes = {scene.representative_hash for scene in session.card.scenes}
             promoted = tuple(
                 cluster.cluster_id
                 for cluster in clusterer.clusters
-                if cluster.dwell_seconds >= CARD_MIN_DWELL_SECONDS
+                if cluster.representative_hash in promoted_hashes
             )
             results.append(
                 RecordingResult(
@@ -443,10 +596,12 @@ async def run_evaluation(
                     promoted_cluster_ids=promoted,
                     attempts=attempts,
                     card_path=memory_root / game_id / "gamecard.json",
+                    old_scene_count=old_counts[recording.label],
                 )
             )
     finally:
-        reader.close()
+        if reader is not None:
+            reader.close()
     (output / "report.md").write_text(
         _render_report(results), encoding="utf-8", newline="\n"
     )
@@ -458,21 +613,24 @@ def _render_report(results: Sequence[RecordingResult]) -> str:
         attempt.cost_usd for result in results for attempt in result.attempts
     )
     lines = [
-        "# M5-B-T2-4 场景命名报告",
+        "# M5-B-T2-5 场景命名收尾报告",
         "",
         "## 实现边界与代表帧",
         "",
-        "- 指纹参数保持 `pHash64 / Hamming <= 8 / stable=4s / dwell=8s`，本任务未改聚簇或升格规则。",
+        "- 指纹参数保持 `pHash64 / Hamming <= 8 / stable=4s`，本任务未改聚簇或稳定门。",
         "- 稳定门由全部轮询帧推进；场景指纹核查模型在过门时使用该连续段内已有、且具备合法 `root_capture_id` 的检测器选中帧。",
         "- 代表帧最多三张，按当时可用帧的首／中／末选取；少于三张时去重后全部使用。上传宽度为 1920px，16:9 输入即 1080p。",
         "- 每会话请求上限为 8：四段校准录像单段最多 4 个稳定簇，取两倍余量，同时给异常簇风暴设置花费边界。",
         "- 本批保留录制没有同时间线的稳定 OCR 产物，因此请求未附 OCR；在线原语保留该输入槽位。",
         "- 场景指纹核查模型不联网、不做跨簇归并、不做 variants；模型只提议，代码检查稳定门、中文标签和长度后执行。",
+        "- 上卡门改为：稳定簇取得有效命名，且标签不是普通游玩类。驻留与访问次数只记录。",
+        "- 普通游玩语义过滤是可测试的字符串规则：忽略空白后，包含“普通游玩画面”，或恰为“普通游戏画面／游戏画面／游玩画面／战斗画面／战斗界面／战斗场景”时不上卡；“战斗结算界面”等更具体的功能界面不被误伤。",
+        "- 场景命名提示词措辞未修改。",
         "",
         "## 四张卡汇总",
         "",
-        "| 录像 | 场景数 | 命名数 | uncertain | 被拒判决 | 核查失败 |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| 录像 | 旧场景数 | 新场景数 | 命名数 | uncertain | 被拒判决 | 核查失败 |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for result in results:
         card = json.loads(result.card_path.read_text(encoding="utf-8"))
@@ -484,7 +642,7 @@ def _render_report(results: Sequence[RecordingResult]) -> str:
         )
         failed = sum(attempt.error is not None for attempt in result.attempts)
         lines.append(
-            f"| {result.recording.label} | {len(scenes)} | {named} | "
+            f"| {result.recording.label} | {result.old_scene_count} | {len(scenes)} | {named} | "
             f"{uncertain} | {rejected} | {failed} |"
         )
     lines.extend(("", "## 逐场景与代表帧", ""))
@@ -507,11 +665,23 @@ def _render_report(results: Sequence[RecordingResult]) -> str:
                 )
             )
         lines.append("")
+    lines.extend(("## 被语义过滤的普通游玩簇", ""))
+    filtered_rows = []
+    for result in results:
+        for attempt in result.attempts:
+            if attempt.accepted and attempt.label is not None and is_ordinary_gameplay_label(attempt.label):
+                filtered_rows.append(
+                    f"- {result.recording.label} / `session:c{attempt.cluster_id}`："
+                    f"{attempt.label}；代表帧："
+                    + " / ".join(f"`{path}`" for path in attempt.representative_paths)
+                )
+    lines.extend(filtered_rows or ("- 无。",))
+    lines.append("")
     lines.extend(("## 每次场景指纹核查与花费", "", "| 录像 | 簇 | 结果 | modality | 模型 / 上游 | 延迟 | 花费 |", "|---|---|---|---|---|---:|---:|"))
     for result in results:
         for attempt in result.attempts:
             outcome = (
-                "接受"
+                f"接受（{attempt.action}）"
                 if attempt.accepted
                 else (f"拒绝：{attempt.validation_error}" if attempt.validation_error else f"失败：{attempt.error}")
             )
@@ -558,6 +728,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recording", action="append", type=Path)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--memory-dir", type=Path, default=DEFAULT_MEMORY)
+    parser.add_argument(
+        "--preserve-cards",
+        action="store_true",
+        help="keep successful names from earlier independent sessions when a later check fails",
+    )
+    parser.add_argument(
+        "--cluster-id",
+        action="append",
+        type=int,
+        help="evaluate only this session cluster (repeatable; offline calibration only)",
+    )
+    parser.add_argument(
+        "--recorded-evidence",
+        action="append",
+        type=Path,
+        help="reuse accepted scene_verified rows from this real replay evidence file",
+    )
+    parser.add_argument(
+        "--recorded-only",
+        action="store_true",
+        help="fail instead of calling the model when a stable cluster lacks recorded evidence",
+    )
     return parser
 
 
@@ -567,7 +759,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         load_recording(path) for path in tuple(arguments.recording or DEFAULT_RECORDINGS)
     )
     results = asyncio.run(
-        run_evaluation(recordings, arguments.output, arguments.memory_dir)
+        run_evaluation(
+            recordings,
+            arguments.output,
+            arguments.memory_dir,
+            reset_cards=not arguments.preserve_cards,
+            cluster_ids=(
+                frozenset(arguments.cluster_id)
+                if arguments.cluster_id is not None
+                else None
+            ),
+            recorded_evidence_paths=tuple(arguments.recorded_evidence or ()),
+            recorded_only=arguments.recorded_only,
+        )
     )
     print(
         json.dumps(

@@ -189,8 +189,6 @@ class SceneConfig(BaseModel):
     hash_bits: Literal[64, 256] = 64
     hamming_threshold: int = Field(default=8, ge=0)
     stable_min_seconds: float = Field(default=4.0, ge=0)
-    # These promotion/flush values remain measured-data placeholders (TD-28).
-    card_min_dwell_seconds: float = Field(default=8.0, ge=0)
     card_flush_seconds: float = Field(default=120.0, gt=0)
     memory_dir: str = "memory"
     naming: SceneNamingConfig = Field(default_factory=SceneNamingConfig)

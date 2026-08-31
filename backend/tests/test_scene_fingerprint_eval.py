@@ -23,8 +23,7 @@ def test_scene_defaults_match_manual_full_frame_review() -> None:
         settings.hash_bits,
         settings.hamming_threshold,
         settings.stable_min_seconds,
-        settings.card_min_dwell_seconds,
-    ) == ("phash", 64, 8, 4.0, 8.0)
+    ) == ("phash", 64, 8, 4.0)
     assert (STABLE_MIN_SECONDS, CARD_MIN_DWELL_SECONDS) == (4.0, 8.0)
 
 
@@ -59,7 +58,10 @@ def test_single_peak_duration_histogram_keeps_zero_duration_p75_without_clamp() 
     assert "P75" in result.method
 
 
-@pytest.mark.parametrize("legacy_key", ("stable_min_frames", "card_min_visits"))
+@pytest.mark.parametrize(
+    "legacy_key",
+    ("stable_min_frames", "card_min_visits", "card_min_dwell_seconds"),
+)
 def test_removed_scene_configuration_keys_are_rejected(legacy_key: str) -> None:
     with pytest.raises(ValidationError, match=legacy_key):
         SceneConfig.model_validate({legacy_key: 3})

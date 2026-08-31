@@ -6,10 +6,35 @@
   "scenes": [
     {
       "scene_id": "scene:s1",
-      "representative_hash": "d94267ca2d729bd8",
-      "label": "服务器启动界面",
+      "representative_hash": "9fb3b11937074b62",
+      "label": "主菜单界面",
       "label_status": "named",
-      "annotation": "在创建或加入多人游戏时出现，显示服务器初始化状态及取消选项。",
+      "needs_review": false,
+      "annotation": "游戏启动后的主菜单，包含浏览游戏、创建游戏等选项及活动公告。",
+      "dwell_seconds": 4.997490949986968,
+      "visit_count": 1,
+      "sessions_seen": 1,
+      "first_seen": "2026-08-28T00:39:26.386611Z",
+      "last_seen": "2026-08-28T00:39:31.384102Z",
+      "evidence_ids": [
+        "f1:scene:1",
+        "f2:scene:1",
+        "f3:scene:1",
+        "f4:scene:1",
+        "f5:scene:1"
+      ],
+      "verified_at": "2026-08-31T19:07:47.793263Z",
+      "deep_evidence_ids": [
+        "f5:deep:1"
+      ]
+    },
+    {
+      "scene_id": "scene:s2",
+      "representative_hash": "d94267ca2d729bd8",
+      "label": "服务器启动弹窗",
+      "label_status": "named",
+      "needs_review": false,
+      "annotation": "在创建世界界面中点击生成后，显示正在启动服务器的加载提示框。",
       "dwell_seconds": 31.001680350018432,
       "visit_count": 1,
       "sessions_seen": 1,
@@ -20,9 +45,54 @@
         "f14:scene:1",
         "f15:scene:1"
       ],
-      "verified_at": "2026-08-31T16:05:53.762466Z",
+      "verified_at": "2026-08-31T19:07:47.804082Z",
       "deep_evidence_ids": [
         "f13:deep:1"
+      ]
+    },
+    {
+      "scene_id": "scene:s3",
+      "representative_hash": "94b5713ff2164a4b",
+      "label": "角色选择界面",
+      "label_status": "named",
+      "needs_review": false,
+      "annotation": "联机大厅中玩家正在浏览并挑选冒险家角色的菜单画面。",
+      "dwell_seconds": 7.005530149996048,
+      "visit_count": 1,
+      "sessions_seen": 1,
+      "first_seen": "2026-08-28T00:40:35.402174Z",
+      "last_seen": "2026-08-28T00:40:42.407704Z",
+      "evidence_ids": [
+        "f20:scene:1",
+        "f21:scene:1",
+        "f22:scene:1",
+        "f23:scene:1"
+      ],
+      "verified_at": "2026-08-31T19:07:47.818045Z",
+      "deep_evidence_ids": [
+        "f23:deep:1"
+      ]
+    },
+    {
+      "scene_id": "scene:s4",
+      "representative_hash": "95865bc53475d14f",
+      "label": "加载界面",
+      "label_status": "named",
+      "needs_review": false,
+      "annotation": "画面左上角显示“正在加载..”文字，背景为角色与怪物插画，属于进入游戏前的等待界面。",
+      "dwell_seconds": 6.006116650009062,
+      "visit_count": 1,
+      "sessions_seen": 1,
+      "first_seen": "2026-08-28T00:44:27.645800Z",
+      "last_seen": "2026-08-28T00:44:33.651917Z",
+      "evidence_ids": [
+        "f166:scene:1",
+        "f167:scene:1",
+        "f168:scene:1"
+      ],
+      "verified_at": "2026-08-31T19:07:47.832576Z",
+      "deep_evidence_ids": [
+        "f168:deep:1"
       ]
     }
   ],

@@ -51,6 +51,13 @@ class SceneNamingDecision:
     annotation: str
     modality: Literal["observed", "inferred", "uncertain"]
     matches_existing: bool | None
+    candidate_scene_id: str | None
+    candidate_label: str | None
+    action: Literal["new", "reused", "replaced", "rejected"]
+    applied_label: str | None
+    applied_annotation: str | None
+    applied_label_status: Literal["named", "uncertain"] | None
+    needs_review: bool
     validation_error: str | None
 
 
@@ -128,6 +135,8 @@ def validate_scene_naming_proposal(
     proposal: SceneNamingProposal,
     existing_scene: ExistingSceneNaming | None = None,
 ) -> SceneNamingDecision:
+    label = " ".join(proposal.label.split())
+    annotation = " ".join(proposal.annotation.split())
     problems: list[str] = []
     if not cluster.stable:
         problems.append("referenced cluster has not passed the stable gate")
@@ -135,18 +144,6 @@ def validate_scene_naming_proposal(
         problems.append("matches_existing must be null without a named card candidate")
     if existing_scene is not None and proposal.matches_existing is None:
         problems.append("matches_existing must be boolean for a named card candidate")
-    reuse_existing = existing_scene is not None and proposal.matches_existing is True
-    label = " ".join(
-        (existing_scene.label if reuse_existing else proposal.label).split()
-    )
-    annotation = " ".join(
-        (existing_scene.annotation if reuse_existing else proposal.annotation).split()
-    )
-    modality = (
-        "uncertain"
-        if reuse_existing and existing_scene.label_status == "uncertain"
-        else proposal.modality
-    )
     if not label:
         problems.append("label is empty")
     elif len(label) > 24:
@@ -157,11 +154,51 @@ def validate_scene_naming_proposal(
         problems.append("annotation is empty")
     elif len(annotation) > 160:
         problems.append("annotation exceeds 160 characters")
+    if (
+        existing_scene is not None
+        and proposal.matches_existing is False
+        and proposal.modality == "uncertain"
+    ):
+        problems.append("uncertain proposal cannot replace an existing scene")
+
+    intended_action: Literal["new", "reused", "replaced"]
+    if existing_scene is None:
+        intended_action = "new"
+    elif proposal.matches_existing is True:
+        intended_action = "reused"
+    else:
+        intended_action = "replaced"
+    action: Literal["new", "reused", "replaced", "rejected"] = (
+        "rejected" if problems else intended_action
+    )
+    needs_review = proposal.modality == "uncertain"
+    if action == "reused":
+        assert existing_scene is not None
+        applied_label = existing_scene.label
+        applied_annotation = existing_scene.annotation
+        applied_label_status: Literal["named", "uncertain"] | None = (
+            existing_scene.label_status if needs_review else "named"
+        )
+    elif action in {"new", "replaced"}:
+        applied_label = label
+        applied_annotation = annotation
+        applied_label_status = "uncertain" if needs_review else "named"
+    else:
+        applied_label = None
+        applied_annotation = None
+        applied_label_status = None
     return SceneNamingDecision(
         accepted=not problems,
         label=label,
         annotation=annotation,
-        modality=modality,
+        modality=proposal.modality,
         matches_existing=proposal.matches_existing,
+        candidate_scene_id=(existing_scene.scene_id if existing_scene else None),
+        candidate_label=(existing_scene.label if existing_scene else None),
+        action=action,
+        applied_label=applied_label,
+        applied_annotation=applied_annotation,
+        applied_label_status=applied_label_status,
+        needs_review=needs_review,
         validation_error="; ".join(problems) if problems else None,
     )

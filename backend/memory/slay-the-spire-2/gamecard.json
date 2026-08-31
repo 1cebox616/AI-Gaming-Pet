@@ -7,9 +7,10 @@
     {
       "scene_id": "scene:s1",
       "representative_hash": "d2d32dcd2d38352b",
-      "label": "奖励选择界面",
+      "label": "事件奖励选择界面",
       "label_status": "named",
-      "annotation": "玩家在击败敌人或达成条件后出现的奖励选项界面，包含多个可选增益效果及对应描述。",
+      "needs_review": false,
+      "annotation": "在遭遇NPC“特兹卡塔拉”的事件中，玩家从列表里浏览并选择一项道具或卡牌作为奖励。",
       "dwell_seconds": 8.000834200007375,
       "visit_count": 2,
       "sessions_seen": 1,
@@ -22,7 +23,7 @@
         "f146:scene:1",
         "f149:scene:1"
       ],
-      "verified_at": "2026-08-31T16:07:56.322661Z",
+      "verified_at": "2026-08-31T19:07:47.940308Z",
       "deep_evidence_ids": [
         "f146:deep:1"
       ]
