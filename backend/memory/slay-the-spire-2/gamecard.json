@@ -6,6 +6,26 @@
   "scenes": [
     {
       "scene_id": "scene:s1",
+      "representative_hash": "89e6daa1b6ace389",
+      "label": "战斗场景",
+      "label_status": "named",
+      "needs_review": false,
+      "annotation": "玩家角色与敌人对峙，底部显示手牌、能量及结束回合按钮的战斗游玩画面。",
+      "dwell_seconds": 7.004139650001889,
+      "visit_count": 1,
+      "sessions_seen": 1,
+      "first_seen": "2026-08-28T02:04:29.228775Z",
+      "last_seen": "2026-08-28T02:04:36.232915Z",
+      "evidence_ids": [
+        "f67:scene:1"
+      ],
+      "verified_at": "2026-08-31T19:45:02.072480Z",
+      "deep_evidence_ids": [
+        "f67:deep:1"
+      ]
+    },
+    {
+      "scene_id": "scene:s2",
       "representative_hash": "d2d32dcd2d38352b",
       "label": "事件奖励选择界面",
       "label_status": "named",
@@ -23,7 +43,7 @@
         "f146:scene:1",
         "f149:scene:1"
       ],
-      "verified_at": "2026-08-31T19:07:47.940308Z",
+      "verified_at": "2026-08-31T19:45:02.093260Z",
       "deep_evidence_ids": [
         "f146:deep:1"
       ]

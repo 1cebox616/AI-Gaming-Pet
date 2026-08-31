@@ -22,7 +22,6 @@ from pet.core.gamecard import (
     GameCardRepository,
     GameCardSession,
     SceneCardVerification,
-    is_ordinary_gameplay_label,
 )
 from pet.core.llm import OpenRouterClient
 from pet.core.scene_fingerprint import SceneCluster, SceneClusterer
@@ -623,8 +622,7 @@ def _render_report(results: Sequence[RecordingResult]) -> str:
         "- 每会话请求上限为 8：四段校准录像单段最多 4 个稳定簇，取两倍余量，同时给异常簇风暴设置花费边界。",
         "- 本批保留录制没有同时间线的稳定 OCR 产物，因此请求未附 OCR；在线原语保留该输入槽位。",
         "- 场景指纹核查模型不联网、不做跨簇归并、不做 variants；模型只提议，代码检查稳定门、中文标签和长度后执行。",
-        "- 上卡门改为：稳定簇取得有效命名，且标签不是普通游玩类。驻留与访问次数只记录。",
-        "- 普通游玩语义过滤是可测试的字符串规则：忽略空白后，包含“普通游玩画面”，或恰为“普通游戏画面／游戏画面／游玩画面／战斗画面／战斗界面／战斗场景”时不上卡；“战斗结算界面”等更具体的功能界面不被误伤。",
+        "- 上卡门为：稳定簇取得有效命名即可。驻留与访问次数只记录；label 词汇不参与上卡判断，反复出现的战斗界面也可以入卡。",
         "- 场景命名提示词措辞未修改。",
         "",
         "## 四张卡汇总",
@@ -665,18 +663,6 @@ def _render_report(results: Sequence[RecordingResult]) -> str:
                 )
             )
         lines.append("")
-    lines.extend(("## 被语义过滤的普通游玩簇", ""))
-    filtered_rows = []
-    for result in results:
-        for attempt in result.attempts:
-            if attempt.accepted and attempt.label is not None and is_ordinary_gameplay_label(attempt.label):
-                filtered_rows.append(
-                    f"- {result.recording.label} / `session:c{attempt.cluster_id}`："
-                    f"{attempt.label}；代表帧："
-                    + " / ".join(f"`{path}`" for path in attempt.representative_paths)
-                )
-    lines.extend(filtered_rows or ("- 无。",))
-    lines.append("")
     lines.extend(("## 每次场景指纹核查与花费", "", "| 录像 | 簇 | 结果 | modality | 模型 / 上游 | 延迟 | 花费 |", "|---|---|---|---|---|---:|---:|"))
     for result in results:
         for attempt in result.attempts:
@@ -715,7 +701,8 @@ def _render_report(results: Sequence[RecordingResult]) -> str:
             "",
             "## 偏差与未完成项",
             "",
-            "- 与规格的偏差：无。OCR 是可选输入；本批录像没有与选中帧对齐的稳定 OCR 流，故未附加，也未重新跑 OCR。",
+            "- 相对原 M5-B-T2-5 规格第 2 条的偏差：依产品负责人后续指令，删除 label 词汇过滤；所有稳定且取得有效命名的簇均可上卡。",
+            "- OCR 是可选输入；本批录像没有与选中帧对齐的稳定 OCR 流，故未附加，也未重新跑 OCR。",
             "- 未完成项：无。",
             "",
         )

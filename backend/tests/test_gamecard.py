@@ -13,7 +13,6 @@ from pet.core.gamecard import (
     GameCardRepository,
     GameCardSession,
     SceneCardVerification,
-    is_ordinary_gameplay_label,
     render_gamecard_markdown,
     slugify_game_id,
 )
@@ -105,7 +104,9 @@ def test_short_dwell_interface_promotes_after_semantic_verification(
     assert session.card.scenes[0].dwell_seconds == 5.0
 
 
-def test_ordinary_gameplay_label_is_filtered_from_game_card(tmp_path: Path) -> None:
+def test_scene_label_vocabulary_does_not_block_game_card_promotion(
+    tmp_path: Path,
+) -> None:
     repository = GameCardRepository(tmp_path)
     clusterer = _clusterer(run_durations=(30.0,))
     session = _session(repository, "fixture-game", clusterer)
@@ -114,11 +115,8 @@ def test_ordinary_gameplay_label_is_filtered_from_game_card(tmp_path: Path) -> N
         _verification("普通游玩画面（战斗中）"),
     )
 
-    assert session.card.scenes == []
-    assert is_ordinary_gameplay_label(" 普通 游玩画面（战斗中）") is True
-    assert is_ordinary_gameplay_label("战斗界面") is True
-    assert is_ordinary_gameplay_label("战斗场景") is True
-    assert is_ordinary_gameplay_label("战斗结算界面") is False
+    assert len(session.card.scenes) == 1
+    assert session.card.scenes[0].label == "普通游玩画面（战斗中）"
 
 
 def test_repeated_short_runs_never_enter_the_scene_index_or_promote(

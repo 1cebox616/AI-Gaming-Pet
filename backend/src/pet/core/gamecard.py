@@ -379,11 +379,7 @@ class GameCardSession:
 
     def _qualifies(self, cluster: SceneCluster) -> bool:
         verification = self._verifications.get(cluster.cluster_id)
-        return (
-            cluster.stable
-            and verification is not None
-            and not is_ordinary_gameplay_label(verification.label)
-        )
+        return cluster.stable and verification is not None
 
     def _absolute(self, relative_seconds: float) -> datetime:
         return self.started_at + timedelta(seconds=relative_seconds)
@@ -453,18 +449,3 @@ def _apply_verification(
     scene.verified_at = _utc(verification.verified_at)
     if verification.evidence_id not in scene.deep_evidence_ids:
         scene.deep_evidence_ids.append(verification.evidence_id)
-
-
-def is_ordinary_gameplay_label(label: str) -> bool:
-    """Return whether the model named a normal-play view rather than a UI scene."""
-    normalized = "".join(label.split())
-    if "普通游玩画面" in normalized:
-        return True
-    return normalized in {
-        "普通游戏画面",
-        "游戏画面",
-        "游玩画面",
-        "战斗画面",
-        "战斗界面",
-        "战斗场景",
-    }
