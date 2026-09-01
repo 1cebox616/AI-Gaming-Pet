@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 import json
 import logging
 import re
@@ -137,6 +138,7 @@ class GameKnowledgeReader:
         *,
         wall_timeout_seconds: float,
         request_id_factory: Callable[[], str] | None = None,
+        verification_date_factory: Callable[[], date] | None = None,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         if not configuration.enabled or not configuration.model.strip():
@@ -149,12 +151,16 @@ class GameKnowledgeReader:
         self._request_id_factory = request_id_factory or (
             lambda: f"gk-{uuid.uuid4()}"
         )
+        self._verification_date_factory = verification_date_factory or (
+            lambda: datetime.now(timezone.utc).date()
+        )
         self._clock = clock
 
     async def read(self, game_name: str) -> GameKnowledgeCallResult:
         request_id = self._request_id_factory()
         if not request_id.strip():
             raise ValueError("game knowledge request id must not be blank")
+        verification_date = self._verification_date_factory().isoformat()
         started = self._clock()
         try:
             result = await asyncio.wait_for(
@@ -164,7 +170,10 @@ class GameKnowledgeReader:
                     system_prompt=GAME_KNOWLEDGE_PROMPT_PATH.read_text(
                         encoding="utf-8"
                     ).strip(),
-                    user_prompt=f"游戏名称：{game_name}",
+                    user_prompt=(
+                        f"知识核查日期（UTC）：{verification_date}\n"
+                        f"游戏名称：{game_name}"
+                    ),
                     max_tokens=self._configuration.max_tokens,
                     temperature=self._configuration.temperature,
                     reasoning_effort="minimal",

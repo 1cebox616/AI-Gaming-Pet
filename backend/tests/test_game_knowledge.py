@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 
@@ -120,6 +120,14 @@ def test_production_prompt_and_schema_are_flat_v4_without_keybinds() -> None:
     ):
         assert obsolete not in prompt
         assert obsolete not in json.dumps(schema, ensure_ascii=False)
+    for freshness_rule in (
+        "知识核查日期（UTC）",
+        "近期官方公告",
+        "单独核查当前状态",
+        "目标日期已经早于知识核查日期",
+        "必须为 null",
+    ):
+        assert freshness_rule in prompt
 
 
 def test_v4_parser_accepts_nullable_fields_and_ambiguity_free_cleanup() -> None:
@@ -308,9 +316,11 @@ class _ReaderClient:
         self.calls = 0
         self.closed = False
         self.cancelled = False
+        self.last_request: dict[str, object] | None = None
 
-    async def complete_with_web_search(self, **_kwargs: object) -> LlmResult:
+    async def complete_with_web_search(self, **kwargs: object) -> LlmResult:
         self.calls += 1
+        self.last_request = kwargs
         if self.behavior == "cooldown_drop":
             raise LlmCooldownError(
                 "cooling",
@@ -373,10 +383,15 @@ def test_reader_maps_each_attempt_once_without_retry(behavior: str) -> None:
         configuration,
         wall_timeout_seconds=0.01 if behavior == "timeout" else 1.0,
         request_id_factory=lambda: "gk-fixture",
+        verification_date_factory=lambda: date(2026, 9, 1),
     )
     result = asyncio.run(reader.read("Fixture Game"))
     assert result.outcome == behavior
     assert client.calls == 1
+    assert client.last_request is not None
+    assert client.last_request["user_prompt"] == (
+        "知识核查日期（UTC）：2026-09-01\n游戏名称：Fixture Game"
+    )
     if behavior == "timeout":
         assert client.cancelled
         assert result.error_metadata == {
