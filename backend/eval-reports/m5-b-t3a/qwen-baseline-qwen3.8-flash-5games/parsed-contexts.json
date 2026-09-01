@@ -1,0 +1,37 @@
+[
+  {
+    "game_id": "cyberpunk-2077",
+    "game_name": "Cyberpunk 2077",
+    "context": null,
+    "format_warning": "输出因 length 截断，无法形成完整合同 JSON",
+    "normalization_actions": []
+  },
+  {
+    "game_id": "counter-strike-2",
+    "game_name": "Counter-Strike 2",
+    "context": null,
+    "format_warning": null,
+    "normalization_actions": []
+  },
+  {
+    "game_id": "stardew-valley",
+    "game_name": "Stardew Valley",
+    "context": null,
+    "format_warning": null,
+    "normalization_actions": []
+  },
+  {
+    "game_id": "hearthstone",
+    "game_name": "Hearthstone",
+    "context": null,
+    "format_warning": null,
+    "normalization_actions": []
+  },
+  {
+    "game_id": "terraria",
+    "game_name": "Terraria",
+    "context": null,
+    "format_warning": null,
+    "normalization_actions": []
+  }
+]

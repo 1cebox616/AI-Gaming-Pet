@@ -1,0 +1,580 @@
+{
+  "started_at": "2026-09-01T13:16:53.724472+00:00",
+  "finished_at": "2026-09-01T13:17:15.032142+00:00",
+  "model": "google/gemini-3.1-flash-lite",
+  "provider": null,
+  "temperature": 0.0,
+  "max_tokens": 8000,
+  "reasoning_effort": "minimal",
+  "web_search_parameters": {
+    "engine": "exa",
+    "max_results": 5,
+    "max_total_results": 5
+  },
+  "provider_options": {
+    "sort": "throughput",
+    "require_parameters": true
+  },
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "game_knowledge_context",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "genre",
+          "perspective",
+          "game_overview",
+          "gameplay",
+          "background",
+          "default_pc_keybinds"
+        ],
+        "properties": {
+          "genre": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "perspective": {
+            "type": "string",
+            "minLength": 1
+          },
+          "game_overview": {
+            "type": "string",
+            "minLength": 1
+          },
+          "gameplay": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "player_goal",
+              "core_loop",
+              "major_systems",
+              "modes_and_structure"
+            ],
+            "properties": {
+              "player_goal": {
+                "type": "string",
+                "minLength": 1
+              },
+              "core_loop": {
+                "type": "string",
+                "minLength": 1
+              },
+              "major_systems": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 10,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "description"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              },
+              "modes_and_structure": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "background": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "setting_and_premise",
+              "release_and_service_status"
+            ],
+            "properties": {
+              "setting_and_premise": {
+                "type": "string",
+                "minLength": 1
+              },
+              "release_and_service_status": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "default_pc_keybinds": {
+            "type": "object",
+            "maxProperties": 40,
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash))(?:\\+(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash)))*$"
+            }
+          }
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "id": "response-healing"
+    }
+  ],
+  "timeout_seconds": 45.0,
+  "latency_target_seconds": 10.0,
+  "pilot_game_ids": [
+    "cyberpunk-2077",
+    "counter-strike-2",
+    "stardew-valley",
+    "hearthstone",
+    "terraria"
+  ],
+  "game_suite": "qwen-baseline",
+  "attempts": [
+    {
+      "game_id": "cyberpunk-2077",
+      "game_name": "Cyberpunk 2077",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.1-flash-lite",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"动作角色扮演游戏\",\"开放世界\"],\"perspective\":\"第一人称视角；驾驶载具时可在第一人称与第三人称间切换\",\"game_overview\":\"《赛博朋克2077》是一款以虚构的未来都市“夜之城”为舞台的开放世界动作角色扮演游戏。玩家扮演一名被称为“V”的雇佣兵，在充满高科技与社会动荡的赛博朋克世界中生存。游戏的核心在于通过完成任务、探索城市、与各方势力互动来提升自身能力。其关键特征在于高度自由的角色定制系统、基于义体改造的战斗风格选择，以及通过对话与行动影响任务走向的叙事结构。\",\"gameplay\":{\"player_goal\":\"玩家的目标是通过完成各类委托与任务，提升自身声望与能力，获取更高级的装备与义体，以在夜之城中生存并应对各种生存挑战。\",\"core_loop\":\"玩家在夜之城中接取任务或探索世界；通过潜行、黑客入侵或正面战斗完成目标；获取经验值、金钱（欧元）与装备奖励；利用资源升级角色属性、购买武器或安装义体；随后进入更高难度的区域或任务循环。\",\"major_systems\":[{\"name\":\"属性与专长系统\",\"description\":\"玩家通过分配点数提升肉体、反应、技术能力、智力与镇定属性，并解锁对应的专长以强化特定战斗或交互风格。\"},{\"name\":\"义体改造系统\",\"description\":\"玩家可在义体医生处安装各种机械植入物，直接改变身体机能，如增强跳跃能力、提升防御或获得特殊战斗技能。\"},{\"name\":\"黑客入侵系统\",\"description\":\"玩家可利用网络接入仓对环境中的设备、监控摄像头或敌人的神经系统进行远程入侵，实现干扰、瘫痪或造成伤害。\"},{\"name\":\"武器与制作系统\",\"description\":\"提供多种类型的枪械与近战武器，玩家可通过拾取、购买或收集图纸制作装备，并对武器进行插件升级。\"},{\"name\":\"声望系统\",\"description\":\"通过完成委托提升街头声望，声望等级决定了玩家能否购买更高级的装备以及解锁特定的任务。\"},{\"name\":\"载具驾驶系统\",\"description\":\"玩家可购买或窃取多种汽车与摩托车，用于在广阔的城市中快速移动，并支持在驾驶过程中进行战斗。\"}],\"modes_and_structure\":\"单人游戏体验，采用开放世界结构，玩家可在主线任务之外自由探索城市、接取支线委托或进行随机遭遇战。\"},\"background\":{\"setting_and_premise\":\"游戏设定在2077年的美国加利福尼亚州夜之城，这是一个被巨型企业控制、贫富差距极端、暴力与科技高度发达的未来都市。社会秩序由企业与帮派主导，人类普遍通过义体改造来增强自身。\",\"release_and_service_status\":\"游戏已正式发售，目前处于长线运营后的稳定版本状态，包含大型资料片《往日之影》及多次重大版本更新。\"},\"default_pc_keybinds\":{\"前进\":\"W\",\"后退\":\"S\",\"向左平移\":\"A\",\"向右平移\":\"D\",\"跳跃\":\"Space\",\"蹲下\":\"LeftCtrl\",\"冲刺\":\"LeftShift\",\"射击\":\"MouseLeft\",\"瞄准\":\"MouseRight\",\"互动\":\"F\",\"快捷物品栏1\":\"1\",\"快捷物品栏2\":\"2\",\"快捷物品栏3\":\"3\",\"菜单\":\"I\",\"地图\":\"M\",\"扫描\":\"Tab\"}}",
+      "parsed_answer": {
+        "genre": [
+          "动作角色扮演游戏",
+          "开放世界"
+        ],
+        "perspective": "第一人称视角；驾驶载具时可在第一人称与第三人称间切换",
+        "game_overview": "《赛博朋克2077》是一款以虚构的未来都市“夜之城”为舞台的开放世界动作角色扮演游戏。玩家扮演一名被称为“V”的雇佣兵，在充满高科技与社会动荡的赛博朋克世界中生存。游戏的核心在于通过完成任务、探索城市、与各方势力互动来提升自身能力。其关键特征在于高度自由的角色定制系统、基于义体改造的战斗风格选择，以及通过对话与行动影响任务走向的叙事结构。",
+        "gameplay": {
+          "player_goal": "玩家的目标是通过完成各类委托与任务，提升自身声望与能力，获取更高级的装备与义体，以在夜之城中生存并应对各种生存挑战。",
+          "core_loop": "玩家在夜之城中接取任务或探索世界；通过潜行、黑客入侵或正面战斗完成目标；获取经验值、金钱（欧元）与装备奖励；利用资源升级角色属性、购买武器或安装义体；随后进入更高难度的区域或任务循环。",
+          "major_systems": [
+            {
+              "name": "属性与专长系统",
+              "description": "玩家通过分配点数提升肉体、反应、技术能力、智力与镇定属性，并解锁对应的专长以强化特定战斗或交互风格。"
+            },
+            {
+              "name": "义体改造系统",
+              "description": "玩家可在义体医生处安装各种机械植入物，直接改变身体机能，如增强跳跃能力、提升防御或获得特殊战斗技能。"
+            },
+            {
+              "name": "黑客入侵系统",
+              "description": "玩家可利用网络接入仓对环境中的设备、监控摄像头或敌人的神经系统进行远程入侵，实现干扰、瘫痪或造成伤害。"
+            },
+            {
+              "name": "武器与制作系统",
+              "description": "提供多种类型的枪械与近战武器，玩家可通过拾取、购买或收集图纸制作装备，并对武器进行插件升级。"
+            },
+            {
+              "name": "声望系统",
+              "description": "通过完成委托提升街头声望，声望等级决定了玩家能否购买更高级的装备以及解锁特定的任务。"
+            },
+            {
+              "name": "载具驾驶系统",
+              "description": "玩家可购买或窃取多种汽车与摩托车，用于在广阔的城市中快速移动，并支持在驾驶过程中进行战斗。"
+            }
+          ],
+          "modes_and_structure": "单人游戏体验，采用开放世界结构，玩家可在主线任务之外自由探索城市、接取支线委托或进行随机遭遇战。"
+        },
+        "background": {
+          "setting_and_premise": "游戏设定在2077年的美国加利福尼亚州夜之城，这是一个被巨型企业控制、贫富差距极端、暴力与科技高度发达的未来都市。社会秩序由企业与帮派主导，人类普遍通过义体改造来增强自身。",
+          "release_and_service_status": "游戏已正式发售，目前处于长线运营后的稳定版本状态，包含大型资料片《往日之影》及多次重大版本更新。"
+        },
+        "default_pc_keybinds": {
+          "前进": "W",
+          "后退": "S",
+          "向左平移": "A",
+          "向右平移": "D",
+          "跳跃": "Space",
+          "蹲下": "LeftCtrl",
+          "冲刺": "LeftShift",
+          "射击": "MouseLeft",
+          "瞄准": "MouseRight",
+          "互动": "F",
+          "快捷物品栏1": "1",
+          "快捷物品栏2": "2",
+          "快捷物品栏3": "3",
+          "菜单": "I",
+          "地图": "M",
+          "扫描": "Tab"
+        }
+      },
+      "format_error": null,
+      "latency_seconds": 5.132785599998897,
+      "prompt_tokens": 1298,
+      "completion_tokens": 889,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001658,
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "counter-strike-2",
+      "game_name": "Counter-Strike 2",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.1-flash-lite",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"第一人称射击\",\"战术竞技\"],\"perspective\":\"第一人称视角\",\"game_overview\":\"《反恐精英2》是一款以团队合作为核心的竞技类第一人称射击游戏，是《反恐精英：全球攻势》的全面升级版本。玩家在游戏中扮演反恐精英（CT）或恐怖分子（T）阵营的成员，通过精准的枪法、战术配合以及对地图环境的利用，在多回合制的比赛中达成特定目标或歼灭敌方队伍。游戏以极高的竞技性、拟真的弹道反馈以及基于经济系统的装备购买机制为核心特征，强调团队协作与即时决策。\",\"gameplay\":{\"player_goal\":\"在回合制比赛中通过完成阵营目标（如安放/拆除炸弹、营救/守卫人质）或全歼敌方队伍来赢得回合胜利，最终在多回合比赛中率先达到获胜局数。\",\"core_loop\":\"在回合开始时利用上一回合积累的经济购买武器与装备；进入地图区域与敌方交火并执行战术目标；根据回合结果获得金钱奖励；在下一回合重复上述过程，直至比赛结束。\",\"major_systems\":[{\"name\":\"经济系统\",\"description\":\"玩家通过击杀、回合胜负、埋包等行为获得金钱，需在回合开始时权衡购买昂贵武器或节省资金以备后续回合。\"},{\"name\":\"动态烟雾弹系统\",\"description\":\"烟雾弹产生的烟雾体积会与环境交互，能被子弹或手雷暂时驱散，影响视野遮挡效果。\"},{\"name\":\"武器精准度与后坐力\",\"description\":\"射击时存在后坐力补偿与弹道扩散，玩家需通过控制准星和移动节奏来保持射击精度。\"},{\"name\":\"拆弹与埋包机制\",\"description\":\"恐怖分子需在指定区域安放炸弹并等待爆炸，反恐精英则需在炸弹爆炸前将其拆除，这是决定回合胜负的关键点。\"},{\"name\":\"地图控制与战术投掷物\",\"description\":\"通过闪光弹、燃烧弹、烟雾弹等投掷物封锁敌方视野或逼迫其走位，是争夺地图关键区域的核心手段。\"}],\"modes_and_structure\":\"游戏采用多回合制结构，通常分为竞技模式、休闲模式及其他轮换模式。竞技模式下两队进行攻守互换，率先达到规定胜局数的队伍获胜。\"},\"background\":{\"setting_and_premise\":\"游戏设定在现代反恐背景下，两支阵营在世界各地的特定场景中进行对抗。游戏强调写实的军事装备与战术对抗，不涉及超自然元素。\",\"release_and_service_status\":\"于2023年9月正式发布，作为《反恐精英：全球攻势》的免费升级版本，目前处于持续运营状态，通过定期更新维护平衡性与内容。\"},\"default_pc_keybinds\":{\"前进\":\"W\",\"后退\":\"S\",\"向左平移\":\"A\",\"向右平移\":\"D\",\"跳跃\":\"Space\",\"蹲伏\":\"LeftCtrl\",\"行走\":\"LeftShift\",\"射击\":\"MouseLeft\",\"辅助攻击\":\"MouseRight\",\"装弹\":\"R\",\"使用\":\"E\",\"丢弃武器\":\"G\",\"检查武器\":\"F\",\"购买菜单\":\"B\",\"快捷物品栏1\":\"1\",\"快捷物品栏2\":\"2\",\"快捷物品栏3\":\"3\",\"快捷物品栏4\":\"4\",\"快捷物品栏5\":\"5\",\"计分板\":\"Tab\",\"语音聊天\":\"K\"}}",
+      "parsed_answer": {
+        "genre": [
+          "第一人称射击",
+          "战术竞技"
+        ],
+        "perspective": "第一人称视角",
+        "game_overview": "《反恐精英2》是一款以团队合作为核心的竞技类第一人称射击游戏，是《反恐精英：全球攻势》的全面升级版本。玩家在游戏中扮演反恐精英（CT）或恐怖分子（T）阵营的成员，通过精准的枪法、战术配合以及对地图环境的利用，在多回合制的比赛中达成特定目标或歼灭敌方队伍。游戏以极高的竞技性、拟真的弹道反馈以及基于经济系统的装备购买机制为核心特征，强调团队协作与即时决策。",
+        "gameplay": {
+          "player_goal": "在回合制比赛中通过完成阵营目标（如安放/拆除炸弹、营救/守卫人质）或全歼敌方队伍来赢得回合胜利，最终在多回合比赛中率先达到获胜局数。",
+          "core_loop": "在回合开始时利用上一回合积累的经济购买武器与装备；进入地图区域与敌方交火并执行战术目标；根据回合结果获得金钱奖励；在下一回合重复上述过程，直至比赛结束。",
+          "major_systems": [
+            {
+              "name": "经济系统",
+              "description": "玩家通过击杀、回合胜负、埋包等行为获得金钱，需在回合开始时权衡购买昂贵武器或节省资金以备后续回合。"
+            },
+            {
+              "name": "动态烟雾弹系统",
+              "description": "烟雾弹产生的烟雾体积会与环境交互，能被子弹或手雷暂时驱散，影响视野遮挡效果。"
+            },
+            {
+              "name": "武器精准度与后坐力",
+              "description": "射击时存在后坐力补偿与弹道扩散，玩家需通过控制准星和移动节奏来保持射击精度。"
+            },
+            {
+              "name": "拆弹与埋包机制",
+              "description": "恐怖分子需在指定区域安放炸弹并等待爆炸，反恐精英则需在炸弹爆炸前将其拆除，这是决定回合胜负的关键点。"
+            },
+            {
+              "name": "地图控制与战术投掷物",
+              "description": "通过闪光弹、燃烧弹、烟雾弹等投掷物封锁敌方视野或逼迫其走位，是争夺地图关键区域的核心手段。"
+            }
+          ],
+          "modes_and_structure": "游戏采用多回合制结构，通常分为竞技模式、休闲模式及其他轮换模式。竞技模式下两队进行攻守互换，率先达到规定胜局数的队伍获胜。"
+        },
+        "background": {
+          "setting_and_premise": "游戏设定在现代反恐背景下，两支阵营在世界各地的特定场景中进行对抗。游戏强调写实的军事装备与战术对抗，不涉及超自然元素。",
+          "release_and_service_status": "于2023年9月正式发布，作为《反恐精英：全球攻势》的免费升级版本，目前处于持续运营状态，通过定期更新维护平衡性与内容。"
+        },
+        "default_pc_keybinds": {
+          "前进": "W",
+          "后退": "S",
+          "向左平移": "A",
+          "向右平移": "D",
+          "跳跃": "Space",
+          "蹲伏": "LeftCtrl",
+          "行走": "LeftShift",
+          "射击": "MouseLeft",
+          "辅助攻击": "MouseRight",
+          "装弹": "R",
+          "使用": "E",
+          "丢弃武器": "G",
+          "检查武器": "F",
+          "购买菜单": "B",
+          "快捷物品栏1": "1",
+          "快捷物品栏2": "2",
+          "快捷物品栏3": "3",
+          "快捷物品栏4": "4",
+          "快捷物品栏5": "5",
+          "计分板": "Tab",
+          "语音聊天": "K"
+        }
+      },
+      "format_error": null,
+      "latency_seconds": 3.8206323999911547,
+      "prompt_tokens": 1296,
+      "completion_tokens": 911,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.0016905,
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "stardew-valley",
+      "game_name": "Stardew Valley",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.1-flash-lite",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"模拟经营\",\"角色扮演\",\"农场模拟\"],\"perspective\":\"固定俯视角（2D像素风格）\",\"game_overview\":\"《星露谷物语》是一款以农场经营为核心的模拟类游戏。玩家扮演一名厌倦了城市高压生活的办公室职员，继承了祖父在星露谷留下的破旧农场。游戏的主要目标是通过清理土地、种植作物、饲养牲畜、挖掘矿产以及与当地居民建立社交关系，将荒废的农场重建为繁荣的产业。游戏支持单人游玩，也支持最多四人的在线合作模式，其核心特征在于将农场经营、地牢探索、社交养成与季节性节日活动有机结合，提供了一个具有昼夜交替与季节循环的开放式生活模拟环境。\",\"gameplay\":{\"player_goal\":\"玩家追求通过经营农场获取经济收益，提升各项生活技能等级，完成社区中心修复或加入乔家超市以推动小镇发展，并与小镇居民建立深厚的人际关系。\",\"core_loop\":\"每日清晨开始，玩家根据季节与天气规划农事（浇水、播种、收获）；白天进行资源采集、钓鱼、下矿探险或与NPC互动；傍晚处理农产品或整理背包；深夜入睡以结算当日收益并保存进度，进入下一天。\",\"major_systems\":[{\"name\":\"体力与时间系统\",\"description\":\"大部分行动消耗体力，体力耗尽会影响效率；时间随行动流逝，深夜未入睡会导致角色疲劳或昏倒。\"},{\"name\":\"季节与作物系统\",\"description\":\"游戏分为四个季节，每个季节持续28天，特定作物仅能在对应季节生长，季节更替会改变环境与可获取资源。\"},{\"name\":\"技能成长系统\",\"description\":\"通过耕种、采矿、采集、钓鱼和战斗五大领域获取经验，升级可解锁配方、提升效率并选择职业分支。\"},{\"name\":\"社交与好感度系统\",\"description\":\"通过赠送礼物、对话和完成任务提升与NPC的好感度，解锁特殊剧情、配方或建立亲密关系。\"},{\"name\":\"矿井与战斗系统\",\"description\":\"在随机生成的矿井中探索，通过击败怪物获取资源与矿石，层数越深难度越高。\"},{\"name\":\"工艺与制作系统\",\"description\":\"利用收集的原材料制作工具、装饰品、加工设备及农场建筑，提升生产效率。\"}],\"modes_and_structure\":\"游戏采用持续的日历循环结构，无强制结束时间。支持单人模式与多人联机模式，联机模式下玩家共享农场资源与进度。\"},\"background\":{\"setting_and_premise\":\"故事发生在一个名为星露谷的宁静乡村，玩家继承了祖父的农场，需要从零开始清理杂草、修复建筑，并融入当地社区，探索小镇背后的历史与秘密。\",\"release_and_service_status\":\"游戏于2016年首次发布，目前处于持续更新状态，已在多个平台发售，包含完整的单人与多人游戏内容。\"},\"default_pc_keybinds\":{\"前进\":\"W\",\"后退\":\"S\",\"向左移动\":\"A\",\"向右移动\":\"D\",\"使用工具\":\"MouseLeft\",\"检查与交互\":\"MouseRight\",\"快捷物品栏1\":\"1\",\"快捷物品栏2\":\"2\",\"快捷物品栏3\":\"3\",\"快捷物品栏4\":\"4\",\"快捷物品栏5\":\"5\",\"快捷物品栏6\":\"6\",\"快捷物品栏7\":\"7\",\"快捷物品栏8\":\"8\",\"快捷物品栏9\":\"9\",\"快捷物品栏10\":\"0\",\"快捷物品栏11\":\"-\",\"快捷物品栏12\":\"=\",\"打开菜单\":\"E\",\"打开日志\":\"F\",\"打开地图\":\"M\",\"放置物品\":\"C\",\"聊天\":\"T\"}}",
+      "parsed_answer": {
+        "genre": [
+          "模拟经营",
+          "角色扮演",
+          "农场模拟"
+        ],
+        "perspective": "固定俯视角（2D像素风格）",
+        "game_overview": "《星露谷物语》是一款以农场经营为核心的模拟类游戏。玩家扮演一名厌倦了城市高压生活的办公室职员，继承了祖父在星露谷留下的破旧农场。游戏的主要目标是通过清理土地、种植作物、饲养牲畜、挖掘矿产以及与当地居民建立社交关系，将荒废的农场重建为繁荣的产业。游戏支持单人游玩，也支持最多四人的在线合作模式，其核心特征在于将农场经营、地牢探索、社交养成与季节性节日活动有机结合，提供了一个具有昼夜交替与季节循环的开放式生活模拟环境。",
+        "gameplay": {
+          "player_goal": "玩家追求通过经营农场获取经济收益，提升各项生活技能等级，完成社区中心修复或加入乔家超市以推动小镇发展，并与小镇居民建立深厚的人际关系。",
+          "core_loop": "每日清晨开始，玩家根据季节与天气规划农事（浇水、播种、收获）；白天进行资源采集、钓鱼、下矿探险或与NPC互动；傍晚处理农产品或整理背包；深夜入睡以结算当日收益并保存进度，进入下一天。",
+          "major_systems": [
+            {
+              "name": "体力与时间系统",
+              "description": "大部分行动消耗体力，体力耗尽会影响效率；时间随行动流逝，深夜未入睡会导致角色疲劳或昏倒。"
+            },
+            {
+              "name": "季节与作物系统",
+              "description": "游戏分为四个季节，每个季节持续28天，特定作物仅能在对应季节生长，季节更替会改变环境与可获取资源。"
+            },
+            {
+              "name": "技能成长系统",
+              "description": "通过耕种、采矿、采集、钓鱼和战斗五大领域获取经验，升级可解锁配方、提升效率并选择职业分支。"
+            },
+            {
+              "name": "社交与好感度系统",
+              "description": "通过赠送礼物、对话和完成任务提升与NPC的好感度，解锁特殊剧情、配方或建立亲密关系。"
+            },
+            {
+              "name": "矿井与战斗系统",
+              "description": "在随机生成的矿井中探索，通过击败怪物获取资源与矿石，层数越深难度越高。"
+            },
+            {
+              "name": "工艺与制作系统",
+              "description": "利用收集的原材料制作工具、装饰品、加工设备及农场建筑，提升生产效率。"
+            }
+          ],
+          "modes_and_structure": "游戏采用持续的日历循环结构，无强制结束时间。支持单人模式与多人联机模式，联机模式下玩家共享农场资源与进度。"
+        },
+        "background": {
+          "setting_and_premise": "故事发生在一个名为星露谷的宁静乡村，玩家继承了祖父的农场，需要从零开始清理杂草、修复建筑，并融入当地社区，探索小镇背后的历史与秘密。",
+          "release_and_service_status": "游戏于2016年首次发布，目前处于持续更新状态，已在多个平台发售，包含完整的单人与多人游戏内容。"
+        },
+        "default_pc_keybinds": {
+          "前进": "W",
+          "后退": "S",
+          "向左移动": "A",
+          "向右移动": "D",
+          "使用工具": "MouseLeft",
+          "检查与交互": "MouseRight",
+          "快捷物品栏1": "1",
+          "快捷物品栏2": "2",
+          "快捷物品栏3": "3",
+          "快捷物品栏4": "4",
+          "快捷物品栏5": "5",
+          "快捷物品栏6": "6",
+          "快捷物品栏7": "7",
+          "快捷物品栏8": "8",
+          "快捷物品栏9": "9",
+          "快捷物品栏10": "0",
+          "快捷物品栏11": "Minus",
+          "快捷物品栏12": "Equals",
+          "打开菜单": "E",
+          "打开日志": "F",
+          "打开地图": "M",
+          "放置物品": "C",
+          "聊天": "T"
+        }
+      },
+      "format_error": "键位输入 '-' → 'Minus'（动作：快捷物品栏11）；键位输入 '=' → 'Equals'（动作：快捷物品栏12）",
+      "latency_seconds": 4.031150299997535,
+      "prompt_tokens": 1295,
+      "completion_tokens": 973,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00178325,
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": [
+        "键位输入 '-' → 'Minus'（动作：快捷物品栏11）",
+        "键位输入 '=' → 'Equals'（动作：快捷物品栏12）"
+      ]
+    },
+    {
+      "game_id": "hearthstone",
+      "game_name": "Hearthstone",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.1-flash-lite",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"数字卡牌游戏\",\"回合制策略游戏\"],\"perspective\":\"固定视角，玩家从上方俯瞰桌面，双方玩家头像与手牌区域相对排列。\",\"game_overview\":\"《炉石传说》是一款基于《魔兽》系列世界观的在线集换式卡牌游戏。玩家扮演一名英雄，通过构建包含随从、法术、武器等卡牌的套牌，在回合制对战中通过策略性地使用资源与卡牌，旨在将对方英雄的生命值降至零。游戏的核心特征在于其基于法力水晶的动态资源管理系统，以及强调职业特性的英雄技能，使得每种职业拥有独特的战术风格与卡牌组合。\",\"gameplay\":{\"player_goal\":\"通过构建并优化套牌，在对战中击败对手，或在竞技模式中通过连胜获取奖励，最终目标是提升排名、收集卡牌并完成任务。\",\"core_loop\":\"进入对战匹配；在每回合开始时获得法力水晶并抽一张牌；根据当前法力值消耗，选择打出随从、法术或使用英雄技能；通过随从交换、法术解场或直接攻击对方英雄来控制场面；当一方英雄生命值归零时对战结束，根据胜负获得经验值、金币或竞技场奖励，随后返回主界面调整套牌或开启新对战。\",\"major_systems\":[{\"name\":\"法力水晶系统\",\"description\":\"每回合自动增加上限并回满，限制了玩家每回合可打出卡牌的总消耗，是资源管理的核心。\"},{\"name\":\"职业系统\",\"description\":\"玩家选择特定职业，每个职业拥有专属卡牌、独特的英雄技能以及不同的战术倾向。\"},{\"name\":\"随从战斗系统\",\"description\":\"随从具有攻击力和生命值，通常需要经过一回合的“召唤失调”后才能攻击，玩家需决定随从是攻击对方英雄还是进行随从交换。\"},{\"name\":\"套牌构建系统\",\"description\":\"玩家需从收藏中挑选卡牌组成套牌，需平衡卡牌的法力曲线、功能性与职业配合。\"},{\"name\":\"关键词系统\",\"description\":\"卡牌拥有如“嘲讽”、“潜行”、“战吼”、“亡语”等特殊机制，直接改变卡牌的结算规则与交互方式。\"},{\"name\":\"竞技场与模式系统\",\"description\":\"提供标准模式、狂野模式、酒馆战棋等多种玩法，不同模式下卡牌池与规则存在显著差异。\"}],\"modes_and_structure\":\"游戏以单局对战为基本单位，支持玩家对战（PvP）与单人冒险模式。对战模式分为休闲与排名赛，竞技场模式则采用随机选牌的轮抽机制。\"},\"background\":{\"setting_and_premise\":\"游戏设定在《魔兽》系列的奇幻世界中，玩家扮演酒馆中的一名英雄，通过卡牌对决来模拟史诗般的战斗。游戏氛围轻松，强调酒馆聚会的社交感。\",\"release_and_service_status\":\"游戏于2014年正式发布，目前处于持续运营状态，定期通过扩展包更新卡牌库与游戏机制。\"},\"default_pc_keybinds\":{\"结束回合\":\"Enter\",\"查看手牌\":\"MouseLeft\",\"打出卡牌\":\"MouseLeft\",\"攻击\":\"MouseLeft\",\"使用英雄技能\":\"MouseLeft\",\"取消操作\":\"MouseRight\",\"查看历史记录\":\"MouseWheelUp\"}}",
+      "parsed_answer": {
+        "genre": [
+          "数字卡牌游戏",
+          "回合制策略游戏"
+        ],
+        "perspective": "固定视角，玩家从上方俯瞰桌面，双方玩家头像与手牌区域相对排列。",
+        "game_overview": "《炉石传说》是一款基于《魔兽》系列世界观的在线集换式卡牌游戏。玩家扮演一名英雄，通过构建包含随从、法术、武器等卡牌的套牌，在回合制对战中通过策略性地使用资源与卡牌，旨在将对方英雄的生命值降至零。游戏的核心特征在于其基于法力水晶的动态资源管理系统，以及强调职业特性的英雄技能，使得每种职业拥有独特的战术风格与卡牌组合。",
+        "gameplay": {
+          "player_goal": "通过构建并优化套牌，在对战中击败对手，或在竞技模式中通过连胜获取奖励，最终目标是提升排名、收集卡牌并完成任务。",
+          "core_loop": "进入对战匹配；在每回合开始时获得法力水晶并抽一张牌；根据当前法力值消耗，选择打出随从、法术或使用英雄技能；通过随从交换、法术解场或直接攻击对方英雄来控制场面；当一方英雄生命值归零时对战结束，根据胜负获得经验值、金币或竞技场奖励，随后返回主界面调整套牌或开启新对战。",
+          "major_systems": [
+            {
+              "name": "法力水晶系统",
+              "description": "每回合自动增加上限并回满，限制了玩家每回合可打出卡牌的总消耗，是资源管理的核心。"
+            },
+            {
+              "name": "职业系统",
+              "description": "玩家选择特定职业，每个职业拥有专属卡牌、独特的英雄技能以及不同的战术倾向。"
+            },
+            {
+              "name": "随从战斗系统",
+              "description": "随从具有攻击力和生命值，通常需要经过一回合的“召唤失调”后才能攻击，玩家需决定随从是攻击对方英雄还是进行随从交换。"
+            },
+            {
+              "name": "套牌构建系统",
+              "description": "玩家需从收藏中挑选卡牌组成套牌，需平衡卡牌的法力曲线、功能性与职业配合。"
+            },
+            {
+              "name": "关键词系统",
+              "description": "卡牌拥有如“嘲讽”、“潜行”、“战吼”、“亡语”等特殊机制，直接改变卡牌的结算规则与交互方式。"
+            },
+            {
+              "name": "竞技场与模式系统",
+              "description": "提供标准模式、狂野模式、酒馆战棋等多种玩法，不同模式下卡牌池与规则存在显著差异。"
+            }
+          ],
+          "modes_and_structure": "游戏以单局对战为基本单位，支持玩家对战（PvP）与单人冒险模式。对战模式分为休闲与排名赛，竞技场模式则采用随机选牌的轮抽机制。"
+        },
+        "background": {
+          "setting_and_premise": "游戏设定在《魔兽》系列的奇幻世界中，玩家扮演酒馆中的一名英雄，通过卡牌对决来模拟史诗般的战斗。游戏氛围轻松，强调酒馆聚会的社交感。",
+          "release_and_service_status": "游戏于2014年正式发布，目前处于持续运营状态，定期通过扩展包更新卡牌库与游戏机制。"
+        },
+        "default_pc_keybinds": {
+          "结束回合": "Enter",
+          "查看手牌": "MouseLeft",
+          "打出卡牌": "MouseLeft",
+          "攻击": "MouseLeft",
+          "使用英雄技能": "MouseLeft",
+          "取消操作": "MouseRight",
+          "查看历史记录": "MouseWheelUp"
+        }
+      },
+      "format_error": null,
+      "latency_seconds": 3.905279900005553,
+      "prompt_tokens": 1294,
+      "completion_tokens": 870,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.0016285,
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "terraria",
+      "game_name": "Terraria",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.1-flash-lite",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"沙盒\",\"动作冒险\",\"生存\",\"角色扮演\"],\"perspective\":\"2D 横向卷轴视角\",\"game_overview\":\"《泰拉瑞亚》是一款以探索、建造、战斗和挖掘为核心的 2D 沙盒游戏。玩家扮演一名在随机生成的程序化世界中苏醒的冒险者，通过收集资源、制作装备、建造基地来提升自身实力。游戏融合了生存要素与动作 RPG 元素，玩家需要面对各种环境挑战、敌对生物以及强大的首领。其核心特征在于极高的自由度，玩家既可以专注于建筑设计，也可以通过挑战首领推进游戏进程，解锁更高级的材料与装备，从而探索更深层的地下世界或更危险的生物群落。\",\"gameplay\":{\"player_goal\":\"通过探索世界、击败首领并获取稀有资源，不断升级装备与能力，以应对更高难度的挑战并探索游戏世界的全貌。\",\"core_loop\":\"玩家在白天收集资源、建造房屋并探索地表；在夜晚抵御敌对生物的袭击；通过挖掘深入地下寻找矿石与宝箱；利用收集到的材料在工作台或熔炉处制作更高级的工具、武器与盔甲；最终挑战首领以解锁新的游戏阶段或获取特殊掉落物，并利用新能力进一步探索世界。\",\"major_systems\":[{\"name\":\"挖掘与建造系统\",\"description\":\"几乎所有环境方块均可破坏并重新放置，玩家可利用此系统改变地形、挖掘矿脉或建造复杂的建筑结构。\"},{\"name\":\"制作与合成系统\",\"description\":\"通过收集原材料并在特定的制作站（如工作台、铁砧、熔炉）处进行加工，制作武器、盔甲、药水及家具。\"},{\"name\":\"NPC 居住系统\",\"description\":\"当玩家建造符合条件的房屋并满足特定前提时，NPC 会入住，提供商品交易、治疗或辅助功能。\"},{\"name\":\"生物群落系统\",\"description\":\"世界由多种生物群落组成（如森林、沙漠、腐化/猩红、丛林等），不同群落拥有独特的敌对生物、资源与环境机制。\"},{\"name\":\"首领与事件系统\",\"description\":\"通过特定道具召唤或满足条件触发首领战与入侵事件，击败它们是推进游戏进程、获取稀有材料的关键。\"},{\"name\":\"装备与饰品系统\",\"description\":\"玩家可装备武器、盔甲及多种饰品，饰品可提供移动能力（如二段跳、飞行）或属性加成，是角色成长的核心。\"}],\"modes_and_structure\":\"支持单人模式与多人联机模式（合作或对抗）。游戏世界是持续存在的，玩家可随时进入已创建的世界进行探索与建设，进程通过击败特定首领来阶段性推进。\"},\"background\":{\"setting_and_premise\":\"游戏发生在一个充满奇幻色彩的随机生成世界中，包含地表、地下、地狱以及各种异域生物群落。玩家作为一名探索者，在没有任何初始装备的情况下开始冒险，需要通过自身努力在充满危险的荒野中生存并建立文明。\",\"release_and_service_status\":\"游戏于 2011 年首次发布，目前处于持续更新与维护状态，已推出多个重大内容更新版本。\"},\"default_pc_keybinds\":{\"前进\":\"W\",\"后退\":\"S\",\"向左移动\":\"A\",\"向右移动\":\"D\",\"跳跃\":\"Space\",\"快捷物品栏1\":\"1\",\"快捷物品栏2\":\"2\",\"快捷物品栏3\":\"3\",\"快捷物品栏4\":\"4\",\"快捷物品栏5\":\"5\",\"快捷物品栏6\":\"6\",\"快捷物品栏7\":\"7\",\"快捷物品栏8\":\"8\",\"快捷物品栏9\":\"9\",\"快捷物品栏10\":\"0\",\"使用物品\":\"MouseLeft\",\"交互\":\"MouseRight\",\"打开背包\":\"Escape\",\"地图\":\"M\",\"投掷\":\"T\",\"抓钩\":\"E\"}}",
+      "parsed_answer": {
+        "genre": [
+          "沙盒",
+          "动作冒险",
+          "生存",
+          "角色扮演"
+        ],
+        "perspective": "2D 横向卷轴视角",
+        "game_overview": "《泰拉瑞亚》是一款以探索、建造、战斗和挖掘为核心的 2D 沙盒游戏。玩家扮演一名在随机生成的程序化世界中苏醒的冒险者，通过收集资源、制作装备、建造基地来提升自身实力。游戏融合了生存要素与动作 RPG 元素，玩家需要面对各种环境挑战、敌对生物以及强大的首领。其核心特征在于极高的自由度，玩家既可以专注于建筑设计，也可以通过挑战首领推进游戏进程，解锁更高级的材料与装备，从而探索更深层的地下世界或更危险的生物群落。",
+        "gameplay": {
+          "player_goal": "通过探索世界、击败首领并获取稀有资源，不断升级装备与能力，以应对更高难度的挑战并探索游戏世界的全貌。",
+          "core_loop": "玩家在白天收集资源、建造房屋并探索地表；在夜晚抵御敌对生物的袭击；通过挖掘深入地下寻找矿石与宝箱；利用收集到的材料在工作台或熔炉处制作更高级的工具、武器与盔甲；最终挑战首领以解锁新的游戏阶段或获取特殊掉落物，并利用新能力进一步探索世界。",
+          "major_systems": [
+            {
+              "name": "挖掘与建造系统",
+              "description": "几乎所有环境方块均可破坏并重新放置，玩家可利用此系统改变地形、挖掘矿脉或建造复杂的建筑结构。"
+            },
+            {
+              "name": "制作与合成系统",
+              "description": "通过收集原材料并在特定的制作站（如工作台、铁砧、熔炉）处进行加工，制作武器、盔甲、药水及家具。"
+            },
+            {
+              "name": "NPC 居住系统",
+              "description": "当玩家建造符合条件的房屋并满足特定前提时，NPC 会入住，提供商品交易、治疗或辅助功能。"
+            },
+            {
+              "name": "生物群落系统",
+              "description": "世界由多种生物群落组成（如森林、沙漠、腐化/猩红、丛林等），不同群落拥有独特的敌对生物、资源与环境机制。"
+            },
+            {
+              "name": "首领与事件系统",
+              "description": "通过特定道具召唤或满足条件触发首领战与入侵事件，击败它们是推进游戏进程、获取稀有材料的关键。"
+            },
+            {
+              "name": "装备与饰品系统",
+              "description": "玩家可装备武器、盔甲及多种饰品，饰品可提供移动能力（如二段跳、飞行）或属性加成，是角色成长的核心。"
+            }
+          ],
+          "modes_and_structure": "支持单人模式与多人联机模式（合作或对抗）。游戏世界是持续存在的，玩家可随时进入已创建的世界进行探索与建设，进程通过击败特定首领来阶段性推进。"
+        },
+        "background": {
+          "setting_and_premise": "游戏发生在一个充满奇幻色彩的随机生成世界中，包含地表、地下、地狱以及各种异域生物群落。玩家作为一名探索者，在没有任何初始装备的情况下开始冒险，需要通过自身努力在充满危险的荒野中生存并建立文明。",
+          "release_and_service_status": "游戏于 2011 年首次发布，目前处于持续更新与维护状态，已推出多个重大内容更新版本。"
+        },
+        "default_pc_keybinds": {
+          "前进": "W",
+          "后退": "S",
+          "向左移动": "A",
+          "向右移动": "D",
+          "跳跃": "Space",
+          "快捷物品栏1": "1",
+          "快捷物品栏2": "2",
+          "快捷物品栏3": "3",
+          "快捷物品栏4": "4",
+          "快捷物品栏5": "5",
+          "快捷物品栏6": "6",
+          "快捷物品栏7": "7",
+          "快捷物品栏8": "8",
+          "快捷物品栏9": "9",
+          "快捷物品栏10": "0",
+          "使用物品": "MouseLeft",
+          "交互": "MouseRight",
+          "打开背包": "Escape",
+          "地图": "M",
+          "投掷": "T",
+          "抓钩": "E"
+        }
+      },
+      "format_error": null,
+      "latency_seconds": 4.378322600008687,
+      "prompt_tokens": 1293,
+      "completion_tokens": 984,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00179925,
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    }
+  ],
+  "dispatch_stats": [
+    {
+      "profile_name": "m5-b-t3a-v2:online",
+      "rate_limit_count": 0,
+      "cooldown_seconds": 0.0,
+      "cooldown_drop_count": 0,
+      "cooling_down": false,
+      "cooldown_remaining_seconds": 0.0
+    }
+  ]
+}

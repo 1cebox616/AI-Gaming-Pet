@@ -103,6 +103,17 @@ def test_followup_suite_is_diverse_and_does_not_overlap_initial_suite() -> None:
     ]
 
 
+def test_qwen_baseline_suite_matches_requested_games() -> None:
+    assert [game.game_id for game in pilot.QWEN_BASELINE_GAMES] == [
+        "cyberpunk-2077",
+        "counter-strike-2",
+        "stardew-valley",
+        "hearthstone",
+        "terraria",
+    ]
+    assert len({game.category for game in pilot.QWEN_BASELINE_GAMES}) == 5
+
+
 def test_v2_strict_parser_accepts_contract_and_rejects_old_fields() -> None:
     text = json.dumps(_answer(), ensure_ascii=False)
     parsed, error = pilot.parse_answer(text)

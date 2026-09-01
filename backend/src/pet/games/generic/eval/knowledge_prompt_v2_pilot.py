@@ -1,4 +1,4 @@
-"""Run a small DeepSeek V4 pilot for the detailed game-context prompt."""
+"""Run a small model pilot for the detailed game-context prompt."""
 
 from __future__ import annotations
 
@@ -140,10 +140,53 @@ HEALING_GAMES = (
     FOLLOWUP_GAMES[3],
     FOLLOWUP_GAMES[4],
 )
+QWEN_BASELINE_GAMES = (
+    GameCase(
+        "cyberpunk-2077",
+        "Cyberpunk 2077",
+        "赛博朋克 2077",
+        "开放世界动作角色扮演",
+        "热门长线单机作品",
+        "检验第一人称 RPG、载具、战斗与复杂交互键位。",
+    ),
+    GameCase(
+        "counter-strike-2",
+        "Counter-Strike 2",
+        "CS2",
+        "竞技战术射击",
+        "热门长线运营",
+        "检验回合制竞技规则、经济系统与射击键位。",
+    ),
+    GameCase(
+        "stardew-valley",
+        "Stardew Valley",
+        "星露谷物语",
+        "农场生活模拟角色扮演",
+        "经典长线更新作品",
+        "检验生活模拟、时间管理、多系统循环与工具栏键位。",
+    ),
+    GameCase(
+        "hearthstone",
+        "Hearthstone",
+        "炉石传说",
+        "数字集换式卡牌",
+        "热门长线运营",
+        "检验鼠标主导卡牌游戏、模式结构与少量键盘绑定。",
+    ),
+    GameCase(
+        "terraria",
+        "Terraria",
+        "泰拉瑞亚",
+        "二维沙盒生存动作冒险",
+        "经典长线更新作品",
+        "检验沙盒探索、建造、战斗与快捷物品栏键位。",
+    ),
+)
 GAME_SUITES = {
     "initial": INITIAL_GAMES,
     "followup": FOLLOWUP_GAMES,
     "healing": HEALING_GAMES,
+    "qwen-baseline": QWEN_BASELINE_GAMES,
 }
 ACTIVE_GAME_SUITE = "initial"
 
