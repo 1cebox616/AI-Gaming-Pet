@@ -6,13 +6,19 @@
 
 ## 游戏知识
 
-- 状态：stale
-- 最近核查：2026-09-01T16:34:38.129862+00:00
+- 状态：initialized
+- 最近核查：2026-09-01T17:32:59.237123+00:00
 - 模型：`google/gemini-3.1-flash-lite`
 - 模式：web
-- 请求 ID：`gk-b8c276b9-8523-4d78-9dde-e93d8b417071`
+- 请求 ID：`gk-63a27b47-b311-41b2-a6fb-402554bdf96c`
 
-没有通过完整 V3 合同的有效内容。
+- 类型：第一人称射击、团队竞技、英雄射击
+- 视角：第一人称视角
+- 游戏概述：《守望先锋》是一款以团队合作为核心的英雄射击游戏，玩家扮演拥有独特技能的英雄，在多样的地图中通过配合完成目标。
+- 核心玩法：游戏以团队对抗为核心，玩家需在坦克、输出、支援三种职责中选择英雄，通过运用各自的武器与技能组合，在占领、护送或控制目标点等模式中击败对手。核心循环为：选择英雄进入战场，通过战术配合与技能释放争夺目标点，积累能量释放终极技能，最终达成地图胜利条件。
+- 游戏结构：基于局域匹配的短时对局制，每局比赛由两支队伍进行对抗，根据地图模式设定胜负条件，支持多种竞技与休闲模式。
+- 背景设定：游戏设定在近未来的地球，世界正处于从全球危机中恢复的时期，各地的英雄们因不同背景与使命集结，在充满科技感与多元文化色彩的全球场景中进行对抗。
+- 发售与运营：已正式发售，目前以《守望先锋：归来》名义进行持续运营的免费游玩服务。
 
 ### 核查尝试
 
@@ -20,6 +26,7 @@
 - 2026-09-01T16:29:51.671264+00:00：schema_reject；原因：未通过完整 V3 合同：1 validation error for GameKnowledgeContent Value error, game knowledge keybind '技能1' is not canonical: 'Shift' [type=value_error, input_value={'genre': ['第一人称...快捷物品栏4': '4'}}, input_type=dict] For further information visit https://errors.pydantic.dev/2.13/v/value_error
 - 2026-09-01T16:32:12.496587+00:00：schema_reject；原因：未通过完整 V3 合同：1 validation error for GameKnowledgeContent Value error, game knowledge keybind '技能1' is not canonical: 'Shift' [type=value_error, input_value={'genre': ['第一人称...快捷物品栏4': '4'}}, input_type=dict] For further information visit https://errors.pydantic.dev/2.13/v/value_error
 - 2026-09-01T16:34:38.129862+00:00：schema_reject；原因：未通过完整 V3 合同：1 validation error for GameKnowledgeContent Value error, game knowledge keybind '技能1' is not canonical: 'Shift' [type=value_error, input_value={'genre': ['第一人称...快捷物品栏4': '4'}}, input_type=dict] For further information visit https://errors.pydantic.dev/2.13/v/value_error
+- 2026-09-01T17:32:59.237123+00:00：ok
 
 ## 场景
 

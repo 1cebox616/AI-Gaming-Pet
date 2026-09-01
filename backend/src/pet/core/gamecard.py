@@ -19,21 +19,6 @@ from pet.core.scene_fingerprint import CardSceneReference, SceneCluster
 GAMECARD_VERSION = 2
 KNOWLEDGE_ATTEMPT_HISTORY_LIMIT = 20  # 待实测：先限制跨会话卡文件无限增长。
 
-CANONICAL_PC_INPUT_PATTERN = (
-    r"^(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|"
-    r"(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|"
-    r"LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|"
-    r"ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|"
-    r"MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|"
-    r"RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash))"
-    r"(?:\+(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|"
-    r"(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|"
-    r"LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|"
-    r"ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|"
-    r"MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|"
-    r"RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash)))*$"
-)
-
 GameKnowledgeMode = Literal["web", "knowledge"]
 GameKnowledgeOutcome = Literal[
     "ok",
@@ -50,59 +35,36 @@ class GameCardModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class GameKnowledgeSystem(GameCardModel):
-    name: str = Field(min_length=1)
-    description: str = Field(min_length=1)
-
-
-class GameKnowledgeGameplay(GameCardModel):
-    player_goal: str = Field(min_length=1)
-    core_loop: str = Field(min_length=1)
-    major_systems: list[GameKnowledgeSystem] = Field(min_length=4, max_length=10)
-    modes_and_structure: str = Field(min_length=1)
-
-
-class GameKnowledgeBackground(GameCardModel):
-    setting_and_premise: str = Field(min_length=1)
-    release_and_service_status: str = Field(min_length=1)
-
-
 class GameKnowledgeContent(GameCardModel):
-    """The complete V3 shelf-one answer; partial answers are never valid."""
+    """The flat V4 shelf-one context; uncertain optional fields stay null."""
 
-    genre: list[str] = Field(min_length=1, max_length=5)
-    perspective: str = Field(min_length=1)
-    game_overview: str = Field(min_length=1)
-    gameplay: GameKnowledgeGameplay
-    background: GameKnowledgeBackground
-    default_pc_keybinds: dict[
-        str,
-        str,
-    ] = Field(default_factory=dict, max_length=40)
+    genre: list[str] = Field(min_length=1)
+    perspective: str | None = Field(default=None, min_length=1)
+    summary: str = Field(min_length=1)
+    core_gameplay: str | None = Field(default=None, min_length=1)
+    game_structure: str | None = Field(default=None, min_length=1)
+    setting_and_background: str | None = Field(default=None, min_length=1)
+    release_and_service_status: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
-    def validate_nonempty_text_and_keybinds(self) -> GameKnowledgeContent:
+    def validate_nonempty_text(self) -> GameKnowledgeContent:
         strings = [
             *self.genre,
-            self.perspective,
-            self.game_overview,
-            self.gameplay.player_goal,
-            self.gameplay.core_loop,
-            self.gameplay.modes_and_structure,
-            self.background.setting_and_premise,
-            self.background.release_and_service_status,
+            self.summary,
+            *(
+                value
+                for value in (
+                    self.perspective,
+                    self.core_gameplay,
+                    self.game_structure,
+                    self.setting_and_background,
+                    self.release_and_service_status,
+                )
+                if value is not None
+            ),
         ]
-        for system in self.gameplay.major_systems:
-            strings.extend((system.name, system.description))
         if any(not value.strip() for value in strings):
             raise ValueError("game knowledge text fields must not be blank")
-        for action, input_name in self.default_pc_keybinds.items():
-            if not action.strip():
-                raise ValueError("game knowledge keybind actions must not be blank")
-            if re.fullmatch(CANONICAL_PC_INPUT_PATTERN, input_name) is None:
-                raise ValueError(
-                    f"game knowledge keybind {action!r} is not canonical: {input_name!r}"
-                )
         return self
 
 
@@ -232,37 +194,21 @@ def render_gamecard_markdown(card: GameCard) -> str:
             )
         )
         if knowledge.content is None:
-            lines.extend(("没有通过完整 V3 合同的有效内容。", ""))
+            lines.extend(("没有通过完整 V4 合同的有效内容。", ""))
         else:
             content = knowledge.content
             lines.extend(
                 (
                     f"- 类型：{'、'.join(content.genre)}",
-                    f"- 视角：{content.perspective}",
-                    f"- 游戏概述：{content.game_overview}",
-                    f"- 玩家目标：{content.gameplay.player_goal}",
-                    f"- 核心循环：{content.gameplay.core_loop}",
-                    f"- 模式与结构：{content.gameplay.modes_and_structure}",
-                    f"- 背景前提：{content.background.setting_and_premise}",
-                    f"- 发售与运营：{content.background.release_and_service_status}",
-                    "",
-                    "### 主要系统",
+                    f"- 视角：{content.perspective or '未确认'}",
+                    f"- 游戏概述：{content.summary}",
+                    f"- 核心玩法：{content.core_gameplay or '未确认'}",
+                    f"- 游戏结构：{content.game_structure or '未确认'}",
+                    f"- 背景设定：{content.setting_and_background or '未确认'}",
+                    f"- 发售与运营：{content.release_and_service_status or '未确认'}",
                     "",
                 )
             )
-            lines.extend(
-                f"- {system.name}：{system.description}"
-                for system in content.gameplay.major_systems
-            )
-            lines.extend(("", "### PC 默认键位", ""))
-            if content.default_pc_keybinds:
-                lines.extend(
-                    f"- {action}：`{input_name}`"
-                    for action, input_name in content.default_pc_keybinds.items()
-                )
-            else:
-                lines.append("没有可确认的默认键位。")
-            lines.append("")
         lines.extend(("### 核查尝试", ""))
         for attempt in knowledge.attempts:
             detail = (
@@ -327,24 +273,19 @@ def render_game_knowledge_short_view(
         raise ValueError("game knowledge short-view token limit must be positive")
     if content is None:
         return ""
-    systems = "；".join(
-        f"{item.name}：{item.description}" for item in content.gameplay.major_systems
-    )
-    keybinds = "；".join(
-        f"{action}={input_name}"
-        for action, input_name in content.default_pc_keybinds.items()
-    )
-    sections = (
-        f"【游戏知识｜推测背景】{content.game_overview}",
-        f"类型：{'、'.join(content.genre)}；视角：{content.perspective}",
-        f"目标：{content.gameplay.player_goal}",
-        f"循环：{content.gameplay.core_loop}",
-        f"系统：{systems}",
-        f"结构：{content.gameplay.modes_and_structure}",
-        f"背景：{content.background.setting_and_premise}",
-        f"运营：{content.background.release_and_service_status}",
-        f"默认键位：{keybinds}" if keybinds else "默认键位：无可确认条目",
-    )
+    sections = [
+        f"【游戏知识｜推测背景】{content.summary}",
+        f"类型：{'、'.join(content.genre)}",
+    ]
+    for label, value in (
+        ("视角", content.perspective),
+        ("玩法", content.core_gameplay),
+        ("结构", content.game_structure),
+        ("背景", content.setting_and_background),
+        ("运营", content.release_and_service_status),
+    ):
+        if value is not None:
+            sections.append(f"{label}：{value}")
     return _truncate_utf8("\n".join(sections), token_limit)
 
 

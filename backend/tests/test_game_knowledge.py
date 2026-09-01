@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
-import re
 
 import httpx
 from PIL import Image
@@ -50,35 +49,21 @@ from pet.games.generic.game_knowledge import (
 NOW = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
 
 
-def _content_value(*, overview: str = "这是一份完整公开概述。") -> dict[str, object]:
-    return {
+def _content_value(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
         "genre": ["动作", "多人"],
         "perspective": "第一人称视角",
-        "game_overview": overview,
-        "gameplay": {
-            "player_goal": "完成公开规则定义的目标。",
-            "core_loop": "准备、行动、读取反馈，然后进入下一轮。",
-            "major_systems": [
-                {"name": "系统一", "description": "影响资源选择。"},
-                {"name": "系统二", "description": "影响移动决策。"},
-                {"name": "系统三", "description": "影响风险判断。"},
-                {"name": "系统四", "description": "影响回合反馈。"},
-            ],
-            "modes_and_structure": "按独立会话组织。",
-        },
-        "background": {
-            "setting_and_premise": "只含不剧透的公开前提。",
-            "release_and_service_status": "当前持续运营。",
-        },
-        "default_pc_keybinds": {
-            "前进": "W",
-            "互动": "E",
-            "打开菜单": "Escape",
-        },
+        "summary": "这是一份完整公开概述。",
+        "core_gameplay": "完成公开目标，准备、行动、读取反馈并进入下一轮。",
+        "game_structure": "按独立会话组织。",
+        "setting_and_background": "只含不剧透的公开前提。",
+        "release_and_service_status": "当前持续运营。",
     }
+    value.update(overrides)
+    return value
 
 
-def _content(**kwargs: str) -> GameKnowledgeContent:
+def _content(**kwargs: object) -> GameKnowledgeContent:
     return GameKnowledgeContent.model_validate(
         _content_value(**kwargs),
         strict=True,
@@ -107,58 +92,86 @@ def _call_result(
     )
 
 
-def test_production_prompt_is_byte_identical_to_t3a_v3_system_prompt() -> None:
-    artifact = (
-        Path(__file__).parents[1]
-        / "eval-reports"
-        / "m5-b-t3a"
-        / "selection-gemini-3.1-flash-lite"
-        / "prompt-v3.md"
-    ).read_text(encoding="utf-8")
-    match = re.search(
-        r"## System prompt（逐字全文）\s+```text\n(.*?)\n```",
-        artifact,
-        flags=re.DOTALL,
-    )
-    assert match is not None
-    assert GAME_KNOWLEDGE_PROMPT_PATH.read_text(encoding="utf-8").strip() == (
-        match.group(1)
-    )
+def test_production_prompt_and_schema_are_flat_v4_without_keybinds() -> None:
+    fields = {
+        "genre",
+        "perspective",
+        "summary",
+        "core_gameplay",
+        "game_structure",
+        "setting_and_background",
+        "release_and_service_status",
+    }
+    prompt = GAME_KNOWLEDGE_PROMPT_PATH.read_text(encoding="utf-8")
+    schema = RESPONSE_FORMAT["json_schema"]["schema"]  # type: ignore[index]
+    assert schema["additionalProperties"] is False  # type: ignore[index]
+    assert set(schema["properties"]) == fields  # type: ignore[arg-type,index]
+    assert schema["required"] == ["genre", "summary"]  # type: ignore[index]
+    for field in fields:
+        assert f'"{field}"' in prompt
+    for obsolete in (
+        "default_pc_keybinds",
+        "game_overview",
+        "player_goal",
+        "core_loop",
+        "major_systems",
+        "modes_and_structure",
+        "setting_and_premise",
+    ):
+        assert obsolete not in prompt
+        assert obsolete not in json.dumps(schema, ensure_ascii=False)
 
 
-def test_production_response_schema_is_identical_to_t3a_v3() -> None:
-    from pet.games.generic.eval.knowledge_prompt_v2_pilot import (
-        RESPONSE_FORMAT as T3A_RESPONSE_FORMAT,
-    )
-
-    assert RESPONSE_FORMAT == T3A_RESPONSE_FORMAT
-
-
-def test_v3_parser_accepts_only_complete_contract_and_ambiguity_free_cleanup() -> None:
+def test_v4_parser_accepts_nullable_fields_and_ambiguity_free_cleanup() -> None:
     raw = json.dumps(_content_value(), ensure_ascii=False)
     parsed = parse_game_knowledge_response(f"```json\n{raw}\n```")
     assert parsed.content is not None
     assert parsed.normalization_actions == ("剥离 JSON 外文本／代码围栏",)
 
-    punctuation = _content_value()
-    punctuation["default_pc_keybinds"] = {"控制台": "`"}
-    normalized = parse_game_knowledge_response(
-        json.dumps(punctuation, ensure_ascii=False)
+    nullable = _content_value(
+        perspective=None,
+        core_gameplay=None,
+        game_structure=None,
+        setting_and_background=None,
+        release_and_service_status=None,
     )
-    assert normalized.content is not None
-    assert normalized.content.default_pc_keybinds == {"控制台": "Backquote"}
+    parsed_nullable = parse_game_knowledge_response(
+        json.dumps(nullable, ensure_ascii=False)
+    )
+    assert parsed_nullable.content is not None
+    assert parsed_nullable.content.perspective is None
+    assert parsed_nullable.content.release_and_service_status is None
 
     partial = _content_value()
-    partial.pop("background")
+    partial.pop("summary")
     assert parse_game_knowledge_response(
         json.dumps(partial, ensure_ascii=False)
     ).content is None
 
-    guessed_range = _content_value()
-    guessed_range["default_pc_keybinds"] = {"移动": "WASD"}
+    obsolete = _content_value()
+    obsolete["default_pc_keybinds"] = {"移动": "W"}
     assert parse_game_knowledge_response(
-        json.dumps(guessed_range, ensure_ascii=False)
+        json.dumps(obsolete, ensure_ascii=False)
     ).content is None
+
+
+def test_v4_omitted_optional_fields_are_persisted_as_explicit_nulls() -> None:
+    parsed = parse_game_knowledge_response(
+        json.dumps(
+            {"genre": ["策略"], "summary": "公开且稳定的游戏说明。"},
+            ensure_ascii=False,
+        )
+    )
+    assert parsed.content is not None
+    assert parsed.content.model_dump(mode="json") == {
+        "genre": ["策略"],
+        "perspective": None,
+        "summary": "公开且稳定的游戏说明。",
+        "core_gameplay": None,
+        "game_structure": None,
+        "setting_and_background": None,
+        "release_and_service_status": None,
+    }
 
 
 def test_success_atomically_initializes_then_refreshes_without_field_merge(
@@ -166,7 +179,7 @@ def test_success_atomically_initializes_then_refreshes_without_field_merge(
 ) -> None:
     repository = GameCardRepository(tmp_path)
     card = repository.load_or_create("fixture-game", "Fixture Game", NOW)
-    first = _content(overview="第一份完整答案。")
+    first = _content(summary="第一份完整答案。")
     card, action = repository.record_knowledge_attempt(
         card,
         checked_at=NOW,
@@ -182,7 +195,11 @@ def test_success_atomically_initializes_then_refreshes_without_field_merge(
     assert card.knowledge.status == "initialized"
     assert card.knowledge.content == first
 
-    second = _content(overview="第二份完整答案。")
+    second = _content(
+        summary="第二份完整答案。",
+        core_gameplay=None,
+        game_structure=None,
+    )
     card, action = repository.record_knowledge_attempt(
         card,
         checked_at=NOW + timedelta(minutes=1),
@@ -197,6 +214,8 @@ def test_success_atomically_initializes_then_refreshes_without_field_merge(
     assert card.knowledge is not None
     assert card.knowledge.status == "refreshed"
     assert card.knowledge.content == second
+    assert card.knowledge.content.core_gameplay is None
+    assert card.knowledge.content.game_structure is None
     assert len(card.knowledge.attempts) == 2
     assert (tmp_path / "fixture-game" / "gamecard.md").read_text(
         encoding="utf-8"
@@ -208,7 +227,7 @@ def test_success_atomically_initializes_then_refreshes_without_field_merge(
     [
         ("cooldown_drop", "档位冷却中"),
         ("timeout", "超过总墙钟截止"),
-        ("schema_reject", "未通过完整 V3 合同"),
+        ("schema_reject", "未通过完整 V4 合同"),
         ("failed", "网关失败"),
     ],
 )
@@ -736,7 +755,7 @@ def test_two_replays_initialize_then_refresh_with_one_call_each(
         assert sum(item.kind == "game_knowledge" for item in evidence) == 1
 
 
-def test_four_repository_cards_use_v2_nested_contract() -> None:
+def test_four_repository_cards_use_v2_card_and_flat_v4_knowledge_contract() -> None:
     memory_root = Path(__file__).parents[1] / "memory"
     paths = sorted(memory_root.glob("*/gamecard.json"))
     assert len(paths) == 4
@@ -749,4 +768,17 @@ def test_four_repository_cards_use_v2_nested_contract() -> None:
         assert "hud_slots" not in raw
         assert "knowledge" in raw
         assert "hud_elements" in raw
+        knowledge = raw["knowledge"]
+        assert knowledge is not None
+        content = knowledge["content"]
+        assert content is not None
+        assert set(content) == {
+            "genre",
+            "perspective",
+            "summary",
+            "core_gameplay",
+            "game_structure",
+            "setting_and_background",
+            "release_and_service_status",
+        }
         GameCard.model_validate_json(path.read_text(encoding="utf-8"), strict=True)

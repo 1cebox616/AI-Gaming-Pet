@@ -16,7 +16,6 @@ from pydantic import ValidationError
 
 from pet.core.config import LlmConfig
 from pet.core.gamecard import (
-    CANONICAL_PC_INPUT_PATTERN,
     GameKnowledgeContent,
     GameKnowledgeOutcome,
 )
@@ -56,100 +55,29 @@ RESPONSE_FORMAT: dict[str, object] = {
             "additionalProperties": False,
             "required": [
                 "genre",
-                "perspective",
-                "game_overview",
-                "gameplay",
-                "background",
-                "default_pc_keybinds",
+                "summary",
             ],
             "properties": {
                 "genre": {
                     "type": "array",
                     "minItems": 1,
-                    "maxItems": 5,
                     "items": {"type": "string", "minLength": 1},
                 },
-                "perspective": {"type": "string", "minLength": 1},
-                "game_overview": {"type": "string", "minLength": 1},
-                "gameplay": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": [
-                        "player_goal",
-                        "core_loop",
-                        "major_systems",
-                        "modes_and_structure",
-                    ],
-                    "properties": {
-                        "player_goal": {"type": "string", "minLength": 1},
-                        "core_loop": {"type": "string", "minLength": 1},
-                        "major_systems": {
-                            "type": "array",
-                            "minItems": 4,
-                            "maxItems": 10,
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "required": ["name", "description"],
-                                "properties": {
-                                    "name": {"type": "string", "minLength": 1},
-                                    "description": {
-                                        "type": "string",
-                                        "minLength": 1,
-                                    },
-                                },
-                            },
-                        },
-                        "modes_and_structure": {
-                            "type": "string",
-                            "minLength": 1,
-                        },
-                    },
+                "perspective": {"type": ["string", "null"], "minLength": 1},
+                "summary": {"type": "string", "minLength": 1},
+                "core_gameplay": {"type": ["string", "null"], "minLength": 1},
+                "game_structure": {"type": ["string", "null"], "minLength": 1},
+                "setting_and_background": {
+                    "type": ["string", "null"],
+                    "minLength": 1,
                 },
-                "background": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": [
-                        "setting_and_premise",
-                        "release_and_service_status",
-                    ],
-                    "properties": {
-                        "setting_and_premise": {
-                            "type": "string",
-                            "minLength": 1,
-                        },
-                        "release_and_service_status": {
-                            "type": "string",
-                            "minLength": 1,
-                        },
-                    },
-                },
-                "default_pc_keybinds": {
-                    "type": "object",
-                    "maxProperties": 40,
-                    "propertyNames": {"type": "string", "minLength": 1},
-                    "additionalProperties": {
-                        "type": "string",
-                        "pattern": CANONICAL_PC_INPUT_PATTERN,
-                    },
+                "release_and_service_status": {
+                    "type": ["string", "null"],
+                    "minLength": 1,
                 },
             },
         },
     },
-}
-
-_PC_INPUT_ALIASES = {
-    "`": "Backquote",
-    "-": "Minus",
-    "=": "Equals",
-    "[": "LeftBracket",
-    "]": "RightBracket",
-    "\\": "Backslash",
-    ";": "Semicolon",
-    "'": "Apostrophe",
-    ",": "Comma",
-    ".": "Period",
-    "/": "Slash",
 }
 
 
@@ -468,30 +396,6 @@ def _remove_trailing_commas(text: str) -> tuple[str, int]:
     return "".join(output), removed
 
 
-def _normalize_keybind_aliases(
-    value: object,
-) -> tuple[object, tuple[str, ...]]:
-    if not isinstance(value, dict):
-        return value, ()
-    keybinds = value.get("default_pc_keybinds")
-    if not isinstance(keybinds, dict):
-        return value, ()
-    normalized_keybinds: dict[object, object] = {}
-    actions: list[str] = []
-    for action, input_name in keybinds.items():
-        normalized = _PC_INPUT_ALIASES.get(input_name, input_name)
-        normalized_keybinds[action] = normalized
-        if normalized != input_name:
-            actions.append(
-                f"键位输入 {input_name!r} → {normalized!r}（动作：{action}）"
-            )
-    if not actions:
-        return value, ()
-    normalized_value = dict(value)
-    normalized_value["default_pc_keybinds"] = normalized_keybinds
-    return normalized_value, tuple(actions)
-
-
 def _parse_candidate(
     text: str,
 ) -> GameKnowledgeParseResult:
@@ -506,10 +410,10 @@ def _parse_candidate(
         )
     except (_DuplicateJsonKeyError, _NonstandardJsonConstantError) as error:
         return GameKnowledgeParseResult(None, str(error), ())
-    value, alias_actions = _normalize_keybind_aliases(value)
     actions = (
-        ((f"移除 {comma_count} 个对象／数组尾随逗号",) if comma_count else ())
-        + alias_actions
+        (f"移除 {comma_count} 个对象／数组尾随逗号",)
+        if comma_count
+        else ()
     )
     try:
         content = GameKnowledgeContent.model_validate(value, strict=True)
@@ -526,7 +430,7 @@ def _parse_candidate(
     except (ValidationError, TypeError, ValueError) as error:
         return GameKnowledgeParseResult(
             None,
-            f"未通过完整 V3 合同：{' '.join(str(error).split())}",
+            f"未通过完整 V4 合同：{' '.join(str(error).split())}",
             actions,
         )
     if round_trip != content:
@@ -539,7 +443,7 @@ def _parse_candidate(
 
 
 def parse_game_knowledge_response(text: str) -> GameKnowledgeParseResult:
-    """Apply only the ambiguity-free normalizations accepted by T3a V3."""
+    """Apply only ambiguity-free JSON framing cleanup before V4 validation."""
     if not text.strip():
         return GameKnowledgeParseResult(None, "空答", ())
     direct = _parse_candidate(text)

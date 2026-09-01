@@ -1,0 +1,131 @@
+{
+  "attempts": [
+    {
+      "game_id": "don-t-starve-together",
+      "display_name": "Don't Starve Together",
+      "query_name": "Don't Starve Together",
+      "outcome": "ok",
+      "write_action": "refreshed",
+      "request_id": "gk-d6cd5744-6d92-4b09-8a4b-4b048d370f33",
+      "latency_seconds": 2.728864100005012,
+      "cost_usd": 0.000717,
+      "model": "google/gemini-3.1-flash-lite",
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "provider": "OpenAI",
+      "prompt_tokens": 948,
+      "completion_tokens": 320,
+      "failure_reason": null,
+      "normalization_actions": [],
+      "content": {
+        "genre": [
+          "生存",
+          "沙盒",
+          "动作冒险"
+        ],
+        "perspective": "俯视角（固定斜向视角）",
+        "summary": "《饥荒联机版》是一款支持多人协作的荒野生存游戏，玩家扮演被困在异世界的角色，需通过收集资源、建造基地、制作工具与应对环境威胁来维持生命。",
+        "core_gameplay": "游戏的核心循环是“采集资源-制作工具-建设基地-应对季节与威胁”。玩家必须通过探索地图获取食物、燃料和材料，利用科学机器与魔法装置解锁更高级的科技，同时管理饥饿度、生命值与精神值。核心系统包括昼夜交替、季节更迭、复杂的合成配方以及多人协作的资源分配与战斗机制。",
+        "game_structure": "采用持续运行的沙盒世界模式，玩家在服务器中进行长期的生存挑战。支持自定义世界生成参数，包含多种游戏模式（如生存、无尽、荒野等），玩家可随时加入或离开服务器。",
+        "setting_and_background": "游戏设定在一个充满超自然力量、怪诞生物与诡异科技的异世界。世界由程序随机生成，包含多种生物群落，环境会随季节周期性变化，玩家需在充满敌意的荒野中寻找生存之道。",
+        "release_and_service_status": "已正式发售，处于持续运营状态，定期更新内容与活动。"
+      }
+    },
+    {
+      "game_id": "g-592fc85c",
+      "display_name": "守望先锋",
+      "query_name": "守望先锋",
+      "outcome": "ok",
+      "write_action": "initialized",
+      "request_id": "gk-63a27b47-b311-41b2-a6fb-402554bdf96c",
+      "latency_seconds": 2.071137999999337,
+      "cost_usd": 0.000694,
+      "model": "google/gemini-3.1-flash-lite",
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "provider": "OpenAI",
+      "prompt_tokens": 946,
+      "completion_tokens": 305,
+      "failure_reason": null,
+      "normalization_actions": [],
+      "content": {
+        "genre": [
+          "第一人称射击",
+          "团队竞技",
+          "英雄射击"
+        ],
+        "perspective": "第一人称视角",
+        "summary": "《守望先锋》是一款以团队合作为核心的英雄射击游戏，玩家扮演拥有独特技能的英雄，在多样的地图中通过配合完成目标。",
+        "core_gameplay": "游戏以团队对抗为核心，玩家需在坦克、输出、支援三种职责中选择英雄，通过运用各自的武器与技能组合，在占领、护送或控制目标点等模式中击败对手。核心循环为：选择英雄进入战场，通过战术配合与技能释放争夺目标点，积累能量释放终极技能，最终达成地图胜利条件。",
+        "game_structure": "基于局域匹配的短时对局制，每局比赛由两支队伍进行对抗，根据地图模式设定胜负条件，支持多种竞技与休闲模式。",
+        "setting_and_background": "游戏设定在近未来的地球，世界正处于从全球危机中恢复的时期，各地的英雄们因不同背景与使命集结，在充满科技感与多元文化色彩的全球场景中进行对抗。",
+        "release_and_service_status": "已正式发售，目前以《守望先锋：归来》名义进行持续运营的免费游玩服务。"
+      }
+    },
+    {
+      "game_id": "grey-zone-warfare",
+      "display_name": "GZW",
+      "query_name": "Grey Zone Warfare",
+      "outcome": "ok",
+      "write_action": "refreshed",
+      "request_id": "gk-8bf3ed42-459e-4ecd-8b81-ed99558a10b8",
+      "latency_seconds": 1.8038876000209711,
+      "cost_usd": 0.00068175,
+      "model": "google/gemini-3.1-flash-lite",
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "provider": "OpenAI",
+      "prompt_tokens": 945,
+      "completion_tokens": 297,
+      "failure_reason": null,
+      "normalization_actions": [],
+      "content": {
+        "genre": [
+          "战术射击游戏",
+          "第一人称射击",
+          "生存模拟"
+        ],
+        "perspective": "第一人称视角",
+        "summary": "《Grey Zone Warfare》是一款强调高度拟真与战术协作的开放世界第一人称射击游戏，玩家扮演受雇于私人军事公司的承包商，在充满敌意的岛屿上执行任务。",
+        "core_gameplay": "玩家通过接受任务进入开放世界地图，在与AI及其他玩家的对抗中收集资源、完成目标并撤离。核心循环围绕着战术规划、拟真的武器改装与弹道系统、以及受伤后的精细化医疗处理展开，玩家需在复杂的战场环境中管理装备负重与生存状态。",
+        "game_structure": "采用持续在线的开放世界模式，玩家在基地与任务区域之间往返，通过完成任务推进进度并获取装备，支持多人组队协作。",
+        "setting_and_background": "游戏背景设定在东南亚一座因神秘事件而被封锁的虚构岛屿“拉曼岛”（Lamang），岛上存在多个敌对派系，玩家作为私人军事承包商被派往该地进行调查与行动。",
+        "release_and_service_status": "目前处于抢先体验（Early Access）阶段，持续进行版本更新与优化。"
+      }
+    },
+    {
+      "game_id": "slay-the-spire-2",
+      "display_name": "Slay the Spire 2",
+      "query_name": "Slay the Spire 2",
+      "outcome": "ok",
+      "write_action": "refreshed",
+      "request_id": "gk-346292b3-c3cb-4ceb-9ac9-af5ec592fb26",
+      "latency_seconds": 2.1893648999975994,
+      "cost_usd": 0.00077725,
+      "model": "google/gemini-3.1-flash-lite",
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "provider": "OpenAI",
+      "prompt_tokens": 949,
+      "completion_tokens": 360,
+      "failure_reason": null,
+      "normalization_actions": [],
+      "content": {
+        "genre": [
+          "Roguelike",
+          "卡牌构建游戏"
+        ],
+        "perspective": "2D 静态视角",
+        "summary": "《杀戮尖塔2》是《杀戮尖塔》的续作，是一款结合了卡牌构建与 Roguelike 元素的策略游戏。玩家扮演一名攀登尖塔的挑战者，通过构建独特的卡组、获取遗物并应对随机生成的遭遇来不断向上攀登。",
+        "core_gameplay": "玩家在每一轮游戏中通过战斗、事件和商店获取卡牌与遗物，构建并优化自己的卡组。核心循环为：在回合制战斗中通过消耗能量打出卡牌进行攻击或防御，击败敌人以推进层数，若生命值归零则游戏结束并重置进度。游戏强调根据随机出现的卡牌和遗物组合，实时调整策略以应对不同类型的敌人与首领。",
+        "game_structure": "游戏采用 Roguelike 结构，每一局游戏都是一次从塔底向塔顶的独立远征。地图由多个节点组成，包含战斗、精英怪、商店、休息点和随机事件，玩家需在路径选择中进行决策。死亡后进度重置，但会根据表现解锁新的卡牌、遗物或角色能力。",
+        "setting_and_background": "游戏设定在一个充满魔法与怪物的神秘尖塔世界。尖塔本身是一个不断变化的实体，玩家作为挑战者，目标是深入塔内探索其未知的秘密并击败守护者。",
+        "release_and_service_status": "预计于 2025 年开启抢先体验。"
+      }
+    }
+  ],
+  "dispatch_stats": {
+    "profile_name": "game_knowledge",
+    "rate_limit_count": 0,
+    "cooldown_seconds": 0.0,
+    "cooldown_drop_count": 0,
+    "cooling_down": false,
+    "cooldown_remaining_seconds": 0.0
+  }
+}
