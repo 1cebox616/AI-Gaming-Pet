@@ -109,6 +109,7 @@ def test_fake_pilot_runs_three_games_online_only_and_writes_outputs(tmp_path) ->
         and call["max_tokens"] == 2400
         and call["web_enabled"] is True
         and call["provider"] is None
+        and call["reasoning_effort"] is None
         for client in clients.values()
         for call in client.calls
     )

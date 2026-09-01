@@ -199,10 +199,12 @@ def test_online_mode_can_leave_provider_routing_to_gateway() -> None:
             max_tokens=probe.MAX_TOKENS,
             temperature=probe.TEMPERATURE,
             web_enabled=True,
+            reasoning_effort="none",
         )
     finally:
         client.close()
     assert "provider" not in bodies[0]
+    assert bodies[0]["reasoning"] == {"effort": "none"}
     assert result.provider == "Compliant Provider"
 
 

@@ -32,6 +32,7 @@ MODEL = "deepseek/deepseek-v4-pro-0813"
 MODEL_LABEL = "DeepSeek V4 Pro 0813"
 MODEL_URL = "https://openrouter.ai/deepseek/deepseek-v4-pro-0813"
 PROVIDER: str | None = None
+REASONING_EFFORT: str | None = None
 TEMPERATURE = 0.0
 MAX_TOKENS = 2400
 TIMEOUT_SECONDS = 45.0
@@ -135,6 +136,7 @@ class PilotClient(Protocol):
         max_tokens: int,
         temperature: float,
         web_enabled: bool,
+        reasoning_effort: str | None = None,
     ) -> LlmResult: ...
 
     def dispatch_stats(self) -> LlmDispatchStats: ...
@@ -269,6 +271,7 @@ def run_pilot(
                         max_tokens=MAX_TOKENS,
                         temperature=TEMPERATURE,
                         web_enabled=mode.web_enabled,
+                        reasoning_effort=REASONING_EFFORT,
                     )
                     parsed, format_error = parse_answer(result.text)
                     attempt = PilotAttempt(
@@ -377,7 +380,7 @@ def render_report(run: PilotRun) -> str:
         f"- 样本：{', '.join(game.game_name for game in pilot_games())}。",
         "- 每个游戏只跑联网模式。",
         f"- 联网模式只使用网关内置 [`openrouter:web_search`]({OPENROUTER_WEB_SEARCH_DOC})，不接独立搜索 API。",
-        f"- 固定参数：temperature={TEMPERATURE}，max_tokens={MAX_TOKENS}，客户端超时={TIMEOUT_SECONDS:.0f} 秒；产品延迟目标仍按 ≤{LATENCY_TARGET_SECONDS:.0f} 秒统计。",
+        f"- 固定参数：temperature={TEMPERATURE}，max_tokens={MAX_TOKENS}，reasoning={REASONING_EFFORT or '模型默认'}，客户端超时={TIMEOUT_SECONDS:.0f} 秒；产品延迟目标仍按 ≤{LATENCY_TARGET_SECONDS:.0f} 秒统计。",
         "- 这里的 httpx 超时是连接／读取等 I/O 阶段的超时，不是整次请求的总墙钟截止；联网端点持续传输数据时，实测总耗时可以明显超过 45 秒。",
         "",
         "## 提示词调整",
@@ -480,7 +483,6 @@ def render_report(run: PilotRun) -> str:
             "- 这是 3 个游戏的小样本探针，不能替代正式跨类型判卷。",
             "- 答案未由脚本判定事实正确性；完整原文见 answers.md。",
             "- 详细输出与 10 秒延迟目标存在客观张力，本表保留实测，不据此自动调短提示词。",
-            "- 预检记录：受限沙箱首次在建连前阻断，未触达网关；获准联网后，锁定 DeepSeek 自营上游的 3 个请求因账户数据策略返回 HTTP 404，零计费且模型未执行。随后改为 OpenRouter 合规上游自动路由，得到本报告中的 3 个有效调用。",
             "",
             "## 运行信息",
             "",
@@ -542,6 +544,7 @@ def render_prompt() -> str:
             "- provider：OpenRouter 自动路由（未锁定单一上游）",
             f"- temperature：`{TEMPERATURE}`",
             f"- max_tokens：`{MAX_TOKENS}`",
+            f"- reasoning：`{REASONING_EFFORT or '模型默认'}`",
             f"- 客户端超时：`{TIMEOUT_SECONDS}` 秒",
             "- 联网模式：只增加网关内置 `openrouter:web_search` Server Tool。",
             "",
@@ -558,6 +561,7 @@ def write_raw_results(output: Path, run: PilotRun) -> None:
         "provider": PROVIDER,
         "temperature": TEMPERATURE,
         "max_tokens": MAX_TOKENS,
+        "reasoning_effort": REASONING_EFFORT,
         "timeout_seconds": TIMEOUT_SECONDS,
         "latency_target_seconds": LATENCY_TARGET_SECONDS,
         "pilot_game_ids": list(PILOT_GAME_IDS),
@@ -580,11 +584,26 @@ def write_outputs(output: Path, run: PilotRun) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--model", default=MODEL)
+    parser.add_argument("--model-label", default=MODEL_LABEL)
+    parser.add_argument("--model-url", default=MODEL_URL)
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("default", "none", "minimal", "low", "medium", "high", "xhigh", "max"),
+        default="default",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
+    global MODEL, MODEL_LABEL, MODEL_URL, REASONING_EFFORT
+    MODEL = arguments.model
+    MODEL_LABEL = arguments.model_label
+    MODEL_URL = arguments.model_url
+    REASONING_EFFORT = (
+        None if arguments.reasoning_effort == "default" else arguments.reasoning_effort
+    )
     run = run_pilot(checkpoint_output=arguments.output)
     write_outputs(arguments.output, run)
     print(

@@ -343,6 +343,7 @@ class ProbeClient(Protocol):
         max_tokens: int,
         temperature: float,
         web_enabled: bool,
+        reasoning_effort: str | None = None,
     ) -> LlmResult: ...
 
     def dispatch_stats(self) -> LlmDispatchStats: ...
@@ -363,6 +364,7 @@ class ProbeOpenRouterClient(OpenRouterClient):
         max_tokens: int,
         temperature: float,
         web_enabled: bool,
+        reasoning_effort: str | None = None,
     ) -> LlmResult:
         if not web_enabled:
             return self.complete(
@@ -372,6 +374,7 @@ class ProbeOpenRouterClient(OpenRouterClient):
                 user_prompt=user_prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                reasoning_effort=reasoning_effort,
             )
         self._cooldown.before_dispatch()
         started_at = self._clock()
@@ -396,6 +399,8 @@ class ProbeOpenRouterClient(OpenRouterClient):
                 "only": [provider],
                 "allow_fallbacks": False,
             }
+        if reasoning_effort is not None:
+            request_body["reasoning"] = {"effort": reasoning_effort}
         try:
             response = self._client.post("chat/completions", json=request_body)
         except httpx.TimeoutException as error:
