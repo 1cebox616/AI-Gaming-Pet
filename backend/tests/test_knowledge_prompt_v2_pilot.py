@@ -96,6 +96,11 @@ def test_followup_suite_is_diverse_and_does_not_overlap_initial_suite() -> None:
         "体育模拟",
         "动作肉鸽",
     }
+    assert [game.game_id for game in pilot.HEALING_GAMES] == [
+        "marvel-rivals",
+        "ea-sports-fc-26",
+        "hades-ii",
+    ]
 
 
 def test_v2_strict_parser_accepts_contract_and_rejects_old_fields() -> None:
@@ -213,6 +218,7 @@ def test_fake_pilot_runs_five_games_online_only_and_writes_outputs(tmp_path) -> 
         and call["web_search_parameters"] == pilot.WEB_SEARCH_PARAMETERS
         and call["provider_options"] == pilot.PROVIDER_OPTIONS
         and call["response_format"] == pilot.RESPONSE_FORMAT
+        and call["plugins"] == pilot.RESPONSE_PLUGINS
         for client in clients.values()
         for call in client.calls
     )
@@ -234,6 +240,7 @@ def test_fake_pilot_runs_five_games_online_only_and_writes_outputs(tmp_path) -> 
     assert len(raw["attempts"]) == 5
     assert raw["web_search_parameters"] == pilot.WEB_SEARCH_PARAMETERS
     assert raw["provider_options"] == pilot.PROVIDER_OPTIONS
+    assert raw["plugins"] == list(pilot.RESPONSE_PLUGINS)
     assert len(parsed_contexts) == 5
     assert all(item["context"] == _answer() for item in parsed_contexts)
     assert pilot._strict_json_loads(

@@ -210,6 +210,7 @@ def test_online_mode_can_leave_provider_routing_to_gateway() -> None:
                 "require_parameters": True,
             },
             response_format={"type": "json_object"},
+            plugins=({"id": "response-healing"},),
         )
     finally:
         client.close()
@@ -229,6 +230,7 @@ def test_online_mode_can_leave_provider_routing_to_gateway() -> None:
     }
     assert bodies[0]["reasoning"] == {"effort": "none"}
     assert bodies[0]["response_format"] == {"type": "json_object"}
+    assert bodies[0]["plugins"] == [{"id": "response-healing"}]
     assert result.provider == "Compliant Provider"
 
 

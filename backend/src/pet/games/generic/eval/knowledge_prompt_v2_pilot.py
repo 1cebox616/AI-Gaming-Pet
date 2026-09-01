@@ -48,6 +48,9 @@ PROVIDER_OPTIONS: dict[str, object] = {
     "sort": "throughput",
     "require_parameters": True,
 }
+RESPONSE_PLUGINS: tuple[dict[str, object], ...] = (
+    {"id": "response-healing"},
+)
 INITIAL_GAMES = (
     GameCase(
         "overwatch-2",
@@ -132,9 +135,15 @@ FOLLOWUP_GAMES = (
         "检验即时战斗、局内循环与永久成长结构。",
     ),
 )
+HEALING_GAMES = (
+    FOLLOWUP_GAMES[0],
+    FOLLOWUP_GAMES[3],
+    FOLLOWUP_GAMES[4],
+)
 GAME_SUITES = {
     "initial": INITIAL_GAMES,
     "followup": FOLLOWUP_GAMES,
+    "healing": HEALING_GAMES,
 }
 ACTIVE_GAME_SUITE = "initial"
 
@@ -400,6 +409,7 @@ class PilotClient(Protocol):
         web_search_parameters: Mapping[str, object] | None = None,
         provider_options: Mapping[str, object] | None = None,
         response_format: Mapping[str, object] | None = None,
+        plugins: Sequence[Mapping[str, object]] | None = None,
     ) -> LlmResult: ...
 
     def dispatch_stats(self) -> LlmDispatchStats: ...
@@ -728,6 +738,7 @@ def run_pilot(
                         web_search_parameters=WEB_SEARCH_PARAMETERS,
                         provider_options=PROVIDER_OPTIONS,
                         response_format=RESPONSE_FORMAT,
+                        plugins=RESPONSE_PLUGINS,
                     )
                     parsed, format_error, normalization_actions = (
                         parse_answer_detailed(result.text)
@@ -847,6 +858,7 @@ def render_report(run: PilotRun) -> str:
         "- 搜索：Exa；每次最多 5 条、全请求累计最多 5 条；不限制每条结果字符数。",
         "- 路由：合规上游中按吞吐量优先；要求上游支持请求参数。",
         "- 输出：请求 OpenRouter JSON Schema 严格结构化输出；是否被实际上游执行按原始响应另行记录。",
+        "- 网关响应修复：启用 OpenRouter `response-healing`；验收仍以客户端收到的 response_text 能否直接通过严格合同为准，本地规范化另列。",
         "- 这里的 httpx 超时是连接／读取等 I/O 阶段的超时，不是整次请求的总墙钟截止；联网端点持续传输数据时，实测总耗时可以明显超过 45 秒。",
         "",
         "### 样本理由",
@@ -1036,6 +1048,7 @@ def render_prompt() -> str:
             "- 联网模式：网关内置 `openrouter:web_search` Server Tool；engine=exa，max_results=5，max_total_results=5，不设置 max_characters。",
             "- provider：按 throughput 排序，require_parameters=true。",
             "- response_format：严格 JSON Schema。",
+            "- plugins：`response-healing`（非流式响应的网关 JSON 验证／修复）。",
             "",
         )
     )
@@ -1065,6 +1078,7 @@ def write_raw_results(output: Path, run: PilotRun) -> None:
         "web_search_parameters": WEB_SEARCH_PARAMETERS,
         "provider_options": PROVIDER_OPTIONS,
         "response_format": RESPONSE_FORMAT,
+        "plugins": RESPONSE_PLUGINS,
         "timeout_seconds": TIMEOUT_SECONDS,
         "latency_target_seconds": LATENCY_TARGET_SECONDS,
         "pilot_game_ids": [game.game_id for game in pilot_games()],

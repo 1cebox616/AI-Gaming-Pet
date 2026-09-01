@@ -347,6 +347,7 @@ class ProbeClient(Protocol):
         web_search_parameters: Mapping[str, object] | None = None,
         provider_options: Mapping[str, object] | None = None,
         response_format: Mapping[str, object] | None = None,
+        plugins: Sequence[Mapping[str, object]] | None = None,
     ) -> LlmResult: ...
 
     def dispatch_stats(self) -> LlmDispatchStats: ...
@@ -371,6 +372,7 @@ class ProbeOpenRouterClient(OpenRouterClient):
         web_search_parameters: Mapping[str, object] | None = None,
         provider_options: Mapping[str, object] | None = None,
         response_format: Mapping[str, object] | None = None,
+        plugins: Sequence[Mapping[str, object]] | None = None,
     ) -> LlmResult:
         if not web_enabled:
             return self.complete(
@@ -417,6 +419,8 @@ class ProbeOpenRouterClient(OpenRouterClient):
             request_body["reasoning"] = {"effort": reasoning_effort}
         if response_format is not None:
             request_body["response_format"] = dict(response_format)
+        if plugins is not None:
+            request_body["plugins"] = [dict(plugin) for plugin in plugins]
         try:
             response = self._client.post("chat/completions", json=request_body)
         except httpx.TimeoutException as error:
