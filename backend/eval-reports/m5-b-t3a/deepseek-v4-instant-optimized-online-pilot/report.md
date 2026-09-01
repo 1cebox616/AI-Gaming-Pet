@@ -26,17 +26,17 @@
 
 | 模式 | 返回 | 可机械解析 | 原样格式合规 | P50 / P90 / 最大（秒） | ≤10 秒 | 花费（USD） |
 |---|---:|---:|---:|---:|---:|---:|
-| 联网模式 | 5/5 | 2/5 | 0/5 | 18.081 / 21.445 / 23.085 | 0/5 | $0.049170850 |
+| 联网模式 | 5/5 | 4/5 | 0/5 | 18.081 / 21.445 / 23.085 | 0/5 | $0.049170850 |
 
 ## 逐次结果
 
 | 游戏 | 模式 | 状态 | 实际模型／上游 | 耗时（秒） | 输入／输出／推理 token | finish_reason | 花费（USD） |
 |---|---|---|---|---:|---:|---|---:|
-| Overwatch 2 | online | 格式不合 | deepseek/deepseek-v4-flash-0731 / OpenAI | 23.085 | 9841/1855/0 | stop | $0.009431950 |
+| Overwatch 2 | online | 已规范化／原样不合 | deepseek/deepseek-v4-flash-0731 / OpenAI | 23.085 | 9841/1855/0 | stop | $0.009431950 |
 | Tom Clancy&#x27;s Rainbow Six Siege | online | 格式不合 | deepseek/deepseek-v4-flash-0731 / OpenAI | 18.081 | 10333/2664/0 | length | $0.009732600 |
-| Genshin Impact | online | 可解析／包络不合 | deepseek/deepseek-v4-flash-0731 / OpenAI | 18.985 | 24585/2092/0 | stop | $0.010942400 |
-| Kingdom Come: Deliverance II | online | 可解析／包络不合 | deepseek/deepseek-v4-flash-0731 / OpenAI | 15.899 | 15499/2252/0 | stop | $0.010470800 |
-| Black Myth: Wukong | online | 格式不合 | deepseek/deepseek-v4-flash-0731 / OpenAI | 13.755 | 11074/1814/0 | stop | $0.008593100 |
+| Genshin Impact | online | 已规范化／原样不合 | deepseek/deepseek-v4-flash-0731 / OpenAI | 18.985 | 24585/2092/0 | stop | $0.010942400 |
+| Kingdom Come: Deliverance II | online | 已规范化／原样不合 | deepseek/deepseek-v4-flash-0731 / OpenAI | 15.899 | 15499/2252/0 | stop | $0.010470800 |
+| Black Myth: Wukong | online | 已规范化／原样不合 | deepseek/deepseek-v4-flash-0731 / OpenAI | 13.755 | 11074/1814/0 | stop | $0.008593100 |
 
 可归属总花费：`$0.049170850`（5/5 个调用有花费元数据）。
 
@@ -48,17 +48,17 @@
 
 ## 错误与格式
 
-- `overwatch-2` / `online`：不是合法 JSON：Expecting value（line 1, column 1）
-- `rainbow-six-siege` / `online`：不是合法 JSON：Expecting value（line 1, column 1）
-- `genshin-impact` / `online`：原始响应含 JSON 外文本；已机械提取唯一完整 JSON 对象
-- `kingdom-come-deliverance-2` / `online`：原始响应含 JSON 外文本；已机械提取唯一完整 JSON 对象
-- `black-myth-wukong` / `online`：不是合法 JSON：Expecting value（line 1, column 1）
+- `overwatch-2` / `online`：剥离 JSON 外文本／代码围栏；键位输入 '`' → 'Backquote'（动作：语音通话（按键说话））
+- `rainbow-six-siege` / `online`：输出因 length 截断，无法形成完整合同 JSON
+- `genshin-impact` / `online`：剥离 JSON 外文本／代码围栏
+- `kingdom-come-deliverance-2` / `online`：剥离 JSON 外文本／代码围栏
+- `black-myth-wukong` / `online`：剥离 JSON 外文本／代码围栏；移除 1 个对象／数组尾随逗号
 
 ## 说明
 
 - 这是 5 个游戏的小样本探针，不能替代正式跨类型判卷。
 - 答案未由脚本判定事实正确性；完整原文见 answers.md。
-- parsed-contexts.json 只剥离模型额外输出的文本／代码围栏并验证字段与键位形状，不修改 JSON 内容；原始包络不合仍计入格式错误。
+- parsed-contexts.json 仅执行确定性规范化：剥离额外文本／代码围栏、移除语法上无歧义的尾随逗号、按白名单转换标点键名；不补全截断内容、不修改游戏知识。每一步都写入 normalization_actions，原始格式不合仍单独记录。
 - 详细输出与 10 秒延迟目标存在客观张力，本表保留实测，不据此自动调短提示词。
 
 ## 运行信息

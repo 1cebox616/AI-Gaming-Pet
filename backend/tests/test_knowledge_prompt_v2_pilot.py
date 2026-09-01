@@ -106,7 +106,7 @@ def test_parser_extracts_one_complete_contract_object_but_keeps_warning() -> Non
     wrapped = "模型前言\n```json\n" + json.dumps(_answer(), ensure_ascii=False) + "\n```"
     parsed, error = pilot.parse_answer(wrapped)
     assert parsed == _answer()
-    assert error is not None and "JSON 外文本" in error
+    assert error is not None and "剥离 JSON 外文本" in error
 
     truncated = wrapped[:-20]
     parsed, error = pilot.parse_answer(truncated)
@@ -118,6 +118,24 @@ def test_parser_extracts_one_complete_contract_object_but_keeps_warning() -> Non
     parsed, error = pilot.parse_answer(json.dumps(alternatives, ensure_ascii=False))
     assert parsed is None
     assert error is not None and "不是单一规范化 PC 输入" in error
+
+
+def test_parser_deterministically_normalizes_safe_json_and_key_aliases() -> None:
+    answer = _answer()
+    answer["default_pc_keybinds"] = {"打开通信": "`", "前进": "W"}
+    raw = json.dumps(answer, ensure_ascii=False)
+    raw = raw[:-1] + ",}"
+    parsed, warning, actions = pilot.parse_answer_detailed(
+        "前言\n```json\n" + raw + "\n```"
+    )
+    assert parsed is not None
+    assert parsed["default_pc_keybinds"] == {
+        "打开通信": "Backquote",
+        "前进": "W",
+    }
+    assert warning is not None and "尾随逗号" in warning
+    assert actions[0] == "剥离 JSON 外文本／代码围栏"
+    assert any("Backquote" in action for action in actions)
 
 
 def test_fake_pilot_runs_five_games_online_only_and_writes_outputs(tmp_path) -> None:

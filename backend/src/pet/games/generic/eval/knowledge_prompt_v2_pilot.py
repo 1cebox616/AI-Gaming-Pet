@@ -175,6 +175,19 @@ _NAMED_PC_INPUTS = {
     "Slash",
 }
 _SIMPLE_PC_INPUT = re.compile(r"(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])")
+_PC_INPUT_ALIASES = {
+    "`": "Backquote",
+    "-": "Minus",
+    "=": "Equals",
+    "[": "LeftBracket",
+    "]": "RightBracket",
+    "\\": "Backslash",
+    ";": "Semicolon",
+    "'": "Apostrophe",
+    ",": "Comma",
+    ".": "Period",
+    "/": "Slash",
+}
 
 
 def _is_canonical_pc_input(value: object) -> bool:
@@ -312,6 +325,7 @@ class PilotAttempt:
     finish_reason: str | None
     error: str | None
     error_metadata: dict[str, object] | None
+    normalization_actions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,35 +439,145 @@ def _validate_answer(value: object) -> tuple[dict[str, object] | None, str | Non
     return value, None
 
 
-def _extract_contract_object(text: str) -> dict[str, object] | None:
-    decoder = json.JSONDecoder()
-    valid: list[dict[str, object]] = []
-    for match in re.finditer(r"\{", text):
-        try:
-            candidate, _end = decoder.raw_decode(text, match.start())
-        except json.JSONDecodeError:
+def _balanced_json_objects(text: str) -> tuple[str, ...]:
+    objects: list[str] = []
+    start: int | None = None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, character in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
             continue
-        parsed, error = _validate_answer(candidate)
-        if parsed is not None and error is None:
-            valid.append(parsed)
-    if len(valid) == 1:
-        return valid[0]
-    return None
+        if character == '"':
+            in_string = True
+        elif character == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif character == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                objects.append(text[start : index + 1])
+                start = None
+    return tuple(objects)
+
+
+def _remove_trailing_commas(text: str) -> tuple[str, int]:
+    output: list[str] = []
+    in_string = False
+    escaped = False
+    removed = 0
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if in_string:
+            output.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            index += 1
+            continue
+        if character == '"':
+            in_string = True
+            output.append(character)
+            index += 1
+            continue
+        if character == ",":
+            lookahead = index + 1
+            while lookahead < len(text) and text[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(text) and text[lookahead] in "}]":
+                removed += 1
+                index += 1
+                continue
+        output.append(character)
+        index += 1
+    return "".join(output), removed
+
+
+def _normalize_keybind_aliases(
+    value: object,
+) -> tuple[object, tuple[str, ...]]:
+    if not isinstance(value, dict):
+        return value, ()
+    keybinds = value.get("default_pc_keybinds")
+    if not isinstance(keybinds, dict):
+        return value, ()
+    normalized_keybinds: dict[object, object] = {}
+    actions: list[str] = []
+    for action, input_name in keybinds.items():
+        normalized = _PC_INPUT_ALIASES.get(input_name, input_name)
+        normalized_keybinds[action] = normalized
+        if normalized != input_name:
+            actions.append(
+                f"键位输入 {input_name!r} → {normalized!r}（动作：{action}）"
+            )
+    if not actions:
+        return value, ()
+    normalized_value = dict(value)
+    normalized_value["default_pc_keybinds"] = normalized_keybinds
+    return normalized_value, tuple(actions)
+
+
+def _parse_candidate(
+    text: str,
+) -> tuple[dict[str, object] | None, str | None, tuple[str, ...]]:
+    repaired, comma_count = _remove_trailing_commas(text)
+    try:
+        value: object = json.loads(repaired)
+    except json.JSONDecodeError as error:
+        return None, (
+            f"不是合法 JSON：{error.msg}（line {error.lineno}, column {error.colno}）"
+        ), ()
+    value, alias_actions = _normalize_keybind_aliases(value)
+    parsed, validation_error = _validate_answer(value)
+    actions: list[str] = []
+    if comma_count:
+        actions.append(f"移除 {comma_count} 个对象／数组尾随逗号")
+    actions.extend(alias_actions)
+    return parsed, validation_error, tuple(actions)
+
+
+def parse_answer_detailed(
+    text: str,
+) -> tuple[dict[str, object] | None, str | None, tuple[str, ...]]:
+    if not text.strip():
+        return None, "空答", ()
+    parsed, error, actions = _parse_candidate(text)
+    if parsed is not None:
+        warning = "；".join(actions) if actions else None
+        return parsed, warning, actions
+
+    valid_candidates: list[
+        tuple[dict[str, object], tuple[str, ...]]
+    ] = []
+    for candidate in _balanced_json_objects(text):
+        candidate_parsed, _candidate_error, candidate_actions = _parse_candidate(
+            candidate
+        )
+        if candidate_parsed is not None:
+            valid_candidates.append((candidate_parsed, candidate_actions))
+    if len(valid_candidates) == 1:
+        extracted, candidate_actions = valid_candidates[0]
+        all_actions = ("剥离 JSON 外文本／代码围栏", *candidate_actions)
+        return extracted, "；".join(all_actions), all_actions
+    if len(valid_candidates) > 1:
+        return None, "响应中存在多个符合合同的 JSON 对象，无法确定唯一结果", ()
+    return None, error, ()
 
 
 def parse_answer(text: str) -> tuple[dict[str, object] | None, str | None]:
-    if not text.strip():
-        return None, "空答"
-    try:
-        value: object = json.loads(text)
-    except json.JSONDecodeError as error:
-        extracted = _extract_contract_object(text)
-        if extracted is not None:
-            return extracted, "原始响应含 JSON 外文本；已机械提取唯一完整 JSON 对象"
-        return None, (
-            f"不是合法 JSON：{error.msg}（line {error.lineno}, column {error.colno}）"
-        )
-    return _validate_answer(value)
+    parsed, error, _actions = parse_answer_detailed(text)
+    return parsed, error
 
 
 def default_client_factory(mode: ProbeMode) -> PilotClient:
@@ -499,7 +623,11 @@ def run_pilot(
                         provider_options=PROVIDER_OPTIONS,
                         response_format=RESPONSE_FORMAT,
                     )
-                    parsed, format_error = parse_answer(result.text)
+                    parsed, format_error, normalization_actions = (
+                        parse_answer_detailed(result.text)
+                    )
+                    if parsed is None and result.finish_reason == "length":
+                        format_error = "输出因 length 截断，无法形成完整合同 JSON"
                     attempt = PilotAttempt(
                         game.game_id,
                         game.game_name,
@@ -520,6 +648,7 @@ def run_pilot(
                         result.finish_reason,
                         None,
                         None,
+                        normalization_actions,
                     )
                 except LlmError as error:
                     attempt = PilotAttempt(
@@ -585,7 +714,7 @@ def _status(attempt: PilotAttempt) -> str:
     if not attempt.response_text.strip():
         return "空答"
     if attempt.parsed_answer is not None and attempt.format_error is not None:
-        return "可解析／包络不合"
+        return "已规范化／原样不合"
     if attempt.format_error is not None:
         return "格式不合"
     return "成功"
@@ -718,7 +847,7 @@ def render_report(run: PilotRun) -> str:
             "",
             f"- 这是 {len(pilot_games())} 个游戏的小样本探针，不能替代正式跨类型判卷。",
             "- 答案未由脚本判定事实正确性；完整原文见 answers.md。",
-            "- parsed-contexts.json 只剥离模型额外输出的文本／代码围栏并验证字段与键位形状，不修改 JSON 内容；原始包络不合仍计入格式错误。",
+            "- parsed-contexts.json 仅执行确定性规范化：剥离额外文本／代码围栏、移除语法上无歧义的尾随逗号、按白名单转换标点键名；不补全截断内容、不修改游戏知识。每一步都写入 normalization_actions，原始格式不合仍单独记录。",
             "- 详细输出与 10 秒延迟目标存在客观张力，本表保留实测，不据此自动调短提示词。",
             "",
             "## 运行信息",
@@ -830,6 +959,7 @@ def write_outputs(output: Path, run: PilotRun) -> None:
             "game_name": attempt.game_name,
             "context": attempt.parsed_answer,
             "format_warning": attempt.format_error,
+            "normalization_actions": list(attempt.normalization_actions),
         }
         for attempt in run.attempts
     ]
@@ -845,9 +975,16 @@ def reparse_existing(output: Path) -> PilotRun:
     for stored in payload["attempts"]:
         item = dict(stored)
         if item["error"] is None:
-            parsed, format_error = parse_answer(item["response_text"])
+            parsed, format_error, normalization_actions = parse_answer_detailed(
+                item["response_text"]
+            )
+            if parsed is None and item["finish_reason"] == "length":
+                format_error = "输出因 length 截断，无法形成完整合同 JSON"
             item["parsed_answer"] = parsed
             item["format_error"] = format_error
+            item["normalization_actions"] = normalization_actions
+        else:
+            item.setdefault("normalization_actions", ())
         attempts.append(PilotAttempt(**item))
     return PilotRun(
         payload["started_at"],
