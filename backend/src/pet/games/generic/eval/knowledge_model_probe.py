@@ -337,7 +337,7 @@ class ProbeClient(Protocol):
         self,
         *,
         model: str,
-        provider: str,
+        provider: str | None,
         system_prompt: str,
         user_prompt: str,
         max_tokens: int,
@@ -357,7 +357,7 @@ class ProbeOpenRouterClient(OpenRouterClient):
         self,
         *,
         model: str,
-        provider: str,
+        provider: str | None,
         system_prompt: str,
         user_prompt: str,
         max_tokens: int,
@@ -390,8 +390,12 @@ class ProbeOpenRouterClient(OpenRouterClient):
                     "parameters": {"max_results": 3},
                 }
             ],
-            "provider": {"only": [provider], "allow_fallbacks": False},
         }
+        if provider is not None:
+            request_body["provider"] = {
+                "only": [provider],
+                "allow_fallbacks": False,
+            }
         try:
             response = self._client.post("chat/completions", json=request_body)
         except httpx.TimeoutException as error:

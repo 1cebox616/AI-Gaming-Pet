@@ -163,6 +163,49 @@ def test_online_mode_adds_only_gateway_server_tool_and_locks_provider() -> None:
     assert bodies[0]["temperature"] == 0.0
 
 
+def test_online_mode_can_leave_provider_routing_to_gateway() -> None:
+    bodies: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "vendor/model",
+                "provider": "Compliant Provider",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(_answer(), ensure_ascii=False)
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+            },
+        )
+
+    client = probe.ProbeOpenRouterClient(
+        "key",
+        profile_name="test-auto-provider",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = client.complete_knowledge(
+            model="vendor/model",
+            provider=None,
+            system_prompt=probe.SYSTEM_PROMPT,
+            user_prompt=probe.render_user_prompt("Synthetic Game"),
+            max_tokens=probe.MAX_TOKENS,
+            temperature=probe.TEMPERATURE,
+            web_enabled=True,
+        )
+    finally:
+        client.close()
+    assert "provider" not in bodies[0]
+    assert result.provider == "Compliant Provider"
+
+
 def test_fake_full_run_writes_90_aligned_attempts_and_blank_scores(tmp_path) -> None:
     clients: dict[tuple[str, str], _FakeClient] = {}
 
