@@ -1,0 +1,80 @@
+{
+  "attempts": [
+    {
+      "game_id": "don-t-starve-together",
+      "display_name": "Don't Starve Together",
+      "query_name": "Don't Starve Together",
+      "outcome": "ok",
+      "write_action": "refreshed",
+      "request_id": "gk-a0805f0e-d703-4a1c-981b-2b98161b806c",
+      "latency_seconds": 6.042774900008226,
+      "cost_usd": 0.008892,
+      "model": "google/gemini-3.1-flash-lite",
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "provider": "OpenAI",
+      "prompt_tokens": 5036,
+      "completion_tokens": 422,
+      "failure_reason": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "g-592fc85c",
+      "display_name": "守望先锋",
+      "query_name": "守望先锋",
+      "outcome": "ok",
+      "write_action": "refreshed",
+      "request_id": "gk-4de9041e-41c4-4804-84f8-b4ccb4084111",
+      "latency_seconds": 5.796746999985771,
+      "cost_usd": 0.00954675,
+      "model": "google/gemini-3.1-flash-lite",
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "provider": "OpenAI",
+      "prompt_tokens": 7967,
+      "completion_tokens": 370,
+      "failure_reason": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "grey-zone-warfare",
+      "display_name": "GZW",
+      "query_name": "Grey Zone Warfare",
+      "outcome": "ok",
+      "write_action": "refreshed",
+      "request_id": "gk-c44551f8-6037-4489-a2fc-05acf8220dc7",
+      "latency_seconds": 5.217545899999095,
+      "cost_usd": 0.00881475,
+      "model": "google/gemini-3.1-flash-lite",
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "provider": "OpenAI",
+      "prompt_tokens": 5063,
+      "completion_tokens": 366,
+      "failure_reason": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "slay-the-spire-2",
+      "display_name": "Slay the Spire 2",
+      "query_name": "Slay the Spire 2",
+      "outcome": "ok",
+      "write_action": "refreshed",
+      "request_id": "gk-1bfa21f9-0848-4b75-a90a-037c45f2209a",
+      "latency_seconds": 5.181928000005428,
+      "cost_usd": 0.008898749999999999,
+      "model": "google/gemini-3.1-flash-lite",
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "provider": "OpenAI",
+      "prompt_tokens": 5093,
+      "completion_tokens": 417,
+      "failure_reason": null,
+      "normalization_actions": []
+    }
+  ],
+  "dispatch_stats": {
+    "profile_name": "game_knowledge",
+    "rate_limit_count": 0,
+    "cooldown_seconds": 0.0,
+    "cooldown_drop_count": 0,
+    "cooling_down": false,
+    "cooldown_remaining_seconds": 0.0
+  }
+}

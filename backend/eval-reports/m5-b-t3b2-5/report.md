@@ -64,20 +64,35 @@ T3b2 的正式四卡结果中，《Slay the Spire 2》的 `release_and_service_s
 
 ## 在线四卡复跑状态
 
-当前执行环境的受限网络会令四次 OpenRouter 请求立即失败；产品负责人明确允许联网，但客户端没有显示权限批准弹窗，因此未能完成生产模型四卡 A/B。受限网络试跑只产生 `failed / kept_previous`，没有模型输出；这些临时失败记录和 `stale` 状态已从四张受版本控制的卡中撤销，卡片保持 T3b2 原样，未伪造成功结果。失败跑批仅留在本地已忽略目录，不纳入提交。
+权限恢复后使用既有生产入口完成同一轮四卡跑批。每个游戏只调用一次，全部通过 V4 严格校验并原子刷新；实际模型均为 `google/gemini-3.1-flash-lite`，provider 均为 `OpenAI`。
 
-因此本任务的“实现与机械回归”已完成，“新提示词下四张卡的实际模型答案”尚未取得。下一次具备 OpenRouter 出网权限时，使用以下既有生产入口即可完成验收：
+| 游戏 | 结果 | 写卡动作 | 耗时 | 花费 | 输入/输出 token |
+|---|---|---|---:|---:|---:|
+| Don't Starve Together | ok | refreshed | 6.043s | $0.008892000 | 5036 / 422 |
+| 守望先锋 | ok | refreshed | 5.797s | $0.009546750 | 7967 / 370 |
+| Grey Zone Warfare | ok | refreshed | 5.218s | $0.008814750 | 5063 / 366 |
+| Slay the Spire 2 | ok | refreshed | 5.182s | $0.008898750 | 5093 / 417 |
 
-```powershell
-.venv\Scripts\python.exe -m pet.games.generic.eval.game_knowledge_replay `
-  --output eval-reports/m5-b-t3b2-5/live-v4-online `
-  --memory-root memory
-```
+- 总花费：`$0.036152250`
+- 平均耗时：`5.560s`
+- P50：`5.507s`
+- 最大耗时：`6.043s`
+- 限流、冷却丢弃、schema 拒绝：均为 `0`
+- evidence：`eval-reports/m5-b-t3b2-5/live-v4-online/evidence.jsonl`，共四条 `game_knowledge`
 
-人工判卷首要检查《Slay the Spire 2》的状态是否改为“已于 2026-03-05 进入抢先体验”或语义等价的当前表述，而不是继续出现“预计 2025”。
+## 时效效果判卷
+
+四张卡的 `release_and_service_status` 均改为以核查日为基准的当前状态：
+
+- Don't Starve Together：正式发售并持续活跃运营。
+- 守望先锋：持续运营，并给出 2022 年上线及 2026 年更名的时间关系。
+- Grey Zone Warfare：自 2024-04-30 起处于抢先体验。
+- Slay the Spire 2：**于 2026-03-05 开启抢先体验，目前持续运营与开发**。
+
+首要回归项通过：《Slay the Spire 2》不再出现“预计于 2025 年开启抢先体验”的过期预测，新答案与官方 Steam 商店和 Mega Crit 页面一致。结构通过仍不等于所有散文字段已由代码确认；按 D-37，这些内容继续作为 `modality=inferred` 的背景 context 使用。
 
 ## 完成与未完成
 
-已完成：UTC 日期注入、提示词时效规则、回归测试、官方资料交叉核验、报告。
+已完成：UTC 日期注入、提示词时效规则、回归测试、官方资料交叉核验、生产四卡重跑、证据留存与过期状态专项判卷。
 
-未完成：受当前客户端权限界面限制，未取得新提示词下的四张生产模型答案。因此本报告不声称已经通过线上效果验收，也不声称提示词可以提供绝对时效保证。
+未完成：无。本轮线上效果验收通过，但提示词本身仍不构成绝对时效保证；其边界见本报告结论。
