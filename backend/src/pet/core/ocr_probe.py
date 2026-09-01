@@ -76,17 +76,21 @@ class OcrLine:
     width: float
     height: float
     confidence: float | None = None
+    quad: tuple[tuple[float, float], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class OcrFrameResult:
-    path: Path
+    path: Path | None
     width: int
     height: int
     duration_ms: float
     recognize_ms: float
     lines: tuple[OcrLine, ...]
     error: str | None = None
+    det_ms: float | None = None
+    rec_ms: float | None = None
+    cpu_core_seconds: float | None = None
 
 
 PowerShellRunner = Callable[[str], bytes]

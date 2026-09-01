@@ -1,0 +1,116 @@
+{
+  "game_id": "g-592fc85c",
+  "display_name": "守望先锋",
+  "knowledge": {
+    "content": null,
+    "status": "stale",
+    "checked_at": "2026-09-01T16:34:38.129862Z",
+    "model": "google/gemini-3.1-flash-lite",
+    "mode": "web",
+    "request_id": "gk-b8c276b9-8523-4d78-9dde-e93d8b417071",
+    "attempts": [
+      {
+        "attempted_at": "2026-09-01T15:05:52.624615Z",
+        "result": "failed",
+        "failure_reason": "OpenRouter网络请求失败：[WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions [occurred_at=2026-09-01T15:05:52.624615+00:00]"
+      },
+      {
+        "attempted_at": "2026-09-01T16:29:51.671264Z",
+        "result": "schema_reject",
+        "failure_reason": "未通过完整 V3 合同：1 validation error for GameKnowledgeContent Value error, game knowledge keybind '技能1' is not canonical: 'Shift' [type=value_error, input_value={'genre': ['第一人称...快捷物品栏4': '4'}}, input_type=dict] For further information visit https://errors.pydantic.dev/2.13/v/value_error"
+      },
+      {
+        "attempted_at": "2026-09-01T16:32:12.496587Z",
+        "result": "schema_reject",
+        "failure_reason": "未通过完整 V3 合同：1 validation error for GameKnowledgeContent Value error, game knowledge keybind '技能1' is not canonical: 'Shift' [type=value_error, input_value={'genre': ['第一人称...快捷物品栏4': '4'}}, input_type=dict] For further information visit https://errors.pydantic.dev/2.13/v/value_error"
+      },
+      {
+        "attempted_at": "2026-09-01T16:34:38.129862Z",
+        "result": "schema_reject",
+        "failure_reason": "未通过完整 V3 合同：1 validation error for GameKnowledgeContent Value error, game knowledge keybind '技能1' is not canonical: 'Shift' [type=value_error, input_value={'genre': ['第一人称...快捷物品栏4': '4'}}, input_type=dict] For further information visit https://errors.pydantic.dev/2.13/v/value_error"
+      }
+    ]
+  },
+  "scenes": [
+    {
+      "scene_id": "scene:s1",
+      "representative_hash": "af32583d0f4e7389",
+      "label": "主菜单匹配界面",
+      "label_status": "named",
+      "needs_review": false,
+      "annotation": "守望先锋游戏大厅主菜单，当前选中休闲比赛模式并显示正在搜索状态。",
+      "dwell_seconds": 9.003416849998757,
+      "visit_count": 1,
+      "sessions_seen": 1,
+      "first_seen": "2026-08-27T21:20:00.962893Z",
+      "last_seen": "2026-08-27T21:20:09.966310Z",
+      "evidence_ids": [
+        "f88:scene:1",
+        "f89:scene:1",
+        "f90:scene:1",
+        "f91:scene:1",
+        "f92:scene:1"
+      ],
+      "verified_at": "2026-08-31T19:45:01.818781Z",
+      "deep_evidence_ids": [
+        "f89:deep:1"
+      ]
+    },
+    {
+      "scene_id": "scene:s2",
+      "representative_hash": "a8f4d5a5eb092b4d",
+      "label": "英雄选择界面",
+      "label_status": "named",
+      "needs_review": false,
+      "annotation": "这是守望先锋对局开始前的英雄选择阶段，玩家正在挑选角色并查看队伍阵容。",
+      "dwell_seconds": 23.54293245000008,
+      "visit_count": 2,
+      "sessions_seen": 1,
+      "first_seen": "2026-08-27T21:20:39.681898Z",
+      "last_seen": "2026-08-27T21:21:04.505176Z",
+      "evidence_ids": [
+        "f117:scene:1",
+        "f118:scene:1",
+        "f119:scene:1",
+        "f120:scene:1",
+        "f121:scene:1"
+      ],
+      "verified_at": "2026-08-31T19:45:01.833719Z",
+      "deep_evidence_ids": [
+        "f119:deep:1"
+      ]
+    },
+    {
+      "scene_id": "scene:s3",
+      "representative_hash": "de28604b0fdef28d",
+      "label": "主菜单休闲比赛界面",
+      "label_status": "named",
+      "needs_review": false,
+      "annotation": "守望先锋游戏大厅的主菜单，当前选中“休闲比赛”标签页，展示模式选择、英雄预览及小队列表。",
+      "dwell_seconds": 10.001365150004858,
+      "visit_count": 1,
+      "sessions_seen": 1,
+      "first_seen": "2026-08-27T21:31:15.564961Z",
+      "last_seen": "2026-08-27T21:31:25.566327Z",
+      "evidence_ids": [
+        "f610:scene:1",
+        "f611:scene:1",
+        "f612:scene:1",
+        "f613:scene:1",
+        "f614:scene:1"
+      ],
+      "verified_at": "2026-08-31T19:45:01.850798Z",
+      "deep_evidence_ids": [
+        "f613:deep:1"
+      ]
+    }
+  ],
+  "hud_elements": [],
+  "init": {
+    "initialized_at": "2026-08-27T21:18:16.270174Z",
+    "source_recordings": [
+      "recordings/capture/20260827-171815"
+    ],
+    "version": 2
+  }
+}

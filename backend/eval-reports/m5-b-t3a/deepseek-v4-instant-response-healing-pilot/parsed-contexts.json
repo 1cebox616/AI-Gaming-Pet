@@ -1,0 +1,89 @@
+[
+  {
+    "game_id": "marvel-rivals",
+    "game_name": "Marvel Rivals",
+    "context": null,
+    "format_warning": "顶层字段不匹配：缺少 ['background', 'default_pc_keybinds', 'game_overview', 'gameplay']；多出 []",
+    "normalization_actions": []
+  },
+  {
+    "game_id": "ea-sports-fc-26",
+    "game_name": "EA Sports FC 26",
+    "context": {
+      "genre": [
+        "体育模拟",
+        "足球（足球竞技）"
+      ],
+      "perspective": "第三人称俯视球场视角，跟随持球区域；角球、任意球与点球等定位球时切换为该场景镜头。",
+      "game_overview": "《EA Sports FC 26》是由 EA 发行的足球模拟游戏，延续 FC 系列成为 EA 旗下替代 FIFA 品牌后的又一主线年货作品。玩家扮演主教练或球员，核心是操控一支球队进行真实足球比赛。游戏覆盖顶级职业联赛与俱乐部、国际赛事（包含 48 支国家队的全新国际锦标赛模式）以及职业球员生涯等多个环节。本作最重要的特征是响应社区反馈对操作手感进行大幅重做，并引入两套独立游戏预设：Authentic（真实）预设服务于职业模式等单机玩法，追求最接近真实足球的体验；Competitive（竞技）预设服务于 Football Ultimate Team 与 Clubs 等对抗玩法，强化反应速度、直接控制与一致性。此外新引入 Archetypes（原型）系统，在 Clubs 与球员生涯中为自建球员增加差异化成长；Manager Live Challenges 为经理生涯注入结合现实与虚构剧本的赛季故事线；Football Ultimate Team 中新增锦标赛、Live Events 与 Bounties，并刷新了 Rivals 与 Champions 机制，新设 Challengers 二档周末赛事。",
+      "gameplay": {
+        "player_goal": "通过操控球队赢得足球比赛，并在各模式中经营成长：在单人生涯模式中带队夺冠、培养球员；在线上对抗模式（Ultimate Team、Clubs）中组建阵容、累积胜场与段位、获得奖励。",
+        "core_loop": "1. 选择模式（生涯、Ultimate Team、在线对抗、锦标赛等）与比赛预设（Authentic 或 Competitive）。 2. 进入比赛，通过传球、带球、射门、防守与战术指令进行一场足球竞技。 3. 依据比赛结果获得奖励/经验：生涯模式中得到转会预算、球队成绩与球员成长；Ultimate 中获得卡包、球员与升级素材。 4. 用奖励升级阵容、球员属性或球队战术。 5. 周期性的赛季、Live Event、锦标赛更新提供新目标与新内容，使循环持续进行。",
+        "major_systems": [
+          {
+            "name": "两套游戏预设（Authentic / Competitive）",
+            "description": "决定整体操作与 AI 风格——真实预设侧重拟真足球节奏，竞技预设侧重反应、直传与上手控制一致性，涉及防守站位、门将、传球与身体对抗的差异。"
+          },
+          {
+            "name": "Archetypes（原型）",
+            "description": "在 Clubs 与 Player Career 中为自建球员选择的成长路径，共 13 种灵感源自当代或历史名宿，提供专属 PlayStyles 与 Perks，通过赛季内 Archetype XP 升级属性。"
+          },
+          {
+            "name": "Playstyles 与 Player Roles",
+            "description": "为球员提供差异化能力与跑位习惯，让玩家在打造球队与设置阵容时选择多样战术身份。"
+          },
+          {
+            "name": "Football Ultimate Team（FUT）",
+            "description": "战抽卡式阵容构建与赛季周竞技，涵盖 Rivals、Champions、锦标赛、Live Events 与挑战，核心为组建梦想阵容并持续对抗升级。"
+          },
+          {
+            "name": "Live Events（实时活动）",
+            "description": "包含锦标赛（淘汰制）、Gauntlet（多小队连续挑战）、与常规活动（如展览与限场联赛），每周一至两次，奖励随竞争强度调整。"
+          },
+          {
+            "name": "Manager / Player Career（生涯模式）",
+            "description": "单机主玩法：经营俱乐部或培养球员，结合 Manager Live Challenges（真实与虚构剧情任务）与国际足坛赛事推进。"
+          },
+          {
+            "name": "Clubs（球会模式）",
+            "description": "扮演自建球员参与团队协作的在线球会足球，深度绑定 Archetypes 成长与赛季节奏。"
+          },
+          {
+            "name": "国际锦标赛（The Worl's Game）",
+            "description": "新增 48 支国家队的国际赛事模式，包含真实体育场，可体验全程国际赛事场景。"
+          },
+          {
+            "name": "网络同步与响应性改进",
+            "description": "优化客户端与服务器的同步以缩短输入往返延迟，让在线对抗更即时准确。"
+          }
+        ],
+        "modes_and_structure": "游戏兼具单人、PVE 与多人线上结构。生涯模式（经理与球员两条线）为单机赛季制。在线模式 Football Ultimate Team 以赛季（Seasons）为周期组织内容，Rivals、Champions（周末排位/晋级）、Challengers（次级赛事）、Tournaments 与 Live Events 交替放送，并引入实时活动节奏；Clubs 为合作对抗式球会联赛。整体为年货式长线运营，赛季制持续更新。"
+      },
+      "background": {
+        "setting_and_premise": "《EA Sports FC 26》是 EA Sports 系列足球模拟游戏的年度作品，覆盖现实中各大职业联赛、杯赛与国家队赛事（含 48 队新国际赛事），以真实足球世界为舞台。作为 FIFA 品牌到期后转型的 EA Sports FC 系列第二作（此前为《EA Sports FC 25》），游戏底层为真实足球规则与体育模拟。",
+        "release_and_service_status": "已于 2025 年 9 月 26 日全球发售，支持 PS5、PS4、Xbox Series X|S、Xbox One、Nintendo Switch、Switch 2、PC 与雲端 Amazon Luna；标准版于 9 月 26 日上线，终极版于 9 月 19 日提前抢先。长线运营以赛季更新、实时活动、每周赛事、Champions/Rivals 周期持续更新。当前为年活性运营中状态。来自 2025 年公开资料。"
+      },
+      "default_pc_keybinds": {
+        "前进": "W",
+        "后退": "S",
+        "向左移动": "A",
+        "向右移动": "D",
+        "冲刺": "LeftShift",
+        "传球": "X",
+        "射门": "D",
+        "长传": "A",
+        "切换球员": "W",
+        "快捷物品栏1": "1"
+      }
+    },
+    "format_warning": null,
+    "normalization_actions": []
+  },
+  {
+    "game_id": "hades-ii",
+    "game_name": "Hades II",
+    "context": null,
+    "format_warning": "响应中存在多个符合合同的 JSON 对象，无法确定唯一结果",
+    "normalization_actions": []
+  }
+]

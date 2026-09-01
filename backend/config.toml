@@ -66,11 +66,47 @@ region_focus_max = 0.50
 llm_profile = "vision_fast"
 cost_warn_per_hour = 1.0
 
+[games.generic.ocr]
+enabled = true
+engine = "rapidocr-ppocrv6-tiny-openvino"
+num_threads = 2
+det_limit_side_len = 1280
+language = "zh-Hans-CN"
+model_dir = "models/ocr"
+
+[games.generic.scene]
+enabled = true
+# 四段完整 1080p 录像按 no_change 噪声底重校；逐行推导见 eval-reports/m5-b-t2-2/report.md。
+hash_kind = "phash"
+hash_bits = 64
+hamming_threshold = 8
+stable_min_seconds = 4.0
+# 刷新周期是 TD-28 待实测占位；驻留时长只记录，不再作为上卡门。
+card_flush_seconds = 120
+memory_dir = "memory"
+
+[games.generic.scene.naming]
+enabled = true
+llm_profile = "scene_fingerprint_verifier"
+# 四段校准录像单会话最多出现 4 个稳定簇；8 留出一倍余量，同时限制异常簇风暴的花费。
+max_requests_per_session = 8
+representative_frame_count = 3
+# 场景指纹核查图片保持原始宽高比缩放到 1920px；16:9 帧即 1920x1080。
+upload_width = 1920
+
+[games.generic.knowledge]
+enabled = true
+llm_profile = "game_knowledge"
+# T3a：P90 5 秒、最大 6 秒；总墙钟 10 秒留 4 秒余量，不重试。
+wall_timeout_seconds = 10.0
+# 待实测：B-T8 才接消费者；当前渲染器用 UTF-8 字节作保守 token 硬顶。
+short_view_token_limit = 512
+
 # 在线模型默认关闭。密钥只从 OPENROUTER_API_KEY 环境变量读取。
 [llm]
-enabled = false
-model = ""
-provider = ""
+enabled = true
+model = "qwen/qwen3.5-122b-a10b"
+provider = "Alibaba"
 temperature = 0.9
 timeout_seconds = 3.0
 max_tokens = 256
@@ -85,3 +121,24 @@ timeout_seconds = 5.0
 max_tokens = 200
 input_price_per_million_usd = 0.03
 output_price_per_million_usd = 0.13
+
+# 场景指纹核查模型；目标 6 秒内返回，10 秒失败截止避免把轻微尾延迟误判为调用失败。
+[llm.profiles.scene_fingerprint_verifier]
+enabled = true
+model = "qwen/qwen3.8-flash"
+provider = "Alibaba"
+temperature = 0.0
+timeout_seconds = 10.0
+max_tokens = 1024
+input_price_per_million_usd = 0.15
+output_price_per_million_usd = 0.47
+
+# 游戏知识线：T3a 定案，仅默认 OpenRouter 端点的 Exa web_search。
+[llm.profiles.game_knowledge]
+enabled = true
+model = "google/gemini-3.1-flash-lite"
+# 空字符串表示 OpenRouter 自动路由，不继承顶层的 Alibaba 锁定。
+provider = ""
+temperature = 0.0
+timeout_seconds = 10.0
+max_tokens = 8000

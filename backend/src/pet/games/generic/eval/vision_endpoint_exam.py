@@ -483,7 +483,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     try:
         price = _validate_price(arguments)
-        configuration = load_config(arguments.config, arguments.local_config)
+        configuration = load_config(
+            arguments.config,
+            arguments.local_config,
+            strict=True,
+        )
         profile = _effective_profile(configuration.llm, arguments.profile)
         manifest = vision_exam.load_manifest(arguments.manifest)
         baseline_rows = validate_baseline(

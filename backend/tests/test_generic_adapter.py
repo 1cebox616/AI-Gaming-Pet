@@ -3,25 +3,47 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
+import logging
 from pathlib import Path
 import re
+import threading
 from types import SimpleNamespace
 import time
 
 from PIL import Image
+import pytest
 
 from pet.core.adapter_api import CoreServices
+from pet.core.belief import (
+    EvidenceStore,
+    FastObservationPayload,
+    FrameMetricsPayload,
+    KeyWindowPayload,
+    MouseMotionPayload,
+    SceneFingerprintPayload,
+    render_observations_markdown,
+)
 from pet.core.config import (
     AdapterConfig,
     GenericVisionConfig,
     LlmConfig,
     LlmProfileConfig,
+    OcrConfig,
+    SceneConfig,
 )
-from pet.core.llm import LlmResult, LlmUsage, image_upload_metadata
+from pet.core.llm import (
+    LlmDispatchStats,
+    LlmResult,
+    LlmUsage,
+    image_upload_metadata,
+)
 from pet.core.input_telemetry import ActionInputEvent, ActionInputTimeline
+import pet.games.generic.adapter as generic_adapter_module
 from pet.games.generic.adapter import (
     FAST_PROMPT_PATH,
+    GameIdentity,
     GenericVisionAdapter,
     ObservationLog,
     ObservationRecord,
@@ -30,6 +52,8 @@ from pet.games.generic.adapter import (
     _change_reason,
     _coarse_location,
     _focus_geometry,
+    _focus_scope,
+    _fast_outcome,
     _user_prompt,
 )
 
@@ -81,6 +105,17 @@ class AlwaysSelect:
         )
 
 
+class SelectPattern(AlwaysSelect):
+    def __init__(self, decisions: list[bool]) -> None:
+        super().__init__()
+        self.decisions = decisions
+
+    def observe(self, frame: Image.Image, now: float) -> object:
+        observation = super().observe(frame, now)
+        observation.decision.should_save = self.decisions.pop(0)
+        return observation
+
+
 class FakeClient:
     def __init__(
         self,
@@ -126,6 +161,42 @@ class FakeClient:
         self.closed = True
 
 
+class DelayedBitmapClient(FakeClient):
+    def __init__(self, delay: float) -> None:
+        super().__init__()
+        self.delay = delay
+        self.bitmap_bytes: bytes | None = None
+        self.bitmap_read = threading.Event()
+
+    def complete_with_images_stream(self, **kwargs: object) -> LlmResult:
+        self.calls.append(kwargs)
+        time.sleep(self.delay)
+        image = kwargs["images"][0]  # type: ignore[index]
+        self.bitmap_bytes = image.path.tobytes()
+        self.bitmap_read.set()
+        return LlmResult(
+            text="【画面】延迟观察",
+            usage=LlmUsage(100, 20, None),
+            latency_seconds=self.delay,
+            model="fixture-model",
+            provider="fixture-provider",
+            finish_reason="stop",
+        )
+
+
+class DelayedFailureClient(FakeClient):
+    def __init__(self, delay: float) -> None:
+        super().__init__()
+        self.delay = delay
+        self.finished = threading.Event()
+
+    def complete_with_images_stream(self, **kwargs: object) -> LlmResult:
+        self.calls.append(kwargs)
+        time.sleep(self.delay)
+        self.finished.set()
+        raise RuntimeError("late worker failure")
+
+
 def _configuration(
     log_dir: Path,
     *,
@@ -144,6 +215,8 @@ def _configuration(
             input_context=input_context,
             observation_log_dir=str(log_dir),
             cost_warn_per_hour=cost_warn,
+            ocr=OcrConfig(enabled=False),
+            scene=SceneConfig(enabled=False),
         )
     )
     llm = LlmConfig(
@@ -203,26 +276,84 @@ async def _wait_for_observation_rows(
     *,
     timeout_seconds: float = 10.0,
 ) -> tuple[Path, list[dict[str, object]]]:
-    """Wait for flushed JSONL rows instead of assuming scheduler timing."""
+    """Wait for complete fast evidence groups instead of assuming scheduler timing."""
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while True:
         sessions = tuple(path for path in log_root.iterdir() if path.is_dir())
         if len(sessions) == 1:
             session = sessions[0]
-            path = session / "observations.jsonl"
+            path = session / "evidence.jsonl"
             if path.is_file():
-                rows = [
-                    json.loads(line)
-                    for line in path.read_text(encoding="utf-8").splitlines()
-                ]
+                rows = _legacy_observation_rows(session)
                 if len(rows) >= expected_count:
                     return session, rows
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(
-                f"observations.jsonl did not reach {expected_count} rows within "
+                f"evidence.jsonl did not reach {expected_count} fast rows within "
                 f"{timeout_seconds:.1f} seconds"
             )
         await asyncio.sleep(0.005)
+
+
+def _legacy_observation_rows(directory: Path) -> list[dict[str, object]]:
+    """Project evidence into the former row shape for unchanged report assertions."""
+    session = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+    if session["origin_monotonic"] is None:
+        return []
+    origin = float(session["origin_monotonic"])
+    grouped: dict[str, dict[str, object]] = {}
+    for event in EvidenceStore.read(directory / "evidence.jsonl"):
+        if event.root_capture_id is None:
+            continue
+        grouped.setdefault(event.root_capture_id, {})[event.kind] = event
+    rows: list[dict[str, object]] = []
+    for root_capture_id in sorted(grouped, key=lambda value: int(value[1:])):
+        frame = grouped[root_capture_id]
+        if "fast_observation" not in frame:
+            continue
+        fast_event = frame["fast_observation"]
+        metrics_event = frame["frame_metrics"]
+        key_event = frame["key_window"]
+        fast = fast_event.payload  # type: ignore[union-attr]
+        metrics = metrics_event.payload  # type: ignore[union-attr]
+        key = key_event.payload  # type: ignore[union-attr]
+        assert isinstance(fast, FastObservationPayload)
+        assert isinstance(metrics, FrameMetricsPayload)
+        assert isinstance(key, KeyWindowPayload)
+        rows.append(
+            {
+                "seq": int(root_capture_id[1:]),
+                "frame_ts": origin + fast_event.observed_at,  # type: ignore[union-attr]
+                "wall": metrics.wall,
+                "game": fast.game,
+                "text": fast.text,
+                "region": fast_event.scope.cells if fast_event.scope else None,  # type: ignore[union-attr]
+                "reason": metrics.reason,
+                "change_ratio": round(metrics.change_ratio, 2),
+                "global_change": round(metrics.global_change, 1),
+                "region_area_ratio": (
+                    round(metrics.region_area_ratio)
+                    if metrics.region_area_ratio is not None
+                    else None
+                ),
+                "region_intensity": (
+                    round(metrics.region_intensity)
+                    if metrics.region_intensity is not None
+                    else None
+                ),
+                "input": key.summary,
+                "latency_ms": round(fast.latency_ms, 3),
+                "ttft_ms": round(fast.ttft_ms, 3) if fast.ttft_ms is not None else None,
+                "dropped": fast.drop_reason,
+                "user_prompt": fast.user_prompt,
+                "speculation": fast.speculation,
+                "input_tokens": fast.input_tokens,
+                "output_tokens": fast.output_tokens,
+                "actual_model": fast.actual_model,
+                "actual_provider": fast.actual_provider,
+            }
+        )
+    return rows
 
 
 def test_disabled_adapter_never_initializes_capture(tmp_path: Path) -> None:
@@ -366,10 +497,128 @@ def test_timeout_is_recorded_and_loop_continues(tmp_path: Path) -> None:
     assert row["dropped"] == "timeout"
 
 
+# 锁住选择器单轮异常会终止观察循环并泄漏当轮位图的故障。
+def test_poll_exception_isolated_and_failed_frame_bitmap_closed(tmp_path: Path) -> None:
+    adapter_config, llm_config = _configuration(tmp_path)
+    first_frame = _frame(1)
+    second_frame = _frame(2)
+    backend = FakeBackend([first_frame, second_frame])
+    client = FakeClient()
+    statuses: list[object] = []
+
+    class FailOnceSelector(AlwaysSelect):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def observe(self, frame: Image.Image, now: float) -> object:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("selector failed once")
+            return super().observe(frame, now)
+
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: backend,
+        selector_factory=lambda _sparsity: FailOnceSelector(),
+        client_factory=lambda *_args: client,
+        title_map=_title_map(),
+    )
+
+    async def scenario() -> list[dict[str, object]]:
+        await adapter.start(_core(statuses))
+        try:
+            _, rows = await _wait_for_observation_rows(tmp_path, 1)
+            return rows
+        finally:
+            await adapter.stop()
+
+    rows = asyncio.run(scenario())
+    assert rows[0]["frame_ts"] == 2.0
+    assert any(status.state == "error" for status in statuses)  # type: ignore[union-attr]
+    with pytest.raises(ValueError, match="Operation on closed image"):
+        first_frame.bitmap.tobytes()
+
+
+# 锁住等待方超时后在线程仍编码时过早关闭位图的故障。
+def test_timeout_keeps_bitmap_alive_until_worker_finishes(tmp_path: Path) -> None:
+    adapter_config, llm_config = _configuration(tmp_path, timeout=0.01)
+    frame = _frame(1)
+    backend = FakeBackend([frame])
+    client = DelayedBitmapClient(0.08)
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: backend,
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: client,
+        title_map=_title_map(),
+    )
+
+    async def scenario() -> list[dict[str, object]]:
+        await adapter.start(_core([]))
+        try:
+            _, rows = await _wait_for_observation_rows(tmp_path, 1)
+            read_succeeded = await asyncio.to_thread(client.bitmap_read.wait, 2.0)
+            assert read_succeeded is True
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while True:
+                try:
+                    frame.bitmap.tobytes()
+                except ValueError:
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("worker completed but bitmap remained open")
+                await asyncio.sleep(0.005)
+            return rows
+        finally:
+            await adapter.stop()
+
+    rows = asyncio.run(scenario())
+    assert rows[0]["dropped"] == "timeout"
+    assert client.bitmap_bytes is not None
+    with pytest.raises(ValueError, match="Operation on closed image"):
+        frame.bitmap.tobytes()
+
+
+# 锁住超时后的工作线程迟到失败未取回而产生 asyncio ERROR 噪声的故障。
+def test_timeout_retrieves_late_worker_exception_without_asyncio_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    adapter_config, llm_config = _configuration(tmp_path, timeout=0.01)
+    client = DelayedFailureClient(0.08)
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: FakeBackend([_frame(1)]),
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: client,
+        title_map=_title_map(),
+    )
+    caplog.set_level(logging.ERROR, logger="asyncio")
+
+    async def scenario() -> list[dict[str, object]]:
+        await adapter.start(_core([]))
+        try:
+            _, rows = await _wait_for_observation_rows(tmp_path, 1)
+            worker_finished = await asyncio.to_thread(client.finished.wait, 2.0)
+            assert worker_finished is True
+            await asyncio.sleep(0.05)
+            return rows
+        finally:
+            await adapter.stop()
+
+    rows = asyncio.run(scenario())
+    assert rows[0]["dropped"] == "timeout"
+    assert "Future exception was never retrieved" not in caplog.text
+
+
 def test_latest_wins_keeps_one_pending_frame_and_marks_replacements(tmp_path: Path) -> None:
-    adapter_config, llm_config = _configuration(tmp_path, max_inflight=2)
+    adapter_config, llm_config = _configuration(tmp_path, timeout=1.0, max_inflight=2)
     backend = FakeBackend([_frame(value) for value in range(1, 8)])
-    client = FakeClient([0.06] * 7)
+    client = FakeClient([0.20] * 7)
     adapter = GenericVisionAdapter(
         adapter_config,
         llm_config,
@@ -399,6 +648,282 @@ def test_title_lookup_falls_back_to_original_window_title() -> None:
     mapping = _title_map()
     assert mapping.identify("GZW ", "anything.exe") == "Grey Zone Warfare"
     assert mapping.identify("Unknown Window 123", "unknown.exe") == "Unknown Window 123"
+    matched = mapping.identify_identity("GZW Season", "anything.exe")
+    unmatched = mapping.identify_identity("Unknown Window 123", "unknown.exe")
+    assert matched.game_id == "grey-zone-warfare"
+    assert matched.display_name == "GZW Season"
+    assert unmatched.game_id == "unknown-exe"
+    assert unmatched.display_name == "Unknown Window 123"
+
+
+def test_selected_frames_each_emit_one_scene_event_without_changing_markdown(
+    tmp_path: Path,
+) -> None:
+    adapter_config, llm_config = _configuration(tmp_path)
+    adapter_config.generic.scene = SceneConfig(
+        enabled=True,
+        hash_kind="ahash",
+        hash_bits=64,
+        hamming_threshold=1,
+        stable_min_seconds=1.0,
+        card_flush_seconds=999.0,
+        memory_dir=str(tmp_path / "memory"),
+    )
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("replay must not initialize capture")
+        ),
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: FakeClient(),
+        title_map=_title_map(),
+    )
+    output = tmp_path / "scene-replay"
+
+    async def scenario() -> None:
+        adapter.start_replay(output, input_context=None)
+        for sequence in (1, 2):
+            await adapter.submit_replay_frame(
+                _frame(sequence),
+                "Grey Zone Warfare",
+                (),
+                float(sequence - 1),
+                confirmed_region=(),
+                change_ratio=0.6,
+                global_change=20.0,
+                region_intensity=0.0,
+                forced=False,
+            )
+        await adapter.finish_replay()
+
+    asyncio.run(scenario())
+    events = list(EvidenceStore.read(output / "evidence.jsonl"))
+    scene_events = [event for event in events if event.kind == "scene_fingerprint"]
+    assert len(scene_events) == 2
+    assert all(isinstance(event.payload, SceneFingerprintPayload) for event in scene_events)
+    assert [event.root_capture_id for event in scene_events] == ["f1", "f2"]
+    assert (output / "observations.md").read_text(encoding="utf-8") == (
+        render_observations_markdown(events, adapter._log.started_at)
+        if adapter._log is not None
+        else render_observations_markdown(
+            events,
+            datetime.fromisoformat(
+                json.loads((output / "session.json").read_text(encoding="utf-8"))[
+                    "started_at"
+                ]
+            ),
+        )
+    )
+    card = json.loads(
+        (tmp_path / "memory" / "grey-zone-warfare" / "gamecard.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert card["scenes"] == []
+
+
+def test_no_change_polling_frames_advance_scene_stability_without_evidence(
+    tmp_path: Path,
+) -> None:
+    adapter_config, llm_config = _configuration(tmp_path)
+    adapter_config.generic.scene = SceneConfig(
+        enabled=True,
+        hash_kind="ahash",
+        hash_bits=64,
+        hamming_threshold=1,
+        stable_min_seconds=5.0,
+        card_flush_seconds=999.0,
+        memory_dir=str(tmp_path / "memory"),
+    )
+    frames = [_frame(sequence) for sequence in range(1, 8)]
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: FakeBackend(frames),
+        selector_factory=lambda _sparsity: SelectPattern(
+            [True, False, False, False, False, False, True]
+        ),
+        client_factory=lambda *_args: FakeClient(),
+        title_map=_title_map(),
+    )
+
+    async def scenario() -> Path:
+        await adapter.start(_core([]))
+        try:
+            session, _rows = await _wait_for_observation_rows(tmp_path, 2)
+            return session
+        finally:
+            await adapter.stop()
+
+    session = asyncio.run(scenario())
+    events = list(EvidenceStore.read(session / "evidence.jsonl"))
+    scene_events = [event for event in events if event.kind == "scene_fingerprint"]
+
+    assert [event.root_capture_id for event in scene_events] == ["f1", "f2"]
+    assert len(scene_events) == 2
+    assert scene_events[0].payload.stable is False  # type: ignore[union-attr]
+    assert scene_events[1].payload.stable is True  # type: ignore[union-attr]
+
+
+def test_selected_scene_switch_reports_last_selected_cluster_across_intermediate_clusters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter_config, llm_config = _configuration(tmp_path)
+    adapter_config.generic.scene = SceneConfig(
+        enabled=True,
+        hash_kind="ahash",
+        hash_bits=64,
+        hamming_threshold=0,
+        stable_min_seconds=1.0,
+        card_flush_seconds=999.0,
+        memory_dir=str(tmp_path / "memory"),
+    )
+    hashes = iter(
+        (
+            "0000000000000000",
+            "ffffffffffffffff",
+            "0f0f0f0f0f0f0f0f",
+            "0000000000000000",
+        )
+    )
+    monkeypatch.setattr(
+        generic_adapter_module,
+        "perceptual_hash",
+        lambda _image, _kind, _bits: next(hashes),
+    )
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("replay must not initialize capture")
+        ),
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: FakeClient(),
+        title_map=_title_map(),
+    )
+    output = tmp_path / "selected-switch"
+    identity = GameIdentity(
+        "grey-zone-warfare",
+        "Grey Zone Warfare",
+        "Grey Zone Warfare",
+    )
+
+    async def scenario() -> None:
+        adapter.start_replay(output, input_context=None)
+        await adapter.submit_replay_frame(
+            _frame(1),
+            "Grey Zone Warfare",
+            (),
+            0.0,
+            confirmed_region=(),
+            change_ratio=0.6,
+            global_change=20.0,
+            region_intensity=0.0,
+            forced=False,
+        )
+        for sequence in (2, 3):
+            frame = _frame(sequence)
+            adapter._observe_scene_frame(frame, identity)
+            frame.bitmap.close()
+        await adapter.submit_replay_frame(
+            _frame(4),
+            "Grey Zone Warfare",
+            (),
+            0.0,
+            confirmed_region=(),
+            change_ratio=0.6,
+            global_change=20.0,
+            region_intensity=0.0,
+            forced=False,
+        )
+        await adapter.finish_replay()
+
+    asyncio.run(scenario())
+    scene_events = [
+        event
+        for event in EvidenceStore.read(output / "evidence.jsonl")
+        if event.kind == "scene_fingerprint"
+    ]
+    assert [event.payload.cluster_id for event in scene_events] == [1, 4]  # type: ignore[union-attr]
+    assert scene_events[0].payload.switched_from is None  # type: ignore[union-attr]
+    assert scene_events[1].payload.switched_from == 1  # type: ignore[union-attr]
+
+
+def test_game_switch_flushes_old_card_before_loading_new_card(tmp_path: Path) -> None:
+    adapter_config, llm_config = _configuration(tmp_path)
+    adapter_config.generic.scene = SceneConfig(
+        enabled=True,
+        hash_kind="ahash",
+        hash_bits=64,
+        hamming_threshold=1,
+        stable_min_seconds=1.0,
+        card_flush_seconds=999.0,
+        memory_dir=str(tmp_path / "memory"),
+    )
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("replay must not initialize capture")
+        ),
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: FakeClient(),
+        title_map=_title_map(),
+    )
+    output = tmp_path / "switch-replay"
+
+    async def scenario() -> None:
+        adapter.start_replay(output, input_context=None)
+        for sequence in (1, 2):
+            frame = _frame(sequence)
+            identity = GameIdentity("first-game", "First Game", "First Game")
+            scene_state = adapter._observe_scene_frame(frame, identity)
+            await adapter._schedule(
+                frame,
+                "First Game",
+                (),
+                0.0,
+                confirmed_region=(),
+                change_ratio=0.6,
+                global_change=20.0,
+                region_intensity=0.0,
+                forced=False,
+                wait_for_capacity=True,
+                scene_state=scene_state,
+            )
+        frame = _frame(3)
+        identity = GameIdentity("second-game", "Second Game", "Second Game")
+        scene_state = adapter._observe_scene_frame(frame, identity)
+        await adapter._schedule(
+            frame,
+            "Second Game",
+            (),
+            0.0,
+            confirmed_region=(),
+            change_ratio=0.6,
+            global_change=20.0,
+            region_intensity=0.0,
+            forced=False,
+            wait_for_capacity=True,
+            scene_state=scene_state,
+        )
+        await adapter.finish_replay()
+
+    asyncio.run(scenario())
+    first = json.loads(
+        (tmp_path / "memory" / "first-game" / "gamecard.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    second = json.loads(
+        (tmp_path / "memory" / "second-game" / "gamecard.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert first["scenes"] == []
+    assert second["scenes"] == []
 
 
 def test_cost_uses_profile_prices_and_sets_warning(tmp_path: Path) -> None:
@@ -483,10 +1008,7 @@ def test_offline_replay_uses_shared_ordered_pipeline_with_backpressure(
         await adapter.finish_replay()
 
     asyncio.run(scenario())
-    rows = [
-        json.loads(line)
-        for line in (output / "observations.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
+    rows = _legacy_observation_rows(output)
     assert [row["frame_ts"] for row in rows] == [1.0, 2.0]
     assert "此窗口内无玩家输入" in str(client.calls[0]["user_prompt"])
     assert "玩家输入：\nW" not in str(client.calls[0]["user_prompt"])
@@ -680,6 +1202,24 @@ def test_observation_log_writes_mechanical_fields_markers_and_reason_counts(
         ("forced", 0.0, None, "无输入"),
     )
     for sequence, (reason, ratio, location, input_text) in enumerate(fixtures, start=1):
+        scope = _focus_scope(("r2c3",)) if reason == "sparse" else None
+        log.append_frame_metrics(
+            sequence=sequence,
+            frame_ts=float(sequence),
+            wall=f"2026-08-26T12:00:0{sequence}+00:00",
+            reason=reason,  # type: ignore[arg-type]
+            change_ratio=ratio,
+            global_change=6.2,
+            region_area_ratio=30.0 if reason in {"sparse", "coarse"} else None,
+            region_intensity=60.0 if reason in {"sparse", "coarse"} else None,
+            scope=scope,
+        )
+        log.append_key_window(
+            sequence=sequence,
+            frame_ts=float(sequence),
+            summary=input_text,
+            window_start=float(sequence - 1),
+        )
         log.append(
             ObservationRecord(
                 seq=sequence,
@@ -699,6 +1239,7 @@ def test_observation_log_writes_mechanical_fields_markers_and_reason_counts(
                 region_intensity=60.0 if reason in {"sparse", "coarse"} else None,
                 input=input_text,
                 focus_location=location,
+                scope=scope,
                 latency_ms=10.0,
                 ttft_ms=5.0,
                 dropped=None,
@@ -713,15 +1254,13 @@ def test_observation_log_writes_mechanical_fields_markers_and_reason_counts(
                 output_tokens=20,
                 actual_model="fixture-model",
                 actual_provider="fixture-provider",
+                learned_at=float(sequence) + 0.01,
             )
         )
     log.close()
 
     directory = tmp_path / "mechanical-log"
-    rows = [
-        json.loads(line)
-        for line in (directory / "observations.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
+    rows = _legacy_observation_rows(directory)
     assert [(row["reason"], row["change_ratio"], row["input"]) for row in rows] == [
         ("sparse", 0.12, "W 按住 0.5 秒"),
         ("coarse", 0.38, "无输入"),
@@ -752,4 +1291,310 @@ def test_observation_log_writes_mechanical_fields_markers_and_reason_counts(
         "coarse": 1,
         "large": 1,
         "forced": 1,
+    }
+
+
+def test_b_t1_old_fake_client_scenario_covers_markdown_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixed_started_at = datetime(2026, 8, 29, 12, 34, 56, tzinfo=timezone.utc)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            if tz is None:
+                return fixed_started_at.replace(tzinfo=None)
+            return fixed_started_at
+
+    monkeypatch.setattr(generic_adapter_module, "datetime", FixedDatetime)
+    adapter_config, llm_config = _configuration(
+        tmp_path,
+        timeout=0.15,
+        max_inflight=1,
+        input_context=True,
+    )
+    client = FakeClient(
+        delays=[0.01, 0.30, 0.0],
+        texts=[
+            "【画面】主区域保持清晰\n【局部】左上对象正在移动\n【推测】似乎正在查看界面",
+            "【画面】这条迟到结果不得进入日志",
+            "【画面】定时快照保持稳定",
+        ],
+    )
+    input_timeline = ActionInputTimeline(retention_seconds=None)
+    input_timeline.append(ActionInputEvent(0.2, "按下", "W"))
+    input_timeline.append(ActionInputEvent(0.8, "抬起", "W"))
+    input_timeline.append(
+        ActionInputEvent(
+            0.9,
+            "移动汇总",
+            dx=1600,
+            absolute_dx=1600,
+        )
+    )
+    adapter = GenericVisionAdapter(
+        adapter_config,
+        llm_config,
+        capture_backend_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("baseline replay must not initialize capture")
+        ),
+        selector_factory=lambda _sparsity: AlwaysSelect(),
+        client_factory=lambda *_args: client,
+        title_map=_title_map(),
+    )
+    output = tmp_path / "b-t1-baseline"
+
+    async def scenario() -> None:
+        adapter.start_replay(
+            output,
+            input_context=input_timeline,
+            input_window_start_monotonic=0.0,
+        )
+        await adapter._schedule(
+            _frame(1),
+            "Grey Zone Warfare",
+            ("r2c3", "r3c3"),
+            0.0,
+            confirmed_region=("r2c3", "r3c3"),
+            change_ratio=2 / 144,
+            global_change=6.25,
+            region_intensity=60.4,
+            forced=False,
+        )
+        await adapter._schedule(
+            _frame(2),
+            "Grey Zone Warfare",
+            (),
+            1.0,
+            confirmed_region=(),
+            change_ratio=0.38,
+            global_change=18.75,
+            region_intensity=0.0,
+            forced=False,
+        )
+        await adapter._schedule(
+            _frame(3),
+            "Grey Zone Warfare",
+            (),
+            2.0,
+            confirmed_region=(),
+            change_ratio=0.62,
+            global_change=31.25,
+            region_intensity=0.0,
+            forced=False,
+        )
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while adapter._inflight or adapter._queued_frame is not None or client.active:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("baseline timeout and late worker did not drain")
+            await asyncio.sleep(0.005)
+        await adapter._schedule(
+            _frame(4),
+            "Grey Zone Warfare",
+            (),
+            -56.0,
+            confirmed_region=(),
+            change_ratio=0.0,
+            global_change=0.0,
+            region_intensity=0.0,
+            forced=True,
+        )
+        await adapter.finish_replay()
+
+    asyncio.run(scenario())
+    markdown_path = output / "observations.md"
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "本会话始于 2026-08-29T12:34:56+00:00" in markdown
+    assert "[丢弃：superseded]" in markdown
+    assert "[丢弃：timeout]" in markdown
+    assert "T+3（心跳）：" in markdown
+    assert "【局部｜区域占比1%】（区域像素变化60%）左上对象正在移动" in markdown
+    assert "【推测】似乎正在查看界面" in markdown
+    assert "【全局画面】（全局像素变化0.0%）定时快照保持稳定" in markdown
+    assert "【玩家输入】W 按住 0.6 秒；鼠标向右大幅转动" in markdown
+    assert len(client.calls) == 3
+    request_signatures = []
+    for call in client.calls:
+        images = call["images"]
+        signature_payload = {
+            key: call[key]
+            for key in (
+                "model",
+                "provider",
+                "system_prompt",
+                "user_prompt",
+                "max_image_edge",
+                "max_tokens",
+                "temperature",
+                "reasoning_enabled",
+            )
+        }
+        signature_payload["images"] = [
+            {
+                "label": image.label,
+                "max_edge": image.max_edge,
+                "target_width": image.target_width,
+                "encoding": image.encoding,
+                "jpeg_quality": image.jpeg_quality,
+            }
+            for image in images  # type: ignore[union-attr]
+        ]
+        serialized = json.dumps(
+            signature_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request_signatures.append(hashlib.sha256(serialized).hexdigest())
+    assert request_signatures == [
+        "1824bbc187f3d80b30da424dbb6c153dd0a581b45ff471733156f2e39dc1eb87",
+        "b62370ecf5a63ebbaf0d63e130f93d22ab7d07b44c017c6167358e1e17e65d54",
+        "d3d6a695e273aa1dbbbfdf67bff8ef19b51b6d1bc58f6d665d255e08ea352c07",
+    ]
+    baseline_path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "generic"
+        / "observations-baseline-b-t1.md"
+    )
+    assert markdown_path.read_bytes() == baseline_path.read_bytes()
+    events = list(EvidenceStore.read(output / "evidence.jsonl"))
+    grouped: dict[str, dict[str, object]] = {}
+    mouse_events = []
+    for event in events:
+        if event.root_capture_id is None:
+            mouse_events.append(event)
+            continue
+        grouped.setdefault(event.root_capture_id, {})[event.kind] = event
+    assert set(grouped) == {"f1", "f2", "f3", "f4"}
+    assert all(
+        set(frame) == {"frame_metrics", "key_window", "fast_observation"}
+        for frame in grouped.values()
+    )
+    assert len(mouse_events) == 1
+    mouse_event = mouse_events[0]
+    assert mouse_event.evidence_id == "n000000000001:mouse"
+    assert mouse_event.source == "mouse"
+    assert mouse_event.kind == "mouse_motion"
+    assert mouse_event.root_capture_id is None
+    assert isinstance(mouse_event.payload, MouseMotionPayload)
+    assert mouse_event.payload.direction == "right"
+    assert mouse_event.payload.magnitude == "large"
+    assert mouse_event.payload.raw_count_total == 1600
+    assert mouse_event.payload.estimated_degrees is None
+    assert mouse_event.payload.window_end == 0.0
+    assert set(mouse_event.payload.model_dump()) == {
+        "window_start",
+        "window_end",
+        "direction",
+        "magnitude",
+        "raw_count_total",
+        "estimated_degrees",
+    }
+    assert "1600" not in markdown
+    assert "1600" not in str(client.calls[0]["user_prompt"])
+    # ROOT CAUSE: concurrent replacement once discarded every mechanical fact for
+    # that frame; belief must still advance when a model result never exists.
+    for root_capture_id in ("f2", "f3"):
+        assert "frame_metrics" in grouped[root_capture_id]
+        assert "key_window" in grouped[root_capture_id]
+    fast_outcomes = {
+        root: frame["fast_observation"].outcome  # type: ignore[union-attr]
+        for root, frame in grouped.items()
+    }
+    assert fast_outcomes == {
+        "f1": "ok",
+        "f2": "superseded",
+        "f3": "dropped",
+        "f4": "ok",
+    }
+    for event in events:
+        if event.kind in {"frame_metrics", "key_window"}:
+            assert event.learned_at == event.observed_at
+        if event.kind == "mouse_motion":
+            assert event.learned_at >= event.observed_at
+        if event.kind == "fast_observation":
+            payload = event.payload
+            assert isinstance(payload, FastObservationPayload)
+            # Both values derive from the same monotonic elapsed duration; 1 ns
+            # only absorbs binary floating-point multiply/divide roundoff.
+            assert event.learned_at - event.observed_at == pytest.approx(
+                payload.latency_ms / 1000.0,
+                abs=1e-9,
+            )
+    session = json.loads((output / "session.json").read_text(encoding="utf-8"))
+    assert session["origin_monotonic"] == 1.0
+    regenerated = render_observations_markdown(events, fixed_started_at)
+    assert regenerated.encode("utf-8") == markdown_path.read_bytes()
+    assert not (output / "observations.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    ("drop_reason", "outcome"),
+    [
+        (None, "ok"),
+        ("timeout", "dropped"),
+        ("error:HTTP 429 rate limited", "dropped"),
+        ("cooldown:vision_fast", "dropped"),
+        ("error:stopped", "dropped"),
+        ("superseded", "superseded"),
+        ("error:模型返回空观察", "failed"),
+        ("error:provider disconnected", "failed"),
+    ],
+)
+def test_fast_outcome_mapping(drop_reason: str | None, outcome: str) -> None:
+    assert _fast_outcome(drop_reason) == outcome
+
+
+def test_observation_session_persists_cooldown_stats_and_error_metadata(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "rate-limit-session"
+    log = ObservationLog(directory, {"llm_profile": "vision_fast"}, exact_directory=True)
+    log.update_dispatch_statistics(
+        (
+            LlmDispatchStats(
+                profile_name="vision_fast",
+                rate_limit_count=2,
+                cooldown_seconds=7.5,
+                cooldown_drop_count=3,
+                cooling_down=False,
+                cooldown_remaining_seconds=0.0,
+            ),
+        )
+    )
+    log.record_llm_error(
+        {
+            "status_code": 429,
+            "error_type": "rate_limit_error",
+            "provider_code": "ProviderQuotaExceeded",
+            "retry_after": "5",
+            "retry_after_seconds": 5.0,
+            "request_id": "req-42",
+            "request_id_header": "x-request-id",
+            "provider": "Alibaba",
+        },
+        phase="fast",
+    )
+    log.close()
+
+    session = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+    assert session["rate_limit_count"] == 2
+    assert session["cooldown_seconds"] == pytest.approx(7.5)
+    assert session["cooldown_drop_count"] == 3
+    assert session["llm_dispatch_profiles"]["vision_fast"]["rate_limit_count"] == 2
+    assert len(session["llm_errors"]) == 1
+    recorded_error = session["llm_errors"][0]
+    assert isinstance(recorded_error.pop("occurred_at"), str)
+    assert recorded_error == {
+        "phase": "fast",
+        "status_code": 429,
+        "error_type": "rate_limit_error",
+        "provider_code": "ProviderQuotaExceeded",
+        "retry_after": "5",
+        "retry_after_seconds": 5.0,
+        "request_id": "req-42",
+        "request_id_header": "x-request-id",
+        "provider": "Alibaba",
     }

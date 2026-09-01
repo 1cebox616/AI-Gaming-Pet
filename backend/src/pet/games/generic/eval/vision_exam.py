@@ -2315,7 +2315,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 region_sparsity_max=arguments.region_sparsity_max,
             )
             prices = parse_prices(arguments.price)
-            config = load_config(arguments.config, arguments.local_config)
+            config = load_config(
+                arguments.config,
+                arguments.local_config,
+                strict=True,
+            )
             targets = resolve_targets(
                 arguments.model,
                 llm_config=config.llm,

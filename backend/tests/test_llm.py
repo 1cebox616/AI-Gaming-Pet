@@ -8,7 +8,13 @@ import httpx
 from PIL import Image
 import pytest
 
-from pet.core.llm import LlmError, LlmImage, OpenRouterClient, parse_analysis_text
+from pet.core.llm import (
+    LlmCooldownError,
+    LlmError,
+    LlmImage,
+    OpenRouterClient,
+    parse_analysis_text,
+)
 
 
 class _StepClock:
@@ -19,6 +25,17 @@ class _StepClock:
     def __call__(self) -> float:
         self._value += self._step
         return self._value
+
+
+class _ManualClock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
 
 
 def test_live_model_endpoint_catalog_parses_provider_prices() -> None:
@@ -312,6 +329,262 @@ def test_upstream_error_raises_once_without_retry() -> None:
     assert request_count == 1
     assert caught.value.status_code == 429
     assert caught.value.latency_seconds is not None
+
+
+def test_retry_after_429_preserves_metadata_drops_during_cooldown_and_recovers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = _ManualClock()
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        if request_count == 1:
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "5", "X-Request-Id": "req-gateway-42"},
+                json={
+                    "error": {
+                        "message": "provider quota exhausted",
+                        "code": 429,
+                        "metadata": {
+                            "provider_name": "Alibaba",
+                            "raw": json.dumps(
+                                {
+                                    "error": {
+                                        "type": "rate_limit_error",
+                                        "code": "ProviderQuotaExceeded",
+                                    }
+                                }
+                            ),
+                        },
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": "vendor/model-actual",
+                "provider": "Alibaba",
+                "choices": [{"message": {"content": "恢复成功"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2, "cost": 0.001},
+            },
+        )
+
+    client = OpenRouterClient(
+        "test-api-key",
+        profile_name="vision_fast",
+        transport=httpx.MockTransport(handler),
+        clock=clock,
+    )
+    arguments = {
+        "model": "vendor/model-under-test",
+        "system_prompt": "system",
+        "user_prompt": "user",
+        "max_tokens": 32,
+        "temperature": 0.0,
+    }
+    try:
+        with caplog.at_level("INFO"):
+            with pytest.raises(LlmError, match="provider quota exhausted") as caught:
+                client.complete(**arguments)
+            error = caught.value
+            assert error.error_type == "rate_limit_error"
+            assert error.provider_code == "ProviderQuotaExceeded"
+            assert error.retry_after == "5"
+            assert error.retry_after_seconds == pytest.approx(5.0)
+            assert error.request_id == "req-gateway-42"
+            assert error.request_id_header == "x-request-id"
+            assert error.provider == "Alibaba"
+
+            with pytest.raises(LlmCooldownError) as dropped:
+                client.complete(**arguments)
+            assert dropped.value.cooldown_drop is True
+            assert dropped.value.cooldown_remaining_seconds == pytest.approx(5.0)
+            assert request_count == 1
+
+            clock.advance(5.0)
+            result = client.complete(**arguments)
+    finally:
+        client.close()
+
+    assert result.text == "恢复成功"
+    assert request_count == 2
+    stats = client.dispatch_stats()
+    assert stats.profile_name == "vision_fast"
+    assert stats.rate_limit_count == 1
+    assert stats.cooldown_seconds == pytest.approx(5.0)
+    assert stats.cooldown_drop_count == 1
+    assert stats.cooling_down is False
+    assert "进入冷却" in caplog.text
+    assert "冷却结束" in caplog.text
+    assert "ProviderQuotaExceeded" in caplog.text
+    assert "req-gateway-42" in caplog.text
+
+
+def test_headerless_429_uses_capped_exponential_cooldown_without_retry() -> None:
+    clock = _ManualClock()
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        if request_count < 4:
+            return httpx.Response(
+                429,
+                json={"error": {"message": "slow down", "type": "throttle"}},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "model": "vendor/model-actual",
+                "choices": [{"message": {"content": "ok"}}],
+            },
+        )
+
+    client = OpenRouterClient(
+        "test-api-key",
+        profile_name="scene_fingerprint_verifier",
+        transport=httpx.MockTransport(handler),
+        clock=clock,
+        rate_limit_backoff_base_seconds=2.0,
+        rate_limit_backoff_max_seconds=5.0,
+    )
+    arguments = {
+        "model": "vendor/model-under-test",
+        "system_prompt": "system",
+        "user_prompt": "user",
+        "max_tokens": 32,
+        "temperature": 0.0,
+    }
+    try:
+        expected_delays = (2.0, 4.0, 5.0)
+        for expected in expected_delays:
+            with pytest.raises(LlmError) as caught:
+                client.complete(**arguments)
+            assert caught.value.retry_after is None
+            assert caught.value.retry_after_seconds is None
+            assert client.dispatch_stats().cooldown_remaining_seconds == pytest.approx(
+                expected
+            )
+            clock.advance(expected)
+        result = client.complete(**arguments)
+    finally:
+        client.close()
+
+    assert result.text == "ok"
+    assert request_count == 4
+    stats = client.dispatch_stats()
+    assert stats.rate_limit_count == 3
+    assert stats.cooldown_seconds == pytest.approx(sum(expected_delays))
+    assert stats.cooldown_drop_count == 0
+
+
+def test_rate_limit_cooldown_is_isolated_by_profile() -> None:
+    clock = _ManualClock()
+    fast_requests = 0
+    deep_requests = 0
+
+    def fast_handler(_: httpx.Request) -> httpx.Response:
+        nonlocal fast_requests
+        fast_requests += 1
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "30"},
+            json={"error": {"message": "fast limited", "code": "fast-quota"}},
+        )
+
+    def deep_handler(_: httpx.Request) -> httpx.Response:
+        nonlocal deep_requests
+        deep_requests += 1
+        return httpx.Response(
+            200,
+            json={
+                "model": "vendor/deep-actual",
+                "choices": [{"message": {"content": "deep unaffected"}}],
+            },
+        )
+
+    fast = OpenRouterClient(
+        "test-api-key",
+        profile_name="vision_fast",
+        transport=httpx.MockTransport(fast_handler),
+        clock=clock,
+    )
+    deep = OpenRouterClient(
+        "test-api-key",
+        profile_name="scene_fingerprint_verifier",
+        transport=httpx.MockTransport(deep_handler),
+        clock=clock,
+    )
+    arguments = {
+        "model": "vendor/model",
+        "system_prompt": "system",
+        "user_prompt": "user",
+        "max_tokens": 32,
+        "temperature": 0.0,
+    }
+    try:
+        with pytest.raises(LlmError):
+            fast.complete(**arguments)
+        with pytest.raises(LlmCooldownError):
+            fast.complete(**arguments)
+        result = deep.complete(**arguments)
+    finally:
+        fast.close()
+        deep.close()
+
+    assert result.text == "deep unaffected"
+    assert fast_requests == 1
+    assert deep_requests == 1
+    assert fast.dispatch_stats().rate_limit_count == 1
+    assert deep.dispatch_stats().rate_limit_count == 0
+
+
+def test_streaming_vision_429_enters_cooldown_before_next_image_dispatch() -> None:
+    clock = _ManualClock()
+    request_count = 0
+    image = Image.new("RGB", (32, 18), "black")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "3", "X-Generation-Id": "gen-vision-7"},
+            json={"error": {"message": "vision limited", "code": 429}},
+        )
+
+    client = OpenRouterClient(
+        "test-api-key",
+        profile_name="vision_fast",
+        transport=httpx.MockTransport(handler),
+        clock=clock,
+    )
+    arguments = {
+        "model": "vendor/vision",
+        "system_prompt": "system",
+        "user_prompt": "user",
+        "images": (LlmImage(image, "frame"),),
+        "max_image_edge": None,
+        "max_tokens": 32,
+        "temperature": 0.0,
+    }
+    try:
+        with pytest.raises(LlmError) as limited:
+            client.complete_with_images_stream(**arguments)
+        assert limited.value.request_id == "gen-vision-7"
+        assert limited.value.request_id_header == "x-generation-id"
+        with pytest.raises(LlmCooldownError):
+            client.complete_with_images_stream(**arguments)
+    finally:
+        client.close()
+        image.close()
+
+    assert request_count == 1
+    assert client.dispatch_stats().rate_limit_count == 1
+    assert client.dispatch_stats().cooldown_drop_count == 1
 
 
 def test_missing_upstream_accounting_stays_unknown() -> None:

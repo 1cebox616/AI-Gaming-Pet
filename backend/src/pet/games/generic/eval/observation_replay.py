@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import difflib
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -21,6 +22,12 @@ import tomllib
 
 from PIL import Image
 
+from pet.core.belief import (
+    EvidenceStore,
+    FastObservationPayload,
+    FrameMetricsPayload,
+    KeyWindowPayload,
+)
 from pet.core.capture import (
     AdaptiveFrameSelector,
     CapturedFrame,
@@ -33,11 +40,15 @@ from pet.core.config import (
     AdapterConfig,
     GenericVisionConfig,
     LlmConfig,
+    OcrConfig,
+    SceneConfig,
     load_config,
     resolve_llm_profile,
 )
 from pet.core.input_telemetry import ActionInputTimeline, load_action_input_csv
 from pet.games.generic.adapter import GenericVisionAdapter, WindowTitleMap, _focus_geometry
+
+logger = logging.getLogger(__name__)
 
 BACKEND_DIRECTORY = Path(__file__).resolve().parents[5]
 DEFAULT_OUTPUT_ROOT = BACKEND_DIRECTORY / "eval-reports"
@@ -248,7 +259,10 @@ def _prepare_replay(
     if not included_count or source_size is None:
         raise ObservationReplayError(f"指定区间没有帧：{session}")
     actual_width = min(requested_width, source_size[0])
-    loaded_input = load_action_input_csv(session)
+    loaded_input = load_action_input_csv(
+        session,
+        use_wall_clock=not all(item.recorded_monotonic for item in timings),
+    )
     return PreparedReplay(
         session=session,
         name=_session_label(payload, session),
@@ -276,6 +290,8 @@ def _adapter_configuration(
     timeout: float,
     max_inflight: int,
     region_focus_max: float,
+    ocr_enabled: bool = True,
+    scene_memory_dir: Path | None = None,
 ) -> AdapterConfig:
     return AdapterConfig(
         generic=GenericVisionConfig(
@@ -285,6 +301,12 @@ def _adapter_configuration(
             max_inflight=max_inflight,
             region_focus_max=region_focus_max,
             llm_profile=profile,
+            ocr=OcrConfig(enabled=ocr_enabled),
+            scene=(
+                SceneConfig(memory_dir=str(scene_memory_dir))
+                if scene_memory_dir is not None
+                else SceneConfig(enabled=False)
+            ),
         )
     )
 
@@ -309,6 +331,7 @@ async def _run_prepared(
             timeout=timeout,
             max_inflight=max_inflight,
             region_focus_max=region_focus_max,
+            scene_memory_dir=output_directory / "memory",
         ),
         llm_configuration,
         capture_backend_factory=lambda: (_ for _ in ()).throw(
@@ -397,11 +420,71 @@ def _percentile(values: Sequence[float], percentile: float) -> float | None:
 
 
 def _read_rows(directory: Path) -> list[dict[str, object]]:
-    return [
-        json.loads(line)
-        for line in (directory / "observations.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    session = json.loads((directory / "session.json").read_text(encoding="utf-8"))
+    origin_value = session.get("origin_monotonic")
+    if origin_value is None:
+        return []
+    origin = float(origin_value)
+    grouped: dict[str, dict[str, list[object]]] = {}
+    for event in EvidenceStore.read(directory / "evidence.jsonl"):
+        if event.root_capture_id is None:
+            continue
+        grouped.setdefault(event.root_capture_id, {}).setdefault(event.kind, []).append(event)
+    rows: list[dict[str, object]] = []
+    incomplete: list[str] = []
+    for root_capture_id in sorted(grouped, key=lambda value: int(value[1:])):
+        frame = grouped[root_capture_id]
+        if not {"fast_observation", "frame_metrics", "key_window"}.issubset(frame):
+            incomplete.append(root_capture_id)
+            continue
+        fast_event = frame["fast_observation"][0]
+        metrics_event = frame["frame_metrics"][0]
+        key_event = frame["key_window"][0]
+        fast = fast_event.payload  # type: ignore[union-attr]
+        metrics = metrics_event.payload  # type: ignore[union-attr]
+        key = key_event.payload  # type: ignore[union-attr]
+        if not isinstance(fast, FastObservationPayload):
+            raise ObservationReplayError(f"{root_capture_id} 的 fast payload 类型错误")
+        if not isinstance(metrics, FrameMetricsPayload):
+            raise ObservationReplayError(f"{root_capture_id} 的 detector payload 类型错误")
+        if not isinstance(key, KeyWindowPayload):
+            raise ObservationReplayError(f"{root_capture_id} 的 input payload 类型错误")
+        rows.append(
+            {
+                "seq": int(root_capture_id[1:]),
+                "frame_ts": origin + fast_event.observed_at,  # type: ignore[union-attr]
+                "wall": metrics.wall,
+                "game": fast.game,
+                "text": fast.text,
+                "region": fast_event.scope.cells if fast_event.scope else None,  # type: ignore[union-attr]
+                "reason": metrics.reason,
+                "change_ratio": round(metrics.change_ratio, 2),
+                "global_change": round(metrics.global_change, 1),
+                "region_area_ratio": (
+                    round(metrics.region_area_ratio)
+                    if metrics.region_area_ratio is not None
+                    else None
+                ),
+                "region_intensity": (
+                    round(metrics.region_intensity)
+                    if metrics.region_intensity is not None
+                    else None
+                ),
+                "input": key.summary,
+                "latency_ms": round(fast.latency_ms, 3),
+                "ttft_ms": round(fast.ttft_ms, 3) if fast.ttft_ms is not None else None,
+                "dropped": fast.drop_reason,
+                "user_prompt": fast.user_prompt,
+                "speculation": fast.speculation,
+                "input_tokens": fast.input_tokens,
+                "output_tokens": fast.output_tokens,
+                "actual_model": fast.actual_model,
+                "actual_provider": fast.actual_provider,
+            }
+        )
+    if incomplete:
+        logger.warning("重放行构造跳过不完整帧组：%s", ", ".join(incomplete))
+    return rows
 
 
 def character_similarity(left: str, right: str) -> float:
@@ -661,7 +744,15 @@ def _write_review(
             for row in successful
             if row.get("input_tokens") is not None
         ]
-        rate_limited = sum(count for reason, count in dropped.items() if "429" in reason)
+        rate_limited = int(
+            session.get(
+                "rate_limit_count",
+                sum(count for reason, count in dropped.items() if "429" in reason),
+            )
+        )
+        cooldown_seconds = float(session.get("cooldown_seconds", 0.0))
+        cooldown_dropped = int(session.get("cooldown_drop_count", 0))
+        llm_errors = session.get("llm_errors", [])
         timed_out = dropped.get("timeout", 0)
         truncated = int(session.get("truncated_count", 0))
         average_visible_tokens = session.get("average_visible_output_tokens")
@@ -740,6 +831,10 @@ def _write_review(
                 f"（{metrics_covered}/{len(rows)}）",
                 f"- 429 / 超时次数：{rate_limited} / {timed_out}",
                 (
+                    "- 限流响应 / 冷却累计 / 冷却丢弃："
+                    f"{rate_limited} / {cooldown_seconds:.3f}s / {cooldown_dropped}"
+                ),
+                (
                     f"- 输入归因违约：{len(attribution_violations)} / {len(successful)} "
                     f"（{len(attribution_violations) / len(successful):.2%}）"
                     if successful
@@ -788,6 +883,15 @@ def _write_review(
                 "",
             ]
         )
+        lines.extend(("### LLM 错误元数据", ""))
+        if isinstance(llm_errors, list) and llm_errors:
+            lines.extend(
+                f"- {json.dumps(item, ensure_ascii=False, sort_keys=True)}"
+                for item in llm_errors
+            )
+        else:
+            lines.append("- 无 LLM 错误。")
+        lines.append("")
         markdown_blocks = (directory / "observations.md").read_text(
             encoding="utf-8"
         ).strip().split("\n\n")
@@ -985,7 +1089,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
     try:
-        configuration = load_config()
+        configuration = load_config(strict=True)
         effective = resolve_llm_profile(configuration.llm, arguments.profile)
         profile = configuration.llm.profiles.get(arguments.profile)
         if profile is None:

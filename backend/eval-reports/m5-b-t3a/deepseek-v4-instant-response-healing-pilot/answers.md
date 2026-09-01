@@ -1,0 +1,117 @@
+# DeepSeek V4 Instant 优化提示词原始答案
+
+以下内容保留调用正文，仅去除行尾空白以保持报告格式；不预填事实正确性判断。精确原始字符串见 results.json。
+
+## Marvel Rivals
+
+### 联网模式
+
+```json
+{"genre":["第三人称射击","英雄射击","多人竞技"],"perspective":"第三人称视角"}
+```
+
+
+## EA Sports FC 26
+
+### 联网模式
+
+```json
+{"genre":["体育模拟","足球（足球竞技）"],"perspective":"第三人称俯视球场视角，跟随持球区域；角球、任意球与点球等定位球时切换为该场景镜头。","game_overview":"《EA Sports FC 26》是由 EA 发行的足球模拟游戏，延续 FC 系列成为 EA 旗下替代 FIFA 品牌后的又一主线年货作品。玩家扮演主教练或球员，核心是操控一支球队进行真实足球比赛。游戏覆盖顶级职业联赛与俱乐部、国际赛事（包含 48 支国家队的全新国际锦标赛模式）以及职业球员生涯等多个环节。本作最重要的特征是响应社区反馈对操作手感进行大幅重做，并引入两套独立游戏预设：Authentic（真实）预设服务于职业模式等单机玩法，追求最接近真实足球的体验；Competitive（竞技）预设服务于 Football Ultimate Team 与 Clubs 等对抗玩法，强化反应速度、直接控制与一致性。此外新引入 Archetypes（原型）系统，在 Clubs 与球员生涯中为自建球员增加差异化成长；Manager Live Challenges 为经理生涯注入结合现实与虚构剧本的赛季故事线；Football Ultimate Team 中新增锦标赛、Live Events 与 Bounties，并刷新了 Rivals 与 Champions 机制，新设 Challengers 二档周末赛事。","gameplay":{"player_goal":"通过操控球队赢得足球比赛，并在各模式中经营成长：在单人生涯模式中带队夺冠、培养球员；在线上对抗模式（Ultimate Team、Clubs）中组建阵容、累积胜场与段位、获得奖励。","core_loop":"1. 选择模式（生涯、Ultimate Team、在线对抗、锦标赛等）与比赛预设（Authentic 或 Competitive）。 2. 进入比赛，通过传球、带球、射门、防守与战术指令进行一场足球竞技。 3. 依据比赛结果获得奖励/经验：生涯模式中得到转会预算、球队成绩与球员成长；Ultimate 中获得卡包、球员与升级素材。 4. 用奖励升级阵容、球员属性或球队战术。 5. 周期性的赛季、Live Event、锦标赛更新提供新目标与新内容，使循环持续进行。","major_systems":[{"name":"两套游戏预设（Authentic / Competitive）","description":"决定整体操作与 AI 风格——真实预设侧重拟真足球节奏，竞技预设侧重反应、直传与上手控制一致性，涉及防守站位、门将、传球与身体对抗的差异。"},{"name":"Archetypes（原型）","description":"在 Clubs 与 Player Career 中为自建球员选择的成长路径，共 13 种灵感源自当代或历史名宿，提供专属 PlayStyles 与 Perks，通过赛季内 Archetype XP 升级属性。"},{"name":"Playstyles 与 Player Roles","description":"为球员提供差异化能力与跑位习惯，让玩家在打造球队与设置阵容时选择多样战术身份。"},{"name":"Football Ultimate Team（FUT）","description":"战抽卡式阵容构建与赛季周竞技，涵盖 Rivals、Champions、锦标赛、Live Events 与挑战，核心为组建梦想阵容并持续对抗升级。"},{"name":"Live Events（实时活动）","description":"包含锦标赛（淘汰制）、Gauntlet（多小队连续挑战）、与常规活动（如展览与限场联赛），每周一至两次，奖励随竞争强度调整。"},{"name":"Manager / Player Career（生涯模式）","description":"单机主玩法：经营俱乐部或培养球员，结合 Manager Live Challenges（真实与虚构剧情任务）与国际足坛赛事推进。"},{"name":"Clubs（球会模式）","description":"扮演自建球员参与团队协作的在线球会足球，深度绑定 Archetypes 成长与赛季节奏。"},{"name":"国际锦标赛（The Worl's Game）","description":"新增 48 支国家队的国际赛事模式，包含真实体育场，可体验全程国际赛事场景。"},{"name":"网络同步与响应性改进","description":"优化客户端与服务器的同步以缩短输入往返延迟，让在线对抗更即时准确。"}],"modes_and_structure":"游戏兼具单人、PVE 与多人线上结构。生涯模式（经理与球员两条线）为单机赛季制。在线模式 Football Ultimate Team 以赛季（Seasons）为周期组织内容，Rivals、Champions（周末排位/晋级）、Challengers（次级赛事）、Tournaments 与 Live Events 交替放送，并引入实时活动节奏；Clubs 为合作对抗式球会联赛。整体为年货式长线运营，赛季制持续更新。"},"background":{"setting_and_premise":"《EA Sports FC 26》是 EA Sports 系列足球模拟游戏的年度作品，覆盖现实中各大职业联赛、杯赛与国家队赛事（含 48 队新国际赛事），以真实足球世界为舞台。作为 FIFA 品牌到期后转型的 EA Sports FC 系列第二作（此前为《EA Sports FC 25》），游戏底层为真实足球规则与体育模拟。","release_and_service_status":"已于 2025 年 9 月 26 日全球发售，支持 PS5、PS4、Xbox Series X|S、Xbox One、Nintendo Switch、Switch 2、PC 与雲端 Amazon Luna；标准版于 9 月 26 日上线，终极版于 9 月 19 日提前抢先。长线运营以赛季更新、实时活动、每周赛事、Champions/Rivals 周期持续更新。当前为年活性运营中状态。来自 2025 年公开资料。"},"default_pc_keybinds":{"前进":"W","后退":"S","向左移动":"A","向右移动":"D","冲刺":"LeftShift","传球":"X","射门":"D","长传":"A","切换球员":"W","快捷物品栏1":"1"}}
+```
+
+
+## Hades II
+
+### 联网模式
+
+```json
+The search limit has been reached. I have enough confirmed information about the PC keybinds from the wiki sources. For release status, I know Hades II entered Early Access on May 6, 2024, and I can note current status as "不确定" for the latest version given I cannot verify. Let me construct the response using verified keybind data and my knowledge of the game's design (which is well-established publicly), being careful to note uncertainty where appropriate.
+
+```json
+{
+  "genre": ["动作角色扮演", "Roguelike", "地牢探索"],
+  "perspective": "第三人称等距俯视视角（斜45度俯视），固定摄像机，玩家单角色控制",
+  "game_overview": "《Hades II》（哈迪斯2）是 Supergiant Games 开发的肉鸽（Roguelike）动作角色扮演游戏，是《Hades》的直接续作。玩家扮演冥界公主墨利诺厄（Melinoë），她是前作主角扎格柔斯（Zagreus）的妹妹，为对抗吞噬一切的泰坦巨神/时间之神克洛诺斯（Chronos）而展开一次次地下城远征。游戏采用单机单人形态，延续前作的经典设计，将每次死亡化为成长契机：玩家在每次远征（run）中组合不同的神祇祝福（Boon）、武器形态与道具搭配，即使失败也能通过积累资源强化家园与自身永久能力，下一次尝试更加强大。与初代相比，本作加入了魔法（Magick）驱动的\"Ω（Omega）\"蓄力攻击体系、新的元素与状态、更庞大的地区地图与多种武器形态，以及更深的数值构筑，战斗节奏与Build多样性进一步拓展。早期版本包含在线/离线单人游玩与可选的更受限制的挑战模式，后续更新逐步引入更多内容。",
+  "gameplay": {
+    "player_goal": "玩家在一次次的远征中推进各区域关卡，击败沿途敌人与头目，最终的目标是击败最终boss（克洛诺斯）完成一次通关，并在失败后通过资源积累永久解锁新的习武天赋、武器形态、咒语能力与故事线索，逐步发现更深的剧情——后期还可挑战更高难度的预设或自定义模式。",
+    "core_loop": "1）进入一次远征：从据点出发，选择本次携带的技能词缀/希腊众神铁 Pad请求祝福与道具；2）探索区域内的大致十几个房间：每清理一个房间获得神祐加持、矿产、施法素材或随机事件；3）遭遇精英与头目战：面对多变的敌人组合与法术效果；4）在关键节点根据已获得的祝福与武器形态，调整自己的进攻套路：快速近战、远程法术、召唤式神兵等组合；5）若死亡则返回冥界据点，在与NPC对话中推进关系与剧情，用收集到的资源在\"铸造炉\"与\"执政官\"等处进行永久强化；6）再次进入远征，带着更强的初始能力挑战更深层关卡，如此反复直到通关更深难度。",
+    "major_systems": [
+      {"name": "神祇祝福（Boon）系统", "description": "在远征中收集来自于奥林波斯的十二主神（如雅典娜、阿瑞斯、阿波罗等）的随机祝福，提供不同攻击方式加成与全新技能，构成Build的数值与机制主干，玩家的关键决策在于如何搭建互为增强的祝福组合。"},
+      {"name": "Ω（Omega）蓄力攻击", "description": "每个武器的普通攻击可按住蓄力消耗魔法（Magick）发动强化版 Omega 攻击，威力与范围显著提升，魔法值成为资源管理的核心之一，与祝福体系形成联动。"},
+      {"name": "魔法（Magick）系统", "description": "魔法条作为施放 Omega 攻击的基础资源，除了通过祝福回复，也有大量产出补充的手段，推动玩家在冒险与保守之间反复取舍。"},
+      {"name": "武器形态与强化", "description": "多把拥有各自独特招式与攻击模式的主武器，每把武器再有多重“形态”（Aspects）解锁新的技能与伤害类型，并可用资源升级，影响玩家长期构筑规划。"},
+      {"name": "斯西藏语能力/传承（Key/Legacy）", "description": "远征中可获得各种名为“传承”（Keepsake，欧米伽）或关键技能的辅，类似神之符文一类被动置加点，常用于形成关卡式构筑。"},
+      {"name": "永久成长系统（暗黑之镜/冥界强化）", "description": "在据点通过消耗资源点亮永久天赋与升级，这些强化在死亡后保留，保证每次远征后越来越强，是横跨一张回归的核心成长节奏。"},
+      {"name": "NPC伙伴与好感度", "description": "通过送礼、对话与任务加深与多个冥界角色乃至神明的关系，获得定制祝福、武器赠礼或关键剧情解锁，影响长期玩法内容与背景叙事推进。"},
+      {"name": "剧情与难度推进系统（柏修斯/神谕塔）", "description": "通关后可自定义增加难度，对方赋予敌人更强属性或新机制，提供挑战性更强的长期目标，了解每次远征带来的成长后继续反复试炼。"}
+    ],
+    "modes_and_structure": "单机单人玩法，以重生的远征结构为环：每局从起点出发，沿固定不同区域一路推进至尾王，任何死亡与重新启动，但永久强化居于核心进度体系上。游戏同时提供可选的\"神谕\"（难度挑战）模式与长途（monocle）高层。未展示离线合作与多人对抗，主要是深度单机Roguelike。"
+  },
+  "background": {
+    "setting_and_premise": "故事背景延续《Hades》世界观：以希腊神话为底色的冥界，游戏主角墨琳诺厄——冥王哈德斯的女儿，在时间之神克洛诺斯推翻并囚禁其父、占据冥界后，被安置在隐世洞穴中修行，训练成为对抗泰坦巨神的战士。玩家沿着一座从中不断远征，从冥界深处出发，逐渐攻入地表世界的地狱边境（地表），并最终面对成就克的末世危机。游戏兼含神话基调、黑色幽默与人物性格化对白，世界前提与玩法紧密相关：远征而不仅仅是战斗，而是在一次次轮回中推进剧情线，故角色的羁颇深。",
+    "release_and_service_status": "游戏于2024年5月6日在 Steam 与 Epic Games Store 开启抢先体验（Early Access）。截至撰写时的最新公开信息为长线抢先体验阶段，开发组 Supergiant Games 计划在抢先体验期间逐步追加区域、boss与武器等，并在之后发布 1.0 正式版并后续登陆主机平台。因当前时间节点无法根据检索到更新的发布日志信息（本回答未能联网交叉验证到最新版本号与 Windows实况），因此当前1.0正式版确切的发布时间状态在此不确定。"
+  },
+  "default_pc_keybinds": {
+    "前进": "W",
+    "后退": "S",
+    "向左": "A",
+    "向右": "D",
+    "攻击": "MouseLeft",
+    "施法": "Q",
+    "特殊攻击": "MouseRight",
+    "冲刺": "Space",
+    "互动": "E",
+    "送礼": "G",
+    "呼神（日）": "F",
+    "法术蓄力（开放书）": "C",
+    "法术信息": "B",
+    "背包/界庭": "I",
+    "表情": "T"
+  }
+}
+```The search limit has been reached. I have enough confirmed information about the PC keybinds from the wiki sources. For release status, I know Hades II entered Early Access on May 6, 2024, and I can note current status as "不确定" for the latest version given I cannot verify. Let me construct the response using verified keybind data and my knowledge of the game's design (which is well-established publicly), being careful to note uncertainty where appropriate.
+
+```json
+{
+  "genre": ["动作角色扮演", "Roguelike", "地牢探索"],
+  "perspective": "第三人称等距俯视视角（斜45度俯视），固定摄像机，玩家单角色控制",
+  "game_overview": "《Hades II》（哈迪斯2）是 Supergiant Games 开发的肉鸽（Roguelike）动作角色扮演游戏，是《Hades》的直接续作。玩家扮演冥界公主墨利诺厄（Melinoë），她是前作主角扎格柔斯（Zagreus）的妹妹，为对抗吞噬一切的泰坦巨神/时间之神克洛诺斯（Chronos）而展开一次次地下城远征。游戏采用单机单人形态，延续前作的经典设计，将每次死亡化为成长契机：玩家在每次远征（run）中组合不同的神祇祝福（Boon）、武器形态与道具搭配，即使失败也能通过积累资源强化家园与自身永久能力，下一次尝试更加强大。与初代相比，本作加入了魔法（Magick）驱动的\"Ω（Omega）\"蓄力攻击体系、新的元素与状态、更庞大的地区地图与多种武器形态，以及更深的数值构筑，战斗节奏与Build多样性进一步拓展。早期版本包含在线/离线单人游玩与可选的更受限制的挑战模式，后续更新逐步引入更多内容。",
+  "gameplay": {
+    "player_goal": "玩家在一次次的远征中推进各区域关卡，击败沿途敌人与头目，最终的目标是击败最终boss（克洛诺斯）完成一次通关，并在失败后通过资源积累永久解锁新的习武天赋、武器形态、咒语能力与故事线索，逐步发现更深的剧情——后期还可挑战更高难度的预设或自定义模式。",
+    "core_loop": "1）进入一次远征：从据点出发，选择本次携带的技能词缀/希腊众神铁 Pad请求祝福与道具；2）探索区域内的大致十几个房间：每清理一个房间获得神祐加持、矿产、施法素材或随机事件；3）遭遇精英与头目战：面对多变的敌人组合与法术效果；4）在关键节点根据已获得的祝福与武器形态，调整自己的进攻套路：快速近战、远程法术、召唤式神兵等组合；5）若死亡则返回冥界据点，在与NPC对话中推进关系与剧情，用收集到的资源在\"铸造炉\"与\"执政官\"等处进行永久强化；6）再次进入远征，带着更强的初始能力挑战更深层关卡，如此反复直到通关更深难度。",
+    "major_systems": [
+      {"name": "神祇祝福（Boon）系统", "description": "在远征中收集来自于奥林波斯的十二主神（如雅典娜、阿瑞斯、阿波罗等）的随机祝福，提供不同攻击方式加成与全新技能，构成Build的数值与机制主干，玩家的关键决策在于如何搭建互为增强的祝福组合。"},
+      {"name": "Ω（Omega）蓄力攻击", "description": "每个武器的普通攻击可按住蓄力消耗魔法（Magick）发动强化版 Omega 攻击，威力与范围显著提升，魔法值成为资源管理的核心之一，与祝福体系形成联动。"},
+      {"name": "魔法（Magick）系统", "description": "魔法条作为施放 Omega 攻击的基础资源，除了通过祝福回复，也有大量产出补充的手段，推动玩家在冒险与保守之间反复取舍。"},
+      {"name": "武器形态与强化", "description": "多把拥有各自独特招式与攻击模式的主武器，每把武器再有多重“形态”（Aspects）解锁新的技能与伤害类型，并可用资源升级，影响玩家长期构筑规划。"},
+      {"name": "斯西藏语能力/传承（Key/Legacy）", "description": "远征中可获得各种名为“传承”（Keepsake，欧米伽）或关键技能的辅，类似神之符文一类被动置加点，常用于形成关卡式构筑。"},
+      {"name": "永久成长系统（暗黑之镜/冥界强化）", "description": "在据点通过消耗资源点亮永久天赋与升级，这些强化在死亡后保留，保证每次远征后越来越强，是横跨一张回归的核心成长节奏。"},
+      {"name": "NPC伙伴与好感度", "description": "通过送礼、对话与任务加深与多个冥界角色乃至神明的关系，获得定制祝福、武器赠礼或关键剧情解锁，影响长期玩法内容与背景叙事推进。"},
+      {"name": "剧情与难度推进系统（柏修斯/神谕塔）", "description": "通关后可自定义增加难度，对方赋予敌人更强属性或新机制，提供挑战性更强的长期目标，了解每次远征带来的成长后继续反复试炼。"}
+    ],
+    "modes_and_structure": "单机单人玩法，以重生的远征结构为环：每局从起点出发，沿固定不同区域一路推进至尾王，任何死亡与重新启动，但永久强化居于核心进度体系上。游戏同时提供可选的\"神谕\"（难度挑战）模式与长途（monocle）高层。未展示离线合作与多人对抗，主要是深度单机Roguelike。"
+  },
+  "background": {
+    "setting_and_premise": "故事背景延续《Hades》世界观：以希腊神话为底色的冥界，游戏主角墨琳诺厄——冥王哈德斯的女儿，在时间之神克洛诺斯推翻并囚禁其父、占据冥界后，被安置在隐世洞穴中修行，训练成为对抗泰坦巨神的战士。玩家沿着一座从中不断远征，从冥界深处出发，逐渐攻入地表世界的地狱边境（地表），并最终面对成就克的末世危机。游戏兼含神话基调、黑色幽默与人物性格化对白，世界前提与玩法紧密相关：远征而不仅仅是战斗，而是在一次次轮回中推进剧情线，故角色的羁颇深。",
+    "release_and_service_status": "游戏于2024年5月6日在 Steam 与 Epic Games Store 开启抢先体验（Early Access）。截至撰写时的最新公开信息为长线抢先体验阶段，开发组 Supergiant Games 计划在抢先体验期间逐步追加区域、boss与武器等，并在之后发布 1.0 正式版并后续登陆主机平台。因当前时间节点无法根据检索到更新的发布日志信息（本回答未能联网交叉验证到最新版本号与 Windows实况），因此当前1.0正式版确切的发布时间状态在此不确定。"
+  },
+  "default_pc_keybinds": {
+    "前进": "W",
+    "后退": "S",
+    "向左": "A",
+    "向右": "D",
+    "攻击": "MouseLeft",
+    "施法": "Q",
+    "特殊攻击": "MouseRight",
+    "冲刺": "Space",
+    "互动": "E",
+    "送礼": "G",
+    "呼神（日）": "F",
+    "法术蓄力（开放书）": "C",
+    "法术信息": "B",
+    "背包/界庭": "I",
+    "表情": "T"
+  }
+}
+```
+```

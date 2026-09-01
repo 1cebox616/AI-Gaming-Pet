@@ -23,6 +23,16 @@ from pet.core.ocr_probe import OcrFrameResult, OcrLine, POWERSHELL_EXECUTABLE
 LineChange = Literal["unchanged", "changed", "added"]
 
 
+class OcrEngine(Protocol):
+    """Small lifecycle shared by the production engine and WinRT probe worker."""
+
+    def start(self) -> None: ...
+
+    def recognize(self, image: Any, /) -> OcrFrameResult: ...
+
+    def close(self) -> None: ...
+
+
 _PERSISTENT_WORKER_SCRIPT = r'''
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
@@ -123,6 +133,12 @@ class WorkerReply:
 
 
 class PersistentWinRtOcrWorker:
+    """Legacy file-backed WinRT implementation of the OcrEngine lifecycle.
+
+    Its probe-only ``recognize`` wrapper returns WorkerReply so the caller can
+    retain restart diagnostics; ``WorkerReply.result`` is the protocol result.
+    Production uses the numpy-backed RapidOcrEngine.
+    """
     """One long-lived PowerShell/WinRT OCR engine with line-delimited JSON I/O."""
 
     def __init__(self, language: str = "zh-Hans-CN") -> None:
@@ -380,6 +396,7 @@ class DiffLine:
     text: str
     line: OcrLine
     streak: int
+    previous_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,6 +405,7 @@ class DiffResult:
     disappeared: tuple[str, ...]
     stable_count: int
     scene_reset: bool
+    gone: tuple[CachedLine, ...] = ()
 
 
 def _line_center(line: OcrLine) -> tuple[float, float]:
@@ -443,6 +461,7 @@ class TextLineCache:
                 (),
                 0,
                 True,
+                (),
             )
 
         unmatched = set(range(len(self._lines)))
@@ -478,15 +497,26 @@ class TextLineCache:
                 same = _cache_text_key(old.text) == _cache_text_key(line.text)
                 cached = CachedLine(line.text, line, old.streak + 1 if same else 1)
                 kind = "unchanged" if same else "changed"
+                previous_text = None if same else old.text
             next_lines.append(cached)
-            diff_lines.append(DiffLine(kind, cached.text, cached.line, cached.streak))
+            diff_lines.append(
+                DiffLine(
+                    kind,
+                    cached.text,
+                    cached.line,
+                    cached.streak,
+                    previous_text if old_index is not None else None,
+                )
+            )
         disappeared = tuple(self._lines[index].text for index in sorted(unmatched))
+        gone = tuple(self._lines[index] for index in sorted(unmatched))
         self._lines = tuple(next_lines)
         return DiffResult(
             tuple(diff_lines),
             disappeared,
             sum(item.streak >= 2 for item in next_lines),
             False,
+            gone,
         )
 
 

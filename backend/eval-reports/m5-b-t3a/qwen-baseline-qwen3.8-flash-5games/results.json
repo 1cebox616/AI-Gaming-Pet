@@ -1,0 +1,330 @@
+{
+  "started_at": "2026-09-01T13:17:24.241608+00:00",
+  "finished_at": "2026-09-01T13:18:56.757652+00:00",
+  "model": "qwen/qwen3.8-flash",
+  "provider": null,
+  "temperature": 0.0,
+  "max_tokens": 8000,
+  "reasoning_effort": "minimal",
+  "web_search_parameters": {
+    "engine": "exa",
+    "max_results": 5,
+    "max_total_results": 5
+  },
+  "provider_options": {
+    "sort": "throughput",
+    "require_parameters": true
+  },
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "game_knowledge_context",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "genre",
+          "perspective",
+          "game_overview",
+          "gameplay",
+          "background",
+          "default_pc_keybinds"
+        ],
+        "properties": {
+          "genre": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "perspective": {
+            "type": "string",
+            "minLength": 1
+          },
+          "game_overview": {
+            "type": "string",
+            "minLength": 1
+          },
+          "gameplay": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "player_goal",
+              "core_loop",
+              "major_systems",
+              "modes_and_structure"
+            ],
+            "properties": {
+              "player_goal": {
+                "type": "string",
+                "minLength": 1
+              },
+              "core_loop": {
+                "type": "string",
+                "minLength": 1
+              },
+              "major_systems": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 10,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "description"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              },
+              "modes_and_structure": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "background": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "setting_and_premise",
+              "release_and_service_status"
+            ],
+            "properties": {
+              "setting_and_premise": {
+                "type": "string",
+                "minLength": 1
+              },
+              "release_and_service_status": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "default_pc_keybinds": {
+            "type": "object",
+            "maxProperties": 40,
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash))(?:\\+(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash)))*$"
+            }
+          }
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "id": "response-healing"
+    }
+  ],
+  "timeout_seconds": 45.0,
+  "latency_target_seconds": 10.0,
+  "pilot_game_ids": [
+    "cyberpunk-2077",
+    "counter-strike-2",
+    "stardew-valley",
+    "hearthstone",
+    "terraria"
+  ],
+  "game_suite": "qwen-baseline",
+  "attempts": [
+    {
+      "game_id": "cyberpunk-2077",
+      "game_name": "Cyberpunk 2077",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "qwen/qwen3.8-flash",
+      "requested_provider": null,
+      "response_text": "",
+      "parsed_answer": null,
+      "format_error": "输出因 length 截断，无法形成完整合同 JSON",
+      "latency_seconds": 86.4378339999821,
+      "prompt_tokens": 6416,
+      "completion_tokens": 8483,
+      "reasoning_tokens": 8293,
+      "cost_usd": 0.011743586,
+      "actual_model": "qwen/qwen3.8-flash",
+      "actual_provider": "OpenAI",
+      "finish_reason": "length",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "counter-strike-2",
+      "game_name": "Counter-Strike 2",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "qwen/qwen3.8-flash",
+      "requested_provider": null,
+      "response_text": "",
+      "parsed_answer": null,
+      "format_error": null,
+      "latency_seconds": 6.049469999998109,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "reasoning_tokens": null,
+      "cost_usd": null,
+      "actual_model": null,
+      "actual_provider": null,
+      "finish_reason": null,
+      "error": "OpenRouter请求失败（HTTP 429）：Provider returned error [status=429 provider_code=429 request_id=gen-1788268730-c2Hm2xTmyyn5unbda1Sf request_id_header=x-generation-id occurred_at=2026-09-01T13:18:56.754200+00:00 profile_name=m5-b-t3a-v2:online]",
+      "error_metadata": {
+        "message": "OpenRouter请求失败（HTTP 429）：Provider returned error",
+        "status_code": 429,
+        "error_type": null,
+        "provider_code": 429,
+        "retry_after": null,
+        "retry_after_seconds": null,
+        "request_id": "gen-1788268730-c2Hm2xTmyyn5unbda1Sf",
+        "request_id_header": "x-generation-id",
+        "occurred_at": "2026-09-01T13:18:56.754200+00:00",
+        "provider": null,
+        "profile_name": "m5-b-t3a-v2:online",
+        "latency_seconds": 6.049469999998109,
+        "cooldown_drop": false,
+        "cooldown_remaining_seconds": null
+      },
+      "normalization_actions": []
+    },
+    {
+      "game_id": "stardew-valley",
+      "game_name": "Stardew Valley",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "qwen/qwen3.8-flash",
+      "requested_provider": null,
+      "response_text": "",
+      "parsed_answer": null,
+      "format_error": null,
+      "latency_seconds": null,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "reasoning_tokens": null,
+      "cost_usd": null,
+      "actual_model": null,
+      "actual_provider": null,
+      "finish_reason": null,
+      "error": "模型档位 m5-b-t3a-v2:online 限流冷却中，派发前丢弃请求 [provider_code=429 request_id=gen-1788268730-c2Hm2xTmyyn5unbda1Sf request_id_header=x-generation-id occurred_at=2026-09-01T13:18:56.755260+00:00 profile_name=m5-b-t3a-v2:online cooldown_drop=True cooldown_remaining_seconds=0.998608099995181]",
+      "error_metadata": {
+        "message": "模型档位 m5-b-t3a-v2:online 限流冷却中，派发前丢弃请求",
+        "status_code": null,
+        "error_type": null,
+        "provider_code": 429,
+        "retry_after": null,
+        "retry_after_seconds": null,
+        "request_id": "gen-1788268730-c2Hm2xTmyyn5unbda1Sf",
+        "request_id_header": "x-generation-id",
+        "occurred_at": "2026-09-01T13:18:56.755260+00:00",
+        "provider": null,
+        "profile_name": "m5-b-t3a-v2:online",
+        "latency_seconds": null,
+        "cooldown_drop": true,
+        "cooldown_remaining_seconds": 0.998608099995181
+      },
+      "normalization_actions": []
+    },
+    {
+      "game_id": "hearthstone",
+      "game_name": "Hearthstone",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "qwen/qwen3.8-flash",
+      "requested_provider": null,
+      "response_text": "",
+      "parsed_answer": null,
+      "format_error": null,
+      "latency_seconds": null,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "reasoning_tokens": null,
+      "cost_usd": null,
+      "actual_model": null,
+      "actual_provider": null,
+      "finish_reason": null,
+      "error": "模型档位 m5-b-t3a-v2:online 限流冷却中，派发前丢弃请求 [provider_code=429 request_id=gen-1788268730-c2Hm2xTmyyn5unbda1Sf request_id_header=x-generation-id occurred_at=2026-09-01T13:18:56.756307+00:00 profile_name=m5-b-t3a-v2:online cooldown_drop=True cooldown_remaining_seconds=0.9978573000116739]",
+      "error_metadata": {
+        "message": "模型档位 m5-b-t3a-v2:online 限流冷却中，派发前丢弃请求",
+        "status_code": null,
+        "error_type": null,
+        "provider_code": 429,
+        "retry_after": null,
+        "retry_after_seconds": null,
+        "request_id": "gen-1788268730-c2Hm2xTmyyn5unbda1Sf",
+        "request_id_header": "x-generation-id",
+        "occurred_at": "2026-09-01T13:18:56.756307+00:00",
+        "provider": null,
+        "profile_name": "m5-b-t3a-v2:online",
+        "latency_seconds": null,
+        "cooldown_drop": true,
+        "cooldown_remaining_seconds": 0.9978573000116739
+      },
+      "normalization_actions": []
+    },
+    {
+      "game_id": "terraria",
+      "game_name": "Terraria",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "qwen/qwen3.8-flash",
+      "requested_provider": null,
+      "response_text": "",
+      "parsed_answer": null,
+      "format_error": null,
+      "latency_seconds": null,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "reasoning_tokens": null,
+      "cost_usd": null,
+      "actual_model": null,
+      "actual_provider": null,
+      "finish_reason": null,
+      "error": "模型档位 m5-b-t3a-v2:online 限流冷却中，派发前丢弃请求 [provider_code=429 request_id=gen-1788268730-c2Hm2xTmyyn5unbda1Sf request_id_header=x-generation-id occurred_at=2026-09-01T13:18:56.757652+00:00 profile_name=m5-b-t3a-v2:online cooldown_drop=True cooldown_remaining_seconds=0.9971279999881517]",
+      "error_metadata": {
+        "message": "模型档位 m5-b-t3a-v2:online 限流冷却中，派发前丢弃请求",
+        "status_code": null,
+        "error_type": null,
+        "provider_code": 429,
+        "retry_after": null,
+        "retry_after_seconds": null,
+        "request_id": "gen-1788268730-c2Hm2xTmyyn5unbda1Sf",
+        "request_id_header": "x-generation-id",
+        "occurred_at": "2026-09-01T13:18:56.757652+00:00",
+        "provider": null,
+        "profile_name": "m5-b-t3a-v2:online",
+        "latency_seconds": null,
+        "cooldown_drop": true,
+        "cooldown_remaining_seconds": 0.9971279999881517
+      },
+      "normalization_actions": []
+    }
+  ],
+  "dispatch_stats": [
+    {
+      "profile_name": "m5-b-t3a-v2:online",
+      "rate_limit_count": 1,
+      "cooldown_seconds": 1.0,
+      "cooldown_drop_count": 3,
+      "cooling_down": true,
+      "cooldown_remaining_seconds": 0.9961910000129137
+    }
+  ]
+}

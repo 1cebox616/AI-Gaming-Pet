@@ -1,0 +1,517 @@
+{
+  "started_at": "2026-09-01T04:15:28.723781+00:00",
+  "finished_at": "2026-09-01T04:15:49.660224+00:00",
+  "model": "google/gemini-3.1-flash-lite",
+  "provider": null,
+  "temperature": 0.0,
+  "max_tokens": 8000,
+  "reasoning_effort": "minimal",
+  "web_search_parameters": {
+    "engine": "exa",
+    "max_results": 5,
+    "max_total_results": 5
+  },
+  "provider_options": {
+    "sort": "throughput",
+    "require_parameters": true
+  },
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "game_knowledge_context",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "genre",
+          "perspective",
+          "game_overview",
+          "gameplay",
+          "background",
+          "default_pc_keybinds"
+        ],
+        "properties": {
+          "genre": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "perspective": {
+            "type": "string",
+            "minLength": 1
+          },
+          "game_overview": {
+            "type": "string",
+            "minLength": 1
+          },
+          "gameplay": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "player_goal",
+              "core_loop",
+              "major_systems",
+              "modes_and_structure"
+            ],
+            "properties": {
+              "player_goal": {
+                "type": "string",
+                "minLength": 1
+              },
+              "core_loop": {
+                "type": "string",
+                "minLength": 1
+              },
+              "major_systems": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 10,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "description"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              },
+              "modes_and_structure": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "background": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "setting_and_premise",
+              "release_and_service_status"
+            ],
+            "properties": {
+              "setting_and_premise": {
+                "type": "string",
+                "minLength": 1
+              },
+              "release_and_service_status": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "default_pc_keybinds": {
+            "type": "object",
+            "maxProperties": 40,
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash))(?:\\+(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash)))*$"
+            }
+          }
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "id": "response-healing"
+    }
+  ],
+  "timeout_seconds": 45.0,
+  "latency_target_seconds": 10.0,
+  "pilot_game_ids": [
+    "overwatch-2",
+    "rainbow-six-siege",
+    "genshin-impact",
+    "kingdom-come-deliverance-2",
+    "black-myth-wukong"
+  ],
+  "game_suite": "initial",
+  "attempts": [
+    {
+      "game_id": "overwatch-2",
+      "game_name": "Overwatch 2",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.1-flash-lite",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"第一人称射击\",\"团队竞技\"],\"perspective\":\"第一人称视角，部分角色技能或特定状态下会切换至第三人称视角\",\"game_overview\":\"《守望先锋 2》是一款以团队为核心的 5v5 第一人称射击游戏。玩家扮演来自不同阵营、拥有独特能力与定位的“英雄”，在多样化的地图中通过协作完成目标。游戏强调英雄技能的组合运用、战术配合以及对地图空间的控制。与传统射击游戏不同，本作通过英雄的“坦克”、“输出”和“支援”三种职责划分，要求玩家在快节奏的战斗中根据敌方阵容实时调整策略，是典型的英雄射击类竞技游戏。\",\"gameplay\":{\"player_goal\":\"在限定时间内通过占领目标点、护送运载目标或在控制区域内积累进度，以达成胜利条件，同时通过击败对手获取优势。\",\"core_loop\":\"在匹配队列中选择英雄并确认职责，进入地图后与队友协同推进或防守，通过使用武器与技能进行战斗以获取击杀或完成目标，在死亡后于重生点复活并重返战场，直至比赛结束并根据表现获得经验值与进度奖励。\",\"major_systems\":[{\"name\":\"职责系统\",\"description\":\"玩家需在坦克、输出、支援三种职责中选择其一，不同职责拥有特定的生命值加成或被动效果，决定了玩家在团队中的核心任务。\"},{\"name\":\"英雄技能系统\",\"description\":\"每位英雄拥有独特的被动技能、主动技能及终极技能，技能冷却与充能机制是战斗决策的核心。\"},{\"name\":\"终极技能系统\",\"description\":\"通过造成伤害、治疗或完成目标积累能量，能量满额后可释放改变战局的强力技能。\"},{\"name\":\"地图目标机制\",\"description\":\"不同模式下存在占领点、运载目标或控制区域，玩家必须围绕这些目标点进行空间争夺。\"},{\"name\":\"实时换人系统\",\"description\":\"玩家可在比赛过程中随时更换英雄，以应对敌方阵容的克制关系或战术变化。\"},{\"name\":\"战术标记系统\",\"description\":\"允许玩家在地图上标记敌人、目标或请求支援，以辅助团队沟通。\"}],\"modes_and_structure\":\"游戏采用基于匹配的在线多人对战结构，包含快速比赛、竞技比赛、街机先锋及自定义游戏等模式，通常以 5v5 的形式进行对抗。\"},\"background\":{\"setting_and_premise\":\"游戏设定在近未来的地球，世界在经历了一场全球性的机器人危机后，由名为“守望先锋”的组织维护和平。玩家所扮演的英雄来自世界各地，拥有不同的文化背景与科技能力。\",\"release_and_service_status\":\"游戏采用免费游玩模式，处于持续运营状态，定期更新赛季内容、新英雄及地图。\"},\"default_pc_keybinds\":{\"前进\":\"W\",\"后退\":\"S\",\"向左平移\":\"A\",\"向右平移\":\"D\",\"跳跃\":\"Space\",\"蹲下\":\"LeftCtrl\",\"主要攻击\":\"MouseLeft\",\"次要攻击\":\"MouseRight\",\"技能1\":\"Shift\",\"技能2\":\"E\",\"终极技能\":\"Q\",\"装填弹药\":\"R\",\"近战攻击\":\"V\",\"互动\":\"F\",\"快捷物品栏1\":\"1\",\"快捷物品栏2\":\"2\",\"快捷物品栏3\":\"3\",\"快捷物品栏4\":\"4\",\"标记\":\"MouseMiddle\"}}",
+      "parsed_answer": null,
+      "format_error": "default_pc_keybinds['技能1'] 不是单一规范化 PC 输入：'Shift'",
+      "latency_seconds": 4.685682100011036,
+      "prompt_tokens": 1295,
+      "completion_tokens": 882,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00164675,
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "rainbow-six-siege",
+      "game_name": "Tom Clancy's Rainbow Six Siege",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.1-flash-lite",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"战术射击\",\"第一人称射击\",\"多人竞技\"],\"perspective\":\"第一人称视角；在观察工具（如无人机、摄像头）使用时切换为特定设备视角\",\"game_overview\":\"《彩虹六号：围攻》是一款以团队合作为核心的战术竞技射击游戏。玩家扮演“彩虹”小队中的干员，在室内近距离作战环境中进行攻防对抗。游戏强调环境破坏、战术规划与角色技能的深度结合。与传统射击游戏不同，本作极度依赖对地图结构的破坏与加固，以及通过侦察获取信息来制定进攻或防守策略，而非单纯的枪法比拼。\",\"gameplay\":{\"player_goal\":\"在进攻方与防守方的对抗中，通过完成特定目标（如拆除炸弹、营救人质、占领区域）或歼灭敌方全员来赢得回合胜利。\",\"core_loop\":\"准备阶段：进攻方使用无人机侦察目标与敌方位置，防守方加固墙体并布置陷阱；行动阶段：进攻方渗透建筑并尝试达成目标，防守方利用防御工事阻击；结算阶段：根据胜负获得资源，用于解锁干员或购买外观，随后进入下一轮匹配。\",\"major_systems\":[{\"name\":\"干员系统\",\"description\":\"每位干员拥有独特的专属装备与技能，分为进攻方与防守方，玩家需根据地图与战术需求进行选择。\"},{\"name\":\"环境破坏系统\",\"description\":\"墙体、地板、天花板等大部分建筑结构可被炸药、子弹或近战破坏，创造新的射击视线或移动路径。\"},{\"name\":\"加固系统\",\"description\":\"防守方可使用加固板封锁墙体或舱门，防止进攻方破坏，是防御策略的核心。\"},{\"name\":\"侦察与反侦察\",\"description\":\"进攻方利用无人机，防守方利用监控摄像头，双方通过获取敌方位置信息来决定战术行动。\"},{\"name\":\"垂直作战\",\"description\":\"通过破坏地板或天花板，玩家可以在不同楼层间进行攻击或防守，改变传统平面作战逻辑。\"}],\"modes_and_structure\":\"游戏以多人在线竞技为主，包含排位赛、快速匹配等模式，每局比赛由多个回合组成，攻守双方在回合间进行角色互换。\"},\"background\":{\"setting_and_premise\":\"游戏设定在现代反恐背景下，全球顶尖特种部队成员被召集至“彩虹”小队，针对高风险恐怖威胁进行模拟演练与实战。\",\"release_and_service_status\":\"由育碧（Ubisoft）开发并运营，于2015年正式发售，目前处于持续长线运营状态，定期更新赛季内容与干员。\"},\"default_pc_keybinds\":{\"前进\":\"W\",\"后退\":\"S\",\"向左平移\":\"A\",\"向右平移\":\"D\",\"跳跃\":\"Space\",\"蹲下\":\"LeftCtrl\",\"趴下\":\"LeftAlt\",\"冲刺\":\"LeftShift\",\"射击\":\"MouseLeft\",\"瞄准\":\"MouseRight\",\"装弹\":\"R\",\"近战攻击\":\"V\",\"使用技能\":\"MouseMiddle\",\"互动\":\"F\",\"放置/部署\":\"G\",\"切换观察工具\":\"6\",\"快捷物品栏1\":\"4\",\"快捷物品栏2\":\"5\",\"标记\":\"Z\",\"语音聊天\":\"U\"}}",
+      "parsed_answer": {
+        "genre": [
+          "战术射击",
+          "第一人称射击",
+          "多人竞技"
+        ],
+        "perspective": "第一人称视角；在观察工具（如无人机、摄像头）使用时切换为特定设备视角",
+        "game_overview": "《彩虹六号：围攻》是一款以团队合作为核心的战术竞技射击游戏。玩家扮演“彩虹”小队中的干员，在室内近距离作战环境中进行攻防对抗。游戏强调环境破坏、战术规划与角色技能的深度结合。与传统射击游戏不同，本作极度依赖对地图结构的破坏与加固，以及通过侦察获取信息来制定进攻或防守策略，而非单纯的枪法比拼。",
+        "gameplay": {
+          "player_goal": "在进攻方与防守方的对抗中，通过完成特定目标（如拆除炸弹、营救人质、占领区域）或歼灭敌方全员来赢得回合胜利。",
+          "core_loop": "准备阶段：进攻方使用无人机侦察目标与敌方位置，防守方加固墙体并布置陷阱；行动阶段：进攻方渗透建筑并尝试达成目标，防守方利用防御工事阻击；结算阶段：根据胜负获得资源，用于解锁干员或购买外观，随后进入下一轮匹配。",
+          "major_systems": [
+            {
+              "name": "干员系统",
+              "description": "每位干员拥有独特的专属装备与技能，分为进攻方与防守方，玩家需根据地图与战术需求进行选择。"
+            },
+            {
+              "name": "环境破坏系统",
+              "description": "墙体、地板、天花板等大部分建筑结构可被炸药、子弹或近战破坏，创造新的射击视线或移动路径。"
+            },
+            {
+              "name": "加固系统",
+              "description": "防守方可使用加固板封锁墙体或舱门，防止进攻方破坏，是防御策略的核心。"
+            },
+            {
+              "name": "侦察与反侦察",
+              "description": "进攻方利用无人机，防守方利用监控摄像头，双方通过获取敌方位置信息来决定战术行动。"
+            },
+            {
+              "name": "垂直作战",
+              "description": "通过破坏地板或天花板，玩家可以在不同楼层间进行攻击或防守，改变传统平面作战逻辑。"
+            }
+          ],
+          "modes_and_structure": "游戏以多人在线竞技为主，包含排位赛、快速匹配等模式，每局比赛由多个回合组成，攻守双方在回合间进行角色互换。"
+        },
+        "background": {
+          "setting_and_premise": "游戏设定在现代反恐背景下，全球顶尖特种部队成员被召集至“彩虹”小队，针对高风险恐怖威胁进行模拟演练与实战。",
+          "release_and_service_status": "由育碧（Ubisoft）开发并运营，于2015年正式发售，目前处于持续长线运营状态，定期更新赛季内容与干员。"
+        },
+        "default_pc_keybinds": {
+          "前进": "W",
+          "后退": "S",
+          "向左平移": "A",
+          "向右平移": "D",
+          "跳跃": "Space",
+          "蹲下": "LeftCtrl",
+          "趴下": "LeftAlt",
+          "冲刺": "LeftShift",
+          "射击": "MouseLeft",
+          "瞄准": "MouseRight",
+          "装弹": "R",
+          "近战攻击": "V",
+          "使用技能": "MouseMiddle",
+          "互动": "F",
+          "放置/部署": "G",
+          "切换观察工具": "6",
+          "快捷物品栏1": "4",
+          "快捷物品栏2": "5",
+          "标记": "Z",
+          "语音聊天": "U"
+        }
+      },
+      "format_error": null,
+      "latency_seconds": 4.055661299993517,
+      "prompt_tokens": 1298,
+      "completion_tokens": 873,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.001634,
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "genshin-impact",
+      "game_name": "Genshin Impact",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.1-flash-lite",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"开放世界\",\"动作角色扮演\"],\"perspective\":\"第三人称视角，玩家可在战斗与探索中实时切换控制的角色\",\"game_overview\":\"《原神》是一款由米哈游开发的开放世界动作角色扮演游戏。玩家扮演一名被称为“旅行者”的异世界旅人，在名为“提瓦特”的广阔幻想世界中展开冒险。游戏支持单人游玩与最多四人的联机合作，核心特色在于基于七种自然元素交互的战斗系统，以及通过攀爬、滑翔、游泳等方式自由探索无缝地图的开放世界体验。\",\"gameplay\":{\"player_goal\":\"玩家通过探索世界、完成任务、挑战秘境与强敌，获取资源以提升角色等级、武器强度、圣遗物属性及天赋能力，从而应对更高难度的挑战。\",\"core_loop\":\"玩家在开放世界中进行探索与收集资源，通过消耗体力（原粹树脂）挑战秘境或首领获取养成材料，利用材料强化角色与装备，进而提升队伍战斗力以挑战更高级的区域与内容。\",\"major_systems\":[{\"name\":\"元素系统\",\"description\":\"游戏内存在七种元素，不同元素接触会产生反应（如火与水产生蒸发），玩家需通过切换队伍中的角色来触发元素反应以最大化伤害或控制效果。\"},{\"name\":\"角色切换系统\",\"description\":\"玩家可预设四人队伍，在战斗中通过按键实时切换当前操控角色，以衔接技能与元素反应。\"},{\"name\":\"体力系统\",\"description\":\"攀爬、冲刺、滑翔与游泳均消耗体力值，体力耗尽会导致角色坠落或无法行动，玩家需通过收集特定地图道具提升体力上限。\"},{\"name\":\"祈愿系统\",\"description\":\"通过消耗特定货币获取新角色或武器的随机抽取系统，是获取高稀有度角色与装备的主要途径。\"},{\"name\":\"圣遗物系统\",\"description\":\"为角色装备不同部位的圣遗物以提供属性加成与套装效果，是角色养成中决定属性倾向的核心环节。\"},{\"name\":\"世界等级系统\",\"description\":\"随着玩家冒险等级提升，世界等级会随之提高，从而提升敌人的强度与掉落奖励的质量。\"}],\"modes_and_structure\":\"游戏采用持续更新的开放世界结构，主线剧情与探索内容为单人体验，达到特定等级后可开启联机模式，允许其他玩家进入世界进行协作挑战。\"},\"background\":{\"setting_and_premise\":\"故事发生在一个名为“提瓦特”的幻想世界，这里由七位神明分别统治，每位神明代表一种元素。玩家作为旅行者，在寻找失散亲人的过程中，逐步揭开这个世界的真相。\",\"release_and_service_status\":\"游戏于2020年9月正式上线，目前处于持续长线运营状态，定期进行版本更新以增加新区域、角色与剧情。\"},\"default_pc_keybinds\":{\"前进\":\"W\",\"后退\":\"S\",\"向左平移\":\"A\",\"向右平移\":\"D\",\"跳跃\":\"Space\",\"冲刺\":\"LeftShift\",\"行走\":\"LeftCtrl\",\"普通攻击\":\"MouseLeft\",\"元素战技\":\"E\",\"元素爆发\":\"Q\",\"切换角色1\":\"1\",\"切换角色2\":\"2\",\"切换角色3\":\"3\",\"切换角色4\":\"4\",\"打开背包\":\"B\",\"打开地图\":\"M\",\"交互\":\"F\",\"拾取\":\"F\",\"呼出菜单\":\"Escape\"}}",
+      "parsed_answer": {
+        "genre": [
+          "开放世界",
+          "动作角色扮演"
+        ],
+        "perspective": "第三人称视角，玩家可在战斗与探索中实时切换控制的角色",
+        "game_overview": "《原神》是一款由米哈游开发的开放世界动作角色扮演游戏。玩家扮演一名被称为“旅行者”的异世界旅人，在名为“提瓦特”的广阔幻想世界中展开冒险。游戏支持单人游玩与最多四人的联机合作，核心特色在于基于七种自然元素交互的战斗系统，以及通过攀爬、滑翔、游泳等方式自由探索无缝地图的开放世界体验。",
+        "gameplay": {
+          "player_goal": "玩家通过探索世界、完成任务、挑战秘境与强敌，获取资源以提升角色等级、武器强度、圣遗物属性及天赋能力，从而应对更高难度的挑战。",
+          "core_loop": "玩家在开放世界中进行探索与收集资源，通过消耗体力（原粹树脂）挑战秘境或首领获取养成材料，利用材料强化角色与装备，进而提升队伍战斗力以挑战更高级的区域与内容。",
+          "major_systems": [
+            {
+              "name": "元素系统",
+              "description": "游戏内存在七种元素，不同元素接触会产生反应（如火与水产生蒸发），玩家需通过切换队伍中的角色来触发元素反应以最大化伤害或控制效果。"
+            },
+            {
+              "name": "角色切换系统",
+              "description": "玩家可预设四人队伍，在战斗中通过按键实时切换当前操控角色，以衔接技能与元素反应。"
+            },
+            {
+              "name": "体力系统",
+              "description": "攀爬、冲刺、滑翔与游泳均消耗体力值，体力耗尽会导致角色坠落或无法行动，玩家需通过收集特定地图道具提升体力上限。"
+            },
+            {
+              "name": "祈愿系统",
+              "description": "通过消耗特定货币获取新角色或武器的随机抽取系统，是获取高稀有度角色与装备的主要途径。"
+            },
+            {
+              "name": "圣遗物系统",
+              "description": "为角色装备不同部位的圣遗物以提供属性加成与套装效果，是角色养成中决定属性倾向的核心环节。"
+            },
+            {
+              "name": "世界等级系统",
+              "description": "随着玩家冒险等级提升，世界等级会随之提高，从而提升敌人的强度与掉落奖励的质量。"
+            }
+          ],
+          "modes_and_structure": "游戏采用持续更新的开放世界结构，主线剧情与探索内容为单人体验，达到特定等级后可开启联机模式，允许其他玩家进入世界进行协作挑战。"
+        },
+        "background": {
+          "setting_and_premise": "故事发生在一个名为“提瓦特”的幻想世界，这里由七位神明分别统治，每位神明代表一种元素。玩家作为旅行者，在寻找失散亲人的过程中，逐步揭开这个世界的真相。",
+          "release_and_service_status": "游戏于2020年9月正式上线，目前处于持续长线运营状态，定期进行版本更新以增加新区域、角色与剧情。"
+        },
+        "default_pc_keybinds": {
+          "前进": "W",
+          "后退": "S",
+          "向左平移": "A",
+          "向右平移": "D",
+          "跳跃": "Space",
+          "冲刺": "LeftShift",
+          "行走": "LeftCtrl",
+          "普通攻击": "MouseLeft",
+          "元素战技": "E",
+          "元素爆发": "Q",
+          "切换角色1": "1",
+          "切换角色2": "2",
+          "切换角色3": "3",
+          "切换角色4": "4",
+          "打开背包": "B",
+          "打开地图": "M",
+          "交互": "F",
+          "拾取": "F",
+          "呼出菜单": "Escape"
+        }
+      },
+      "format_error": null,
+      "latency_seconds": 4.190998899983242,
+      "prompt_tokens": 1295,
+      "completion_tokens": 922,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00170675,
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "kingdom-come-deliverance-2",
+      "game_name": "Kingdom Come: Deliverance II",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.1-flash-lite",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"动作角色扮演\",\"开放世界\",\"历史模拟\"],\"perspective\":\"第一人称视角\",\"game_overview\":\"《天国：拯救 II》是一款设定在 15 世纪波希米亚王国的写实风格动作角色扮演游戏。玩家扮演亨利（Henry），一名铁匠之子，在动荡的内战与政治阴谋中寻求复仇与正义。游戏强调历史真实性，摒弃了奇幻元素，通过复杂的物理模拟、基于真实历史的战斗系统以及动态的社会互动，为玩家提供沉浸式的中世纪生活体验。其核心特征在于对角色成长、装备维护及社会地位的深度模拟，玩家的每一个选择都会影响世界对亨利的态度。\",\"gameplay\":{\"player_goal\":\"通过完成任务、提升技能与积累财富，在波希米亚的社会阶层中立足，并推进亨利的个人复仇目标。\",\"core_loop\":\"玩家在开放世界中接受任务或探索，通过对话、潜行或战斗解决问题，获取经验值与装备以提升能力，随后利用增强的能力应对更复杂的社会挑战或高难度战斗，并持续维护装备与身体状态。\",\"major_systems\":[{\"name\":\"写实战斗系统\",\"description\":\"基于物理引擎的剑术与格斗系统，强调攻击方向、格挡时机、耐力管理以及武器与护甲的克制关系。\"},{\"name\":\"生存与状态系统\",\"description\":\"玩家需要管理饥饿、疲劳与卫生值，这些状态会直接影响角色的行动能力、社交互动及NPC的反应。\"},{\"name\":\"声望与社交系统\",\"description\":\"玩家的行为会影响在不同城镇与阶层中的声望，进而改变NPC的对话选项、商品价格及任务获取途径。\"},{\"name\":\"技能成长系统\",\"description\":\"技能通过反复实践（如阅读、练习剑术、炼金）而非单纯分配点数来提升，体现了“熟能生巧”的逻辑。\"},{\"name\":\"装备维护系统\",\"description\":\"武器与护甲会随使用磨损，玩家必须定期进行修理或寻找工匠，否则装备性能会大幅下降。\"},{\"name\":\"炼金与制造系统\",\"description\":\"通过手动操作炼金台制作药剂，或在特定工作台进行物品制造，过程需要精确的步骤与材料配比。\"}],\"modes_and_structure\":\"单人开放世界结构，玩家可在广阔的波希米亚地图中自由探索，通过主线任务推进剧情，并随时处理大量的支线任务与随机事件。\"},\"background\":{\"setting_and_premise\":\"游戏背景设定在 1403 年的波希米亚（现捷克共和国境内），正值神圣罗马帝国皇位继承危机引发的内战时期。玩家置身于一个充满政治动荡、宗教冲突与中世纪生活细节的写实世界，没有任何魔法或超自然元素。\",\"release_and_service_status\":\"由 Warhorse Studios 开发，预计于 2025 年发售，目前处于发售前宣传阶段。\"},\"default_pc_keybinds\":{\"前进\":\"W\",\"后退\":\"S\",\"向左平移\":\"A\",\"向右平移\":\"D\",\"跳跃\":\"Space\",\"蹲伏\":\"LeftCtrl\",\"冲刺\":\"LeftShift\",\"互动\":\"E\",\"攻击\":\"MouseLeft\",\"格挡\":\"MouseRight\",\"快捷物品栏1\":\"1\",\"快捷物品栏2\":\"2\",\"快捷物品栏3\":\"3\",\"快捷物品栏4\":\"4\",\"地图\":\"M\",\"物品栏\":\"I\",\"任务日志\":\"J\",\"菜单\":\"Escape\"}}",
+      "parsed_answer": {
+        "genre": [
+          "动作角色扮演",
+          "开放世界",
+          "历史模拟"
+        ],
+        "perspective": "第一人称视角",
+        "game_overview": "《天国：拯救 II》是一款设定在 15 世纪波希米亚王国的写实风格动作角色扮演游戏。玩家扮演亨利（Henry），一名铁匠之子，在动荡的内战与政治阴谋中寻求复仇与正义。游戏强调历史真实性，摒弃了奇幻元素，通过复杂的物理模拟、基于真实历史的战斗系统以及动态的社会互动，为玩家提供沉浸式的中世纪生活体验。其核心特征在于对角色成长、装备维护及社会地位的深度模拟，玩家的每一个选择都会影响世界对亨利的态度。",
+        "gameplay": {
+          "player_goal": "通过完成任务、提升技能与积累财富，在波希米亚的社会阶层中立足，并推进亨利的个人复仇目标。",
+          "core_loop": "玩家在开放世界中接受任务或探索，通过对话、潜行或战斗解决问题，获取经验值与装备以提升能力，随后利用增强的能力应对更复杂的社会挑战或高难度战斗，并持续维护装备与身体状态。",
+          "major_systems": [
+            {
+              "name": "写实战斗系统",
+              "description": "基于物理引擎的剑术与格斗系统，强调攻击方向、格挡时机、耐力管理以及武器与护甲的克制关系。"
+            },
+            {
+              "name": "生存与状态系统",
+              "description": "玩家需要管理饥饿、疲劳与卫生值，这些状态会直接影响角色的行动能力、社交互动及NPC的反应。"
+            },
+            {
+              "name": "声望与社交系统",
+              "description": "玩家的行为会影响在不同城镇与阶层中的声望，进而改变NPC的对话选项、商品价格及任务获取途径。"
+            },
+            {
+              "name": "技能成长系统",
+              "description": "技能通过反复实践（如阅读、练习剑术、炼金）而非单纯分配点数来提升，体现了“熟能生巧”的逻辑。"
+            },
+            {
+              "name": "装备维护系统",
+              "description": "武器与护甲会随使用磨损，玩家必须定期进行修理或寻找工匠，否则装备性能会大幅下降。"
+            },
+            {
+              "name": "炼金与制造系统",
+              "description": "通过手动操作炼金台制作药剂，或在特定工作台进行物品制造，过程需要精确的步骤与材料配比。"
+            }
+          ],
+          "modes_and_structure": "单人开放世界结构，玩家可在广阔的波希米亚地图中自由探索，通过主线任务推进剧情，并随时处理大量的支线任务与随机事件。"
+        },
+        "background": {
+          "setting_and_premise": "游戏背景设定在 1403 年的波希米亚（现捷克共和国境内），正值神圣罗马帝国皇位继承危机引发的内战时期。玩家置身于一个充满政治动荡、宗教冲突与中世纪生活细节的写实世界，没有任何魔法或超自然元素。",
+          "release_and_service_status": "由 Warhorse Studios 开发，预计于 2025 年发售，目前处于发售前宣传阶段。"
+        },
+        "default_pc_keybinds": {
+          "前进": "W",
+          "后退": "S",
+          "向左平移": "A",
+          "向右平移": "D",
+          "跳跃": "Space",
+          "蹲伏": "LeftCtrl",
+          "冲刺": "LeftShift",
+          "互动": "E",
+          "攻击": "MouseLeft",
+          "格挡": "MouseRight",
+          "快捷物品栏1": "1",
+          "快捷物品栏2": "2",
+          "快捷物品栏3": "3",
+          "快捷物品栏4": "4",
+          "地图": "M",
+          "物品栏": "I",
+          "任务日志": "J",
+          "菜单": "Escape"
+        }
+      },
+      "format_error": null,
+      "latency_seconds": 4.035066500015091,
+      "prompt_tokens": 1297,
+      "completion_tokens": 901,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00167575,
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "black-myth-wukong",
+      "game_name": "Black Myth: Wukong",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.1-flash-lite",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"动作角色扮演\",\"魂类\"],\"perspective\":\"第三人称越肩视角\",\"game_overview\":\"《黑神话：悟空》是一款以中国神话为背景的动作角色扮演游戏。玩家扮演一位被称为“天命人”的行者，为了探寻昔日传说的真相，踏上一条充满危险与惊奇的西游之路。游戏强调高难度的动作战斗体验，玩家需要通过精湛的操作与策略，挑战形态各异的妖王与神将。其核心特征在于丰富的法术系统、多样的变身机制以及基于中国古典文学构建的宏大世界观。\",\"gameplay\":{\"player_goal\":\"通过击败强敌获取经验值与资源，提升自身能力，解锁新的法术与装备，最终完成西游旅程。\",\"core_loop\":\"在关卡中探索并遭遇敌人，通过战斗获取资源与经验，在土地庙进行休整与能力强化，挑战区域首领以推进进程，并利用获得的奖励进一步提升角色强度。\",\"major_systems\":[{\"name\":\"棍法系统\",\"description\":\"提供劈、立、戳三种棍法架势，每种架势拥有不同的攻击动作与策略，玩家可根据战斗需求实时切换。\"},{\"name\":\"法术系统\",\"description\":\"包含定身、聚形散气等多种法术，消耗法力值使用，用于控制敌人、规避伤害或创造输出窗口。\"},{\"name\":\"变身系统\",\"description\":\"玩家可化身为击败过的特定妖物，获得其独特的战斗能力与生命值，在关键时刻改变战局。\"},{\"name\":\"根器与修行\",\"description\":\"通过消耗灵蕴提升角色的基础属性与技能树，决定角色的成长方向与战斗风格。\"},{\"name\":\"土地庙系统\",\"description\":\"作为存档点与补给站，玩家在此进行角色升级、装备制作、法术配置及快速旅行。\"},{\"name\":\"装备与炼丹\",\"description\":\"通过收集材料制作武器与防具，并利用丹药在战斗中提供临时的属性增益或恢复效果。\"}],\"modes_and_structure\":\"单人动作冒险结构，游戏通过线性关卡与半开放区域交替组织，玩家在不同章节中探索并挑战各区域的守关首领。\"},\"background\":{\"setting_and_premise\":\"游戏基于中国古典名著《西游记》进行再创作，设定在一个神魔共存的奇幻世界。故事发生在取经成功多年后，玩家将深入探寻那些被掩盖在神话背后的真相。\",\"release_and_service_status\":\"已于2024年8月20日正式发售，目前处于正式运营状态。\"},\"default_pc_keybinds\":{\"前进\":\"W\",\"后退\":\"S\",\"向左平移\":\"A\",\"向右平移\":\"D\",\"跳跃\":\"Space\",\"轻棍攻击\":\"MouseLeft\",\"重棍攻击\":\"MouseRight\",\"闪避\":\"LeftCtrl\",\"交互\":\"E\",\"使用药品\":\"Q\",\"锁定目标\":\"MouseMiddle\",\"法术菜单\":\"Tab\",\"快捷物品栏1\":\"1\",\"快捷物品栏2\":\"2\",\"快捷物品栏3\":\"3\",\"快捷物品栏4\":\"4\"}}",
+      "parsed_answer": {
+        "genre": [
+          "动作角色扮演",
+          "魂类"
+        ],
+        "perspective": "第三人称越肩视角",
+        "game_overview": "《黑神话：悟空》是一款以中国神话为背景的动作角色扮演游戏。玩家扮演一位被称为“天命人”的行者，为了探寻昔日传说的真相，踏上一条充满危险与惊奇的西游之路。游戏强调高难度的动作战斗体验，玩家需要通过精湛的操作与策略，挑战形态各异的妖王与神将。其核心特征在于丰富的法术系统、多样的变身机制以及基于中国古典文学构建的宏大世界观。",
+        "gameplay": {
+          "player_goal": "通过击败强敌获取经验值与资源，提升自身能力，解锁新的法术与装备，最终完成西游旅程。",
+          "core_loop": "在关卡中探索并遭遇敌人，通过战斗获取资源与经验，在土地庙进行休整与能力强化，挑战区域首领以推进进程，并利用获得的奖励进一步提升角色强度。",
+          "major_systems": [
+            {
+              "name": "棍法系统",
+              "description": "提供劈、立、戳三种棍法架势，每种架势拥有不同的攻击动作与策略，玩家可根据战斗需求实时切换。"
+            },
+            {
+              "name": "法术系统",
+              "description": "包含定身、聚形散气等多种法术，消耗法力值使用，用于控制敌人、规避伤害或创造输出窗口。"
+            },
+            {
+              "name": "变身系统",
+              "description": "玩家可化身为击败过的特定妖物，获得其独特的战斗能力与生命值，在关键时刻改变战局。"
+            },
+            {
+              "name": "根器与修行",
+              "description": "通过消耗灵蕴提升角色的基础属性与技能树，决定角色的成长方向与战斗风格。"
+            },
+            {
+              "name": "土地庙系统",
+              "description": "作为存档点与补给站，玩家在此进行角色升级、装备制作、法术配置及快速旅行。"
+            },
+            {
+              "name": "装备与炼丹",
+              "description": "通过收集材料制作武器与防具，并利用丹药在战斗中提供临时的属性增益或恢复效果。"
+            }
+          ],
+          "modes_and_structure": "单人动作冒险结构，游戏通过线性关卡与半开放区域交替组织，玩家在不同章节中探索并挑战各区域的守关首领。"
+        },
+        "background": {
+          "setting_and_premise": "游戏基于中国古典名著《西游记》进行再创作，设定在一个神魔共存的奇幻世界。故事发生在取经成功多年后，玩家将深入探寻那些被掩盖在神话背后的真相。",
+          "release_and_service_status": "已于2024年8月20日正式发售，目前处于正式运营状态。"
+        },
+        "default_pc_keybinds": {
+          "前进": "W",
+          "后退": "S",
+          "向左平移": "A",
+          "向右平移": "D",
+          "跳跃": "Space",
+          "轻棍攻击": "MouseLeft",
+          "重棍攻击": "MouseRight",
+          "闪避": "LeftCtrl",
+          "交互": "E",
+          "使用药品": "Q",
+          "锁定目标": "MouseMiddle",
+          "法术菜单": "Tab",
+          "快捷物品栏1": "1",
+          "快捷物品栏2": "2",
+          "快捷物品栏3": "3",
+          "快捷物品栏4": "4"
+        }
+      },
+      "format_error": null,
+      "latency_seconds": 3.928720099997008,
+      "prompt_tokens": 1297,
+      "completion_tokens": 835,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.00157675,
+      "actual_model": "google/gemini-3.1-flash-lite",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    }
+  ],
+  "dispatch_stats": [
+    {
+      "profile_name": "m5-b-t3a-v2:online",
+      "rate_limit_count": 0,
+      "cooldown_seconds": 0.0,
+      "cooldown_drop_count": 0,
+      "cooling_down": false,
+      "cooldown_remaining_seconds": 0.0
+    }
+  ]
+}

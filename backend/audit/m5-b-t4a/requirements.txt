@@ -1,0 +1,4 @@
+rapidocr==3.9.2
+onnxruntime==1.29.0
+openvino==2026.0.0
+psutil==7.2.2

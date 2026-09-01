@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pet.core.config import load_config
+from pet.core.config import ConfigError, DEFAULT_CONFIG_PATH, load_config
 
 
 def test_missing_configuration_file_uses_validated_defaults(
@@ -518,3 +518,67 @@ def test_nested_active_game_configuration_and_llm_profile_load(tmp_path: Path) -
     assert configuration.personality.style == "caster"
     assert configuration.llm.profiles["fast"].model == "fast/model"
     assert configuration.llm.profiles["fast"].max_tokens == 64
+
+
+# 锁住 games.<id> 拼错字段被静默丢弃且没有 warning 的故障。
+def test_unknown_game_key_warns_in_lenient_mode_without_discarding_valid_values(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        '[active]\ngame = "generic"\n\n'
+        "[games.generic]\nenabled = true\nsend_width = 1024\n"
+        "send_widht = 2048\n",
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="pet.core.config")
+
+    configuration = load_config(default_path, tmp_path / "missing-local.toml")
+
+    assert configuration.active.game == "generic"
+    assert configuration.active_game.generic.enabled is True
+    assert configuration.active_game.generic.send_width == 1024
+    assert "games.generic.send_widht: 未知配置键" in caplog.text
+
+
+# 锁住严格模式只报首个错误或仍返回默认配置的故障。
+def test_strict_mode_reports_all_configuration_problems_at_once(tmp_path: Path) -> None:
+    default_path = tmp_path / "config.toml"
+    default_path.write_text(
+        "[unknown_top]\nvalue = 1\n\n"
+        "[speech]\nenabeld = false\n\n"
+        "[llm.profiles.probe]\ntemprature = 0.1\n\n"
+        "[games.generic]\nsend_widht = 1280\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as captured:
+        load_config(
+            default_path,
+            tmp_path / "missing-local.toml",
+            strict=True,
+        )
+
+    message = str(captured.value)
+    assert "配置文件存在 4 处问题，严格模式下拒绝加载" in message
+    assert "unknown_top:" in message
+    assert "speech.enabeld: 未知配置键" in message
+    assert "llm.profiles.probe.temprature: 未知配置键" in message
+    assert "games.generic.send_widht: 未知配置键" in message
+
+
+# 锁住仓库默认 config.toml 已含失效字段却未被持续集成发现的故障。
+def test_repository_config_loads_without_problems_in_strict_mode(tmp_path: Path) -> None:
+    configuration = load_config(
+        DEFAULT_CONFIG_PATH,
+        tmp_path / "missing-local.toml",
+        strict=True,
+    )
+
+    assert configuration.active.game in configuration.games
+    naming = configuration.games["generic"].generic.scene.naming
+    assert naming.upload_width == 1920
+    profile = configuration.llm.profiles["scene_fingerprint_verifier"]
+    assert profile.model == "qwen/qwen3.8-flash"
+    assert profile.timeout_seconds == 10.0

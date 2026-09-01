@@ -1,0 +1,138 @@
+{
+  "game_id": "slay-the-spire-2",
+  "display_name": "Slay the Spire 2",
+  "knowledge": {
+    "content": {
+      "genre": [
+        "Roguelike",
+        "卡牌构建游戏"
+      ],
+      "perspective": "2D 静态画面，以侧面视角展示角色与敌人的对峙",
+      "game_overview": "《杀戮尖塔2》是一款结合了卡牌构建与 Roguelike 元素的策略游戏。玩家扮演一名在不断变化的尖塔中向上攀登的冒险者，通过在战斗中获取、移除和升级卡牌来构建独特的战斗套路。游戏的核心在于通过有限的资源管理、随机生成的地图路径以及对敌人行动模式的预判，在每一局游戏中尝试击败尖塔顶端的最终挑战。与前作相比，本作引入了全新的角色、卡牌、遗物以及基于新引擎的视觉表现，强调策略深度与重玩价值。",
+      "gameplay": {
+        "player_goal": "通过构建强大的卡牌组合与遗物搭配，在生命值耗尽前击败尖塔各层的守卫与首领，最终完成登顶。",
+        "core_loop": "在地图节点中选择路径，通过战斗、事件或商店获取资源；在战斗中根据敌人的意图出牌进行防御或攻击；战斗胜利后获得卡牌奖励以优化牌组；在休息点强化卡牌或恢复生命；最终在每一层的终点挑战首领，若失败则重置进度并重新开始。",
+        "major_systems": [
+          {
+            "name": "卡牌构建系统",
+            "description": "玩家通过战斗奖励、商店购买等方式扩充牌组，需平衡进攻、防御与功能性卡牌的比例，以应对不同类型的敌人。"
+          },
+          {
+            "name": "遗物系统",
+            "description": "获取具有被动效果的遗物，这些物品能显著改变战斗机制或提供资源加成，是构建流派的核心支撑。"
+          },
+          {
+            "name": "意图预判系统",
+            "description": "战斗中明确显示敌人的下回合行动（攻击、防御、施加负面状态等），玩家需据此决定本回合的防御策略与输出节奏。"
+          },
+          {
+            "name": "能量管理系统",
+            "description": "每回合拥有固定的能量点数，所有卡牌的使用均需消耗能量，玩家需在有限的能量内最大化回合收益。"
+          },
+          {
+            "name": "随机地图生成",
+            "description": "每一局游戏的路径分支、遭遇的敌人、事件与奖励均随机生成，要求玩家根据当前牌组状态做出最优路径选择。"
+          }
+        ],
+        "modes_and_structure": "单人游戏结构，每一局游戏为一次完整的“爬塔”过程，包含多个层级，每层由随机生成的节点路径组成。"
+      },
+      "background": {
+        "setting_and_premise": "游戏设定在一个充满魔法与危险的尖塔之中，玩家作为挑战者，目标是深入尖塔内部揭开其秘密并战胜阻碍。",
+        "release_and_service_status": "根据官方公开信息，游戏预计于 2025 年发售，目前处于开发阶段。"
+      },
+      "default_pc_keybinds": {
+        "前进": "W",
+        "后退": "S",
+        "向左移动": "A",
+        "向右移动": "D",
+        "确认": "MouseLeft",
+        "取消": "MouseRight",
+        "结束回合": "Enter",
+        "查看地图": "M",
+        "查看牌组": "V",
+        "快捷物品栏1": "1"
+      }
+    },
+    "status": "refreshed",
+    "checked_at": "2026-09-01T16:34:47.380384Z",
+    "model": "google/gemini-3.1-flash-lite",
+    "mode": "web",
+    "request_id": "gk-ea6e9109-04b9-47e3-b71d-08e2ba886e0e",
+    "attempts": [
+      {
+        "attempted_at": "2026-09-01T15:05:52.670661Z",
+        "result": "failed",
+        "failure_reason": "OpenRouter网络请求失败：[WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions [occurred_at=2026-09-01T15:05:52.670661+00:00]"
+      },
+      {
+        "attempted_at": "2026-09-01T16:30:01.229975Z",
+        "result": "ok",
+        "failure_reason": null
+      },
+      {
+        "attempted_at": "2026-09-01T16:32:22.097537Z",
+        "result": "ok",
+        "failure_reason": null
+      },
+      {
+        "attempted_at": "2026-09-01T16:34:47.380384Z",
+        "result": "ok",
+        "failure_reason": null
+      }
+    ]
+  },
+  "scenes": [
+    {
+      "scene_id": "scene:s1",
+      "representative_hash": "89e6daa1b6ace389",
+      "label": "战斗场景",
+      "label_status": "named",
+      "needs_review": false,
+      "annotation": "玩家角色与敌人对峙，底部显示手牌、能量及结束回合按钮的战斗游玩画面。",
+      "dwell_seconds": 7.004139650001889,
+      "visit_count": 1,
+      "sessions_seen": 1,
+      "first_seen": "2026-08-28T02:04:29.228775Z",
+      "last_seen": "2026-08-28T02:04:36.232915Z",
+      "evidence_ids": [
+        "f67:scene:1"
+      ],
+      "verified_at": "2026-08-31T19:45:02.072480Z",
+      "deep_evidence_ids": [
+        "f67:deep:1"
+      ]
+    },
+    {
+      "scene_id": "scene:s2",
+      "representative_hash": "d2d32dcd2d38352b",
+      "label": "事件奖励选择界面",
+      "label_status": "named",
+      "needs_review": false,
+      "annotation": "在遭遇NPC“特兹卡塔拉”的事件中，玩家从列表里浏览并选择一项道具或卡牌作为奖励。",
+      "dwell_seconds": 8.000834200007375,
+      "visit_count": 2,
+      "sessions_seen": 1,
+      "first_seen": "2026-08-28T02:06:29.341330Z",
+      "last_seen": "2026-08-28T02:06:42.343524Z",
+      "evidence_ids": [
+        "f143:scene:1",
+        "f144:scene:1",
+        "f145:scene:1",
+        "f146:scene:1",
+        "f149:scene:1"
+      ],
+      "verified_at": "2026-08-31T19:45:02.093260Z",
+      "deep_evidence_ids": [
+        "f146:deep:1"
+      ]
+    }
+  ],
+  "hud_elements": [],
+  "init": {
+    "initialized_at": "2026-08-28T02:02:07.981643Z",
+    "source_recordings": [
+      "recordings/capture/20260827-220206"
+    ],
+    "version": 2
+  }
+}

@@ -1,0 +1,414 @@
+{
+  "started_at": "2026-09-01T04:14:17.983215+00:00",
+  "finished_at": "2026-09-01T04:14:41.059278+00:00",
+  "model": "google/gemini-3.7-flash",
+  "provider": null,
+  "temperature": 0.0,
+  "max_tokens": 8000,
+  "reasoning_effort": "minimal",
+  "web_search_parameters": {
+    "engine": "exa",
+    "max_results": 5,
+    "max_total_results": 5
+  },
+  "provider_options": {
+    "sort": "throughput",
+    "require_parameters": true
+  },
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "game_knowledge_context",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "genre",
+          "perspective",
+          "game_overview",
+          "gameplay",
+          "background",
+          "default_pc_keybinds"
+        ],
+        "properties": {
+          "genre": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "perspective": {
+            "type": "string",
+            "minLength": 1
+          },
+          "game_overview": {
+            "type": "string",
+            "minLength": 1
+          },
+          "gameplay": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "player_goal",
+              "core_loop",
+              "major_systems",
+              "modes_and_structure"
+            ],
+            "properties": {
+              "player_goal": {
+                "type": "string",
+                "minLength": 1
+              },
+              "core_loop": {
+                "type": "string",
+                "minLength": 1
+              },
+              "major_systems": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 10,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "description"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              },
+              "modes_and_structure": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "background": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "setting_and_premise",
+              "release_and_service_status"
+            ],
+            "properties": {
+              "setting_and_premise": {
+                "type": "string",
+                "minLength": 1
+              },
+              "release_and_service_status": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "default_pc_keybinds": {
+            "type": "object",
+            "maxProperties": 40,
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash))(?:\\+(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash)))*$"
+            }
+          }
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "id": "response-healing"
+    }
+  ],
+  "timeout_seconds": 45.0,
+  "latency_target_seconds": 10.0,
+  "pilot_game_ids": [
+    "marvel-rivals",
+    "ea-sports-fc-26",
+    "hades-ii"
+  ],
+  "game_suite": "healing",
+  "attempts": [
+    {
+      "game_id": "marvel-rivals",
+      "game_name": "Marvel Rivals",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.7-flash",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"第三人称英雄射击\",\"战术竞技\",\"团队动作\"],\"perspective\":\"第三人称视角\",\"game_overview\":\"《漫威争锋》（Marvel Rivals）是由网易游戏与漫威游戏合作开发的一款免费多人第三人称团队战术射击游戏。玩家在游戏中扮演来自漫威多元宇宙的超级英雄或超级反派（涵盖先锋、决斗、策略三大职能），组成6人队伍在可破坏的战场中展开对抗。游戏区别于传统英雄射击游戏的关键特征在于第三人称视角的近战与飞行机动表达、深度的地图场景破坏机制，以及不同英雄组合时触发的独特“连携技能（Team-Up Abilities）”。\",\"gameplay\":{\"player_goal\":\"与队友协同配合，利用角色技能、连携机制与场景破坏，击败敌方队伍并完成护送载具、占领并控制目标点等阶段性地图任务以夺取比赛胜利。\",\"core_loop\":\"进入出生点并根据阵容选择英雄与连携搭配 -> 前往交战区域通过普通攻击、战术技能、连携技与场景破坏进行团队交火 -> 击败敌方或击退攻势，推进目标进度并积攒终极技能能量 -> 在团战关键节点释放终极技能打破僵局或夺回控制权 -> 随战局情况在出生点更换英雄调整策略，直至达成结算条件获得对局奖励与成长反馈并开启下一局匹配。\",\"major_systems\":[{\"name\":\"英雄职能系统\",\"description\":\"角色划分为先锋（Tank）、决斗（DPS/Duelist）和策略（Support/Strategist）三种角色定位，决定了英雄的基础生命值、承伤手段、输出频率与治疗辅助能力。\"},{\"name\":\"连携技能系统（Team-Up Abilities）\",\"description\":\"当特定英雄同时登场于同一队伍时会解锁专属协同被动或主动技能，如共享属性、赋予新攻击模式或协同充能，直接影响队伍选人策略与协同配合。\"},{\"name\":\"动态场景破坏系统\",\"description\":\"战场建筑、掩体和桥梁等环境构造可被英雄技能或重型攻击破坏甚至坍塌，能够动态改变交火视野、高台优势与行进路线。\"},{\"name\":\"终极技能与充能机制\",\"description\":\"通过对敌造成伤害、承受伤害、提供治疗或随时间推移积累能量，蓄满后可释放足以扭转团战局势的高威力终极技能。\"},{\"name\":\"三维立体机动系统\",\"description\":\"结合第三人称视角，部分英雄具备飞行、摆荡、攀爬或悬浮等垂直位移能力，扩展了战斗层级与空中交火维度。\"}],\"modes_and_structure\":\"主要为6v6团队对抗结构。包含快速匹配、竞技排位、街机娱乐及自定义房间模式。地图玩法主要分为护送模式（推车）、占领要点模式（占点）以及混合推进模式（先占点后推车），按轮次或单局目标进度决出胜负。\"},\"background\":{\"setting_and_premise\":\"讲述因时间流纠缠事件导致多元宇宙相互碰撞并交织融合，来自不同时间线与宇宙的漫威超级英雄与反派为了阻止危机或争夺主导权而展开的阵营对抗。\",\"release_and_service_status\":\"游戏于2024年12月6日正式在全球全平台免费公测上线，采用免费游玩、内购赛季通行证与外观道具的长线赛季制运营模式。\"},\"default_pc_keybinds\":{\"前进\":\"W\",\"后退\":\"S\",\"向左移动\":\"A\",\"向右移动\":\"D\",\"跳跃/上升\":\"Space\",\"下降\":\"LeftCtrl\",\"主要攻击\":\"MouseLeft\",\"次要攻击\":\"MouseRight\",\"装填\":\"R\",\"近战攻击\":\"V\",\"快捷武器1\":\"1\",\"快捷武器2\":\"2\",\"上一个武器\":\"MouseWheelUp\",\"下一个武器\":\"MouseWheelDown\",\"技能1\":\"E\",\"技能2\":\"LeftShift\",\"技能3\":\"F\",\"终极技能\":\"Q\",\"连携技能1\":\"Z\",\"连携技能2\":\"X\",\"连携技能3\":\"C\",\"环境互动\":\"G\",\"更换英雄\":\"H\",\"英雄信息\":\"F1\",\"计分板\":\"Tab\",\"时空感知\":\"B\",\"标点\":\"MouseMiddle\",\"语音发言\":\"T\",\"文本聊天\":\"Enter\",\"暂停菜单\":\"Escape\"}}",
+      "parsed_answer": {
+        "genre": [
+          "第三人称英雄射击",
+          "战术竞技",
+          "团队动作"
+        ],
+        "perspective": "第三人称视角",
+        "game_overview": "《漫威争锋》（Marvel Rivals）是由网易游戏与漫威游戏合作开发的一款免费多人第三人称团队战术射击游戏。玩家在游戏中扮演来自漫威多元宇宙的超级英雄或超级反派（涵盖先锋、决斗、策略三大职能），组成6人队伍在可破坏的战场中展开对抗。游戏区别于传统英雄射击游戏的关键特征在于第三人称视角的近战与飞行机动表达、深度的地图场景破坏机制，以及不同英雄组合时触发的独特“连携技能（Team-Up Abilities）”。",
+        "gameplay": {
+          "player_goal": "与队友协同配合，利用角色技能、连携机制与场景破坏，击败敌方队伍并完成护送载具、占领并控制目标点等阶段性地图任务以夺取比赛胜利。",
+          "core_loop": "进入出生点并根据阵容选择英雄与连携搭配 -> 前往交战区域通过普通攻击、战术技能、连携技与场景破坏进行团队交火 -> 击败敌方或击退攻势，推进目标进度并积攒终极技能能量 -> 在团战关键节点释放终极技能打破僵局或夺回控制权 -> 随战局情况在出生点更换英雄调整策略，直至达成结算条件获得对局奖励与成长反馈并开启下一局匹配。",
+          "major_systems": [
+            {
+              "name": "英雄职能系统",
+              "description": "角色划分为先锋（Tank）、决斗（DPS/Duelist）和策略（Support/Strategist）三种角色定位，决定了英雄的基础生命值、承伤手段、输出频率与治疗辅助能力。"
+            },
+            {
+              "name": "连携技能系统（Team-Up Abilities）",
+              "description": "当特定英雄同时登场于同一队伍时会解锁专属协同被动或主动技能，如共享属性、赋予新攻击模式或协同充能，直接影响队伍选人策略与协同配合。"
+            },
+            {
+              "name": "动态场景破坏系统",
+              "description": "战场建筑、掩体和桥梁等环境构造可被英雄技能或重型攻击破坏甚至坍塌，能够动态改变交火视野、高台优势与行进路线。"
+            },
+            {
+              "name": "终极技能与充能机制",
+              "description": "通过对敌造成伤害、承受伤害、提供治疗或随时间推移积累能量，蓄满后可释放足以扭转团战局势的高威力终极技能。"
+            },
+            {
+              "name": "三维立体机动系统",
+              "description": "结合第三人称视角，部分英雄具备飞行、摆荡、攀爬或悬浮等垂直位移能力，扩展了战斗层级与空中交火维度。"
+            }
+          ],
+          "modes_and_structure": "主要为6v6团队对抗结构。包含快速匹配、竞技排位、街机娱乐及自定义房间模式。地图玩法主要分为护送模式（推车）、占领要点模式（占点）以及混合推进模式（先占点后推车），按轮次或单局目标进度决出胜负。"
+        },
+        "background": {
+          "setting_and_premise": "讲述因时间流纠缠事件导致多元宇宙相互碰撞并交织融合，来自不同时间线与宇宙的漫威超级英雄与反派为了阻止危机或争夺主导权而展开的阵营对抗。",
+          "release_and_service_status": "游戏于2024年12月6日正式在全球全平台免费公测上线，采用免费游玩、内购赛季通行证与外观道具的长线赛季制运营模式。"
+        },
+        "default_pc_keybinds": {
+          "前进": "W",
+          "后退": "S",
+          "向左移动": "A",
+          "向右移动": "D",
+          "跳跃/上升": "Space",
+          "下降": "LeftCtrl",
+          "主要攻击": "MouseLeft",
+          "次要攻击": "MouseRight",
+          "装填": "R",
+          "近战攻击": "V",
+          "快捷武器1": "1",
+          "快捷武器2": "2",
+          "上一个武器": "MouseWheelUp",
+          "下一个武器": "MouseWheelDown",
+          "技能1": "E",
+          "技能2": "LeftShift",
+          "技能3": "F",
+          "终极技能": "Q",
+          "连携技能1": "Z",
+          "连携技能2": "X",
+          "连携技能3": "C",
+          "环境互动": "G",
+          "更换英雄": "H",
+          "英雄信息": "F1",
+          "计分板": "Tab",
+          "时空感知": "B",
+          "标点": "MouseMiddle",
+          "语音发言": "T",
+          "文本聊天": "Enter",
+          "暂停菜单": "Escape"
+        }
+      },
+      "format_error": null,
+      "latency_seconds": 7.811096999997972,
+      "prompt_tokens": 5382,
+      "completion_tokens": 1195,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.015517749999999999,
+      "actual_model": "google/gemini-3.7-flash",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "ea-sports-fc-26",
+      "game_name": "EA Sports FC 26",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.7-flash",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"体育\",\"足球模拟\",\"经营模拟\"],\"perspective\":\"第三人称俯视广播转播视角；在职业生涯单人球员模式或职业俱乐部模式中可切换为第三人称背后追随视角\",\"game_overview\":\"《EA Sports FC 26》是 EA 旗下足球模拟系列的年度正统续作。玩家在游戏中扮演职业球员、俱乐部主教练或全队掌控者，目标是通过即时足球操控、战术布置与阵容经营，在单人赛季、在线联机对战与锦标赛中赢得胜利和冠军。游戏涵盖单人单机模式、本地双人/多人对战以及大型在线竞技合作网络，收录全球大量真实联赛、球队与球员授权，并结合物理碰撞、战术系统与球员专属比赛风格，呈现高度还原现实的足球比赛体验。\",\"gameplay\":{\"player_goal\":\"在即时比赛中通过传控、进攻射门与协同防守击败对手赢下比赛，同时在各模式中达成赛季目标、提升球员属性、收集球星组建梦幻阵容或率领俱乐部夺冠。\",\"core_loop\":\"进入比赛前进行阵容编排与战术指令配置；比赛开始后实时操控持球与防守球员进行传接、盘带、射门、抢断及战术调度；比赛结束后根据战绩结算经验、虚拟货币、积分或赛季排名奖励；利用所得资源引援、培养球员、调整战术体系，继而进入下一场对决。\",\"major_systems\":[{\"name\":\"即时攻防操控系统\",\"description\":\"区分进攻与防守状态，提供短传、直塞、长传、射门、假动作、拦截、逼抢及滑铲等即时动作输入，直接决定赛场上的控球权与得分机会。\"},{\"name\":\"战术与阵型体系\",\"description\":\"允许玩家自定义球队阵型、进攻组织节奏、防守压迫深度及球员个人战术指令，影响非玩家控制球员的无球跑动与站位。\"},{\"name\":\"比赛风格（PlayStyles）系统\",\"description\":\"赋予具备现实特长球员独特的赛场特技与能力加成，显著影响特定动作（如精准长传、强力射门、快速启动）的执行效率与动画表现。\"},{\"name\":\"Ultimate Team（终极球队）系统\",\"description\":\"通过开包、转会市场交易与完成挑战收集全球球员卡牌，兼顾化学反应搭配组建个性化阵容，参与在线排位赛与周赛。\"},{\"name\":\"生涯模式（经理与球员）\",\"description\":\"提供长期单人推进流程，经理模式包含转会谈判、青训、财政与赛程管理；球员模式则侧重单一自创或真实球员的能力训练、场上表现评分与转会晋升。\"},{\"name\":\"职业俱乐部与 Rush 组队模式\",\"description\":\"支持多名玩家各自操控单一自建球员进行线上多人同场协作与对抗，强调小队配合、站位分工与默契度。\"}],\"modes_and_structure\":\"支持单场快速友谊赛、长线赛季制单人生涯、在线 1v1 天梯对战（如 Rivals）、高对抗周末锦标赛（Champions）以及 5v5 Rush 和 11v11 线上多人联机协作对抗模式。\"},\"background\":{\"setting_and_premise\":\"以现代现实世界职业足球赛事为背景，包含全球顶级男女子职业足球俱乐部、国家队、真实球场、官方授权联赛与杯赛体系。\",\"release_and_service_status\":\"公开预定于 2025 年 9 月 26 日全球正式发售（终极版及 EA Play 抢先体验于 2025 年 9 月 19 日开启），发售后提供持续的在线赛季运营与实时名单更新。\"},\"default_pc_keybinds\":{\"向上移动\":\"ArrowUp\",\"向下移动\":\"ArrowDown\",\"向左移动\":\"ArrowLeft\",\"向右移动\":\"ArrowRight\",\"地面传球\":\"S\",\"高空传球\":\"A\",\"直塞球\":\"W\",\"射门\":\"D\",\"冲刺\":\"LeftShift\",\"护球\":\"LeftCtrl\",\"队友协防\":\"Q\",\"抢断\":\"D\",\"滑铲\":\"A\",\"切换防守球员\":\"S\",\"门将出击\":\"W\"}}",
+      "parsed_answer": {
+        "genre": [
+          "体育",
+          "足球模拟",
+          "经营模拟"
+        ],
+        "perspective": "第三人称俯视广播转播视角；在职业生涯单人球员模式或职业俱乐部模式中可切换为第三人称背后追随视角",
+        "game_overview": "《EA Sports FC 26》是 EA 旗下足球模拟系列的年度正统续作。玩家在游戏中扮演职业球员、俱乐部主教练或全队掌控者，目标是通过即时足球操控、战术布置与阵容经营，在单人赛季、在线联机对战与锦标赛中赢得胜利和冠军。游戏涵盖单人单机模式、本地双人/多人对战以及大型在线竞技合作网络，收录全球大量真实联赛、球队与球员授权，并结合物理碰撞、战术系统与球员专属比赛风格，呈现高度还原现实的足球比赛体验。",
+        "gameplay": {
+          "player_goal": "在即时比赛中通过传控、进攻射门与协同防守击败对手赢下比赛，同时在各模式中达成赛季目标、提升球员属性、收集球星组建梦幻阵容或率领俱乐部夺冠。",
+          "core_loop": "进入比赛前进行阵容编排与战术指令配置；比赛开始后实时操控持球与防守球员进行传接、盘带、射门、抢断及战术调度；比赛结束后根据战绩结算经验、虚拟货币、积分或赛季排名奖励；利用所得资源引援、培养球员、调整战术体系，继而进入下一场对决。",
+          "major_systems": [
+            {
+              "name": "即时攻防操控系统",
+              "description": "区分进攻与防守状态，提供短传、直塞、长传、射门、假动作、拦截、逼抢及滑铲等即时动作输入，直接决定赛场上的控球权与得分机会。"
+            },
+            {
+              "name": "战术与阵型体系",
+              "description": "允许玩家自定义球队阵型、进攻组织节奏、防守压迫深度及球员个人战术指令，影响非玩家控制球员的无球跑动与站位。"
+            },
+            {
+              "name": "比赛风格（PlayStyles）系统",
+              "description": "赋予具备现实特长球员独特的赛场特技与能力加成，显著影响特定动作（如精准长传、强力射门、快速启动）的执行效率与动画表现。"
+            },
+            {
+              "name": "Ultimate Team（终极球队）系统",
+              "description": "通过开包、转会市场交易与完成挑战收集全球球员卡牌，兼顾化学反应搭配组建个性化阵容，参与在线排位赛与周赛。"
+            },
+            {
+              "name": "生涯模式（经理与球员）",
+              "description": "提供长期单人推进流程，经理模式包含转会谈判、青训、财政与赛程管理；球员模式则侧重单一自创或真实球员的能力训练、场上表现评分与转会晋升。"
+            },
+            {
+              "name": "职业俱乐部与 Rush 组队模式",
+              "description": "支持多名玩家各自操控单一自建球员进行线上多人同场协作与对抗，强调小队配合、站位分工与默契度。"
+            }
+          ],
+          "modes_and_structure": "支持单场快速友谊赛、长线赛季制单人生涯、在线 1v1 天梯对战（如 Rivals）、高对抗周末锦标赛（Champions）以及 5v5 Rush 和 11v11 线上多人联机协作对抗模式。"
+        },
+        "background": {
+          "setting_and_premise": "以现代现实世界职业足球赛事为背景，包含全球顶级男女子职业足球俱乐部、国家队、真实球场、官方授权联赛与杯赛体系。",
+          "release_and_service_status": "公开预定于 2025 年 9 月 26 日全球正式发售（终极版及 EA Play 抢先体验于 2025 年 9 月 19 日开启），发售后提供持续的在线赛季运营与实时名单更新。"
+        },
+        "default_pc_keybinds": {
+          "向上移动": "ArrowUp",
+          "向下移动": "ArrowDown",
+          "向左移动": "ArrowLeft",
+          "向右移动": "ArrowRight",
+          "地面传球": "S",
+          "高空传球": "A",
+          "直塞球": "W",
+          "射门": "D",
+          "冲刺": "LeftShift",
+          "护球": "LeftCtrl",
+          "队友协防": "Q",
+          "抢断": "D",
+          "滑铲": "A",
+          "切换防守球员": "S",
+          "门将出击": "W"
+        }
+      },
+      "format_error": null,
+      "latency_seconds": 7.141618599998765,
+      "prompt_tokens": 4141,
+      "completion_tokens": 1109,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.0142645,
+      "actual_model": "google/gemini-3.7-flash",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    },
+    {
+      "game_id": "hades-ii",
+      "game_name": "Hades II",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "google/gemini-3.7-flash",
+      "requested_provider": null,
+      "response_text": "{\"genre\":[\"动作角色扮演\",\"Roguelike\"],\"perspective\":\"固定俯视角（等轴视角）\",\"game_overview\":\"《Hades II》是由 Supergiant Games 开发的一款结合希腊神话背景的单人动作 Roguelike 游戏。玩家扮演冥界不朽公主、巫术女神赫卡忒的学徒兼冥王之女墨利诺厄（Melinoë）。游戏的主要目标是掌握奥术巫术与黑魔法，突破重重阻碍击败挣脱束缚的时之泰坦克洛诺斯（Chronos）。游戏延续了快节奏实时战斗与叙事深度融合的特色，玩家在一次次出征与死亡轮回中构筑强力技能协同，解锁永久强化，并与众神及冥界角色逐步建立联系推进剧情。\",\"gameplay\":{\"player_goal\":\"在单次出征中击败各区域首领与强敌，推进至深处战胜时之泰坦克洛诺斯；并在历次尝试中搜集材料与资源，带回大本营进行永久属性强化、解锁新武器形态、配方与功能。\",\"core_loop\":\"玩家从安全据点（三岔路口）选择武器、装备与奥秘卡牌后启程；连续进入随机生成的房间进行即时清怪战斗；每个房间通关后选择并获得奥林匹斯诸神赐福、魔法强化或材料资源，并在分支路径中抉择下一房间奖励；生命值耗尽死亡或通关后被遣送回大本营；利用带回的素材炼制法术、升级祭坛卡牌与装备；随后开启全新一轮出征。\",\"major_systems\":[{\"name\":\"巫术与法力系统（Magick & Omega Moves）\",\"description\":\"角色拥有独特的法力池（Magick）。除了普通攻击、特殊攻击与法阵外，玩家可以通过长按蓄力消耗法力释放威力更强的欧米伽（Omega）招式，为战斗策略增添时机与资源管理维度。\"},{\"name\":\"神明赐福系统（Olympian Boons）\",\"description\":\"来自奥林匹斯众神（如宙斯、波塞冬、阿波罗、赫菲斯托斯等）提供的随机强化，可直接改变普通攻击、特殊攻击、法阵、冲刺与法力回复的附带属性与机制，并能组合出双重赐福与传奇赐福。\"},{\"name\":\"夜之祭坛与奥秘卡牌（Altar of Ashes & Arcana Cards）\",\"description\":\"玩家在大本营通过消耗材料解锁和配置类似塔罗牌的奥秘卡牌，每张卡牌占用一定悟性值（Grasp），提供生命提升、伤害加成、死里逃生等跨局永久被动增益。\"},{\"name\":\"大锅炼金与巫术配方（Cauldron Incantations）\",\"description\":\"通过收集关卡内采集的植物、矿物与魂灵，在三岔路口的大锅中调制药水与咒术，解锁据点新功能、快捷捷径、工具升级及全新交互系统。\"},{\"name\":\"月神巫术（Hexes & Selene's Path of Stars）\",\"description\":\"在出征中获得月神塞勒涅的指引，解锁拥有独立冷却和充能机制的终极巫术（Hex），并通过星光之路加点树进一步自定义强化其形态与效果。\"},{\"name\":\"采集与采集工具（Gathering Tools）\",\"description\":\"玩家每次出征前可装备一把专用采集工具（如鹤嘴锄、钓竿、铲子、捕灵法阵等），在战斗间隙收集特定类型的制作与养成材料。\"}],\"modes_and_structure\":\"纯单人游戏。单次游玩由连续的独立房间与区域首领战构成，路线存在分支选择；角色死亡即结束当前出征并重置当局临时赐福，保留基础采集素材并返回三岔路口进行永久养成与重整。\"},\"background\":{\"setting_and_premise\":\"以希腊神话与冥界奥秘为背景。时之泰坦克洛诺斯脱困并攻占冥界、囚禁哈迪斯一家，冥王之女墨利诺厄在巫术女神赫卡忒的指导下学习黑魔法与战斗技艺，借助奥林匹斯诸神与黑夜势力的力量向克洛诺斯发起反击。\",\"release_and_service_status\":\"游戏于 2024 年 5 月 6 日在 PC 平台开启抢先体验（Early Access），目前处于积极开发与重大版本更新阶段。\"},\"default_pc_keybinds\":{\"向上移动\":\"W\",\"向下移动\":\"S\",\"向左移动\":\"A\",\"向右移动\":\"D\",\"攻击\":\"MouseLeft\",\"特殊攻击\":\"MouseRight\",\"法阵\":\"Q\",\"冲刺\":\"Space\",\"巫术\":\"F\",\"交互\":\"E\",\"赠礼\":\"G\",\"行礼\":\"T\",\"暗影之书\":\"C\",\"物品栏\":\"I\",\"赐福信息\":\"B\"}}",
+      "parsed_answer": {
+        "genre": [
+          "动作角色扮演",
+          "Roguelike"
+        ],
+        "perspective": "固定俯视角（等轴视角）",
+        "game_overview": "《Hades II》是由 Supergiant Games 开发的一款结合希腊神话背景的单人动作 Roguelike 游戏。玩家扮演冥界不朽公主、巫术女神赫卡忒的学徒兼冥王之女墨利诺厄（Melinoë）。游戏的主要目标是掌握奥术巫术与黑魔法，突破重重阻碍击败挣脱束缚的时之泰坦克洛诺斯（Chronos）。游戏延续了快节奏实时战斗与叙事深度融合的特色，玩家在一次次出征与死亡轮回中构筑强力技能协同，解锁永久强化，并与众神及冥界角色逐步建立联系推进剧情。",
+        "gameplay": {
+          "player_goal": "在单次出征中击败各区域首领与强敌，推进至深处战胜时之泰坦克洛诺斯；并在历次尝试中搜集材料与资源，带回大本营进行永久属性强化、解锁新武器形态、配方与功能。",
+          "core_loop": "玩家从安全据点（三岔路口）选择武器、装备与奥秘卡牌后启程；连续进入随机生成的房间进行即时清怪战斗；每个房间通关后选择并获得奥林匹斯诸神赐福、魔法强化或材料资源，并在分支路径中抉择下一房间奖励；生命值耗尽死亡或通关后被遣送回大本营；利用带回的素材炼制法术、升级祭坛卡牌与装备；随后开启全新一轮出征。",
+          "major_systems": [
+            {
+              "name": "巫术与法力系统（Magick & Omega Moves）",
+              "description": "角色拥有独特的法力池（Magick）。除了普通攻击、特殊攻击与法阵外，玩家可以通过长按蓄力消耗法力释放威力更强的欧米伽（Omega）招式，为战斗策略增添时机与资源管理维度。"
+            },
+            {
+              "name": "神明赐福系统（Olympian Boons）",
+              "description": "来自奥林匹斯众神（如宙斯、波塞冬、阿波罗、赫菲斯托斯等）提供的随机强化，可直接改变普通攻击、特殊攻击、法阵、冲刺与法力回复的附带属性与机制，并能组合出双重赐福与传奇赐福。"
+            },
+            {
+              "name": "夜之祭坛与奥秘卡牌（Altar of Ashes & Arcana Cards）",
+              "description": "玩家在大本营通过消耗材料解锁和配置类似塔罗牌的奥秘卡牌，每张卡牌占用一定悟性值（Grasp），提供生命提升、伤害加成、死里逃生等跨局永久被动增益。"
+            },
+            {
+              "name": "大锅炼金与巫术配方（Cauldron Incantations）",
+              "description": "通过收集关卡内采集的植物、矿物与魂灵，在三岔路口的大锅中调制药水与咒术，解锁据点新功能、快捷捷径、工具升级及全新交互系统。"
+            },
+            {
+              "name": "月神巫术（Hexes & Selene's Path of Stars）",
+              "description": "在出征中获得月神塞勒涅的指引，解锁拥有独立冷却和充能机制的终极巫术（Hex），并通过星光之路加点树进一步自定义强化其形态与效果。"
+            },
+            {
+              "name": "采集与采集工具（Gathering Tools）",
+              "description": "玩家每次出征前可装备一把专用采集工具（如鹤嘴锄、钓竿、铲子、捕灵法阵等），在战斗间隙收集特定类型的制作与养成材料。"
+            }
+          ],
+          "modes_and_structure": "纯单人游戏。单次游玩由连续的独立房间与区域首领战构成，路线存在分支选择；角色死亡即结束当前出征并重置当局临时赐福，保留基础采集素材并返回三岔路口进行永久养成与重整。"
+        },
+        "background": {
+          "setting_and_premise": "以希腊神话与冥界奥秘为背景。时之泰坦克洛诺斯脱困并攻占冥界、囚禁哈迪斯一家，冥王之女墨利诺厄在巫术女神赫卡忒的指导下学习黑魔法与战斗技艺，借助奥林匹斯诸神与黑夜势力的力量向克洛诺斯发起反击。",
+          "release_and_service_status": "游戏于 2024 年 5 月 6 日在 PC 平台开启抢先体验（Early Access），目前处于积极开发与重大版本更新阶段。"
+        },
+        "default_pc_keybinds": {
+          "向上移动": "W",
+          "向下移动": "S",
+          "向左移动": "A",
+          "向右移动": "D",
+          "攻击": "MouseLeft",
+          "特殊攻击": "MouseRight",
+          "法阵": "Q",
+          "冲刺": "Space",
+          "巫术": "F",
+          "交互": "E",
+          "赠礼": "G",
+          "行礼": "T",
+          "暗影之书": "C",
+          "物品栏": "I",
+          "赐福信息": "B"
+        }
+      },
+      "format_error": null,
+      "latency_seconds": 8.085966100014048,
+      "prompt_tokens": 5106,
+      "completion_tokens": 1279,
+      "reasoning_tokens": 0,
+      "cost_usd": 0.01562575,
+      "actual_model": "google/gemini-3.7-flash",
+      "actual_provider": "OpenAI",
+      "finish_reason": "stop",
+      "error": null,
+      "error_metadata": null,
+      "normalization_actions": []
+    }
+  ],
+  "dispatch_stats": [
+    {
+      "profile_name": "m5-b-t3a-v2:online",
+      "rate_limit_count": 0,
+      "cooldown_seconds": 0.0,
+      "cooldown_drop_count": 0,
+      "cooling_down": false,
+      "cooldown_remaining_seconds": 0.0
+    }
+  ]
+}

@@ -1,0 +1,269 @@
+{
+  "started_at": "2026-09-01T04:14:01.991144+00:00",
+  "finished_at": "2026-09-01T04:14:02.161394+00:00",
+  "model": "openai/gpt-5.4-mini",
+  "provider": null,
+  "temperature": 0.0,
+  "max_tokens": 8000,
+  "reasoning_effort": "minimal",
+  "web_search_parameters": {
+    "engine": "exa",
+    "max_results": 5,
+    "max_total_results": 5
+  },
+  "provider_options": {
+    "sort": "throughput",
+    "require_parameters": true
+  },
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "game_knowledge_context",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "genre",
+          "perspective",
+          "game_overview",
+          "gameplay",
+          "background",
+          "default_pc_keybinds"
+        ],
+        "properties": {
+          "genre": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "perspective": {
+            "type": "string",
+            "minLength": 1
+          },
+          "game_overview": {
+            "type": "string",
+            "minLength": 1
+          },
+          "gameplay": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "player_goal",
+              "core_loop",
+              "major_systems",
+              "modes_and_structure"
+            ],
+            "properties": {
+              "player_goal": {
+                "type": "string",
+                "minLength": 1
+              },
+              "core_loop": {
+                "type": "string",
+                "minLength": 1
+              },
+              "major_systems": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 10,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "description"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              },
+              "modes_and_structure": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "background": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "setting_and_premise",
+              "release_and_service_status"
+            ],
+            "properties": {
+              "setting_and_premise": {
+                "type": "string",
+                "minLength": 1
+              },
+              "release_and_service_status": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "default_pc_keybinds": {
+            "type": "object",
+            "maxProperties": 40,
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash))(?:\\+(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash)))*$"
+            }
+          }
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "id": "response-healing"
+    }
+  ],
+  "timeout_seconds": 45.0,
+  "latency_target_seconds": 10.0,
+  "pilot_game_ids": [
+    "marvel-rivals",
+    "ea-sports-fc-26",
+    "hades-ii"
+  ],
+  "game_suite": "healing",
+  "attempts": [
+    {
+      "game_id": "marvel-rivals",
+      "game_name": "Marvel Rivals",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "openai/gpt-5.4-mini",
+      "requested_provider": null,
+      "response_text": "",
+      "parsed_answer": null,
+      "format_error": null,
+      "latency_seconds": 0.07874080000328831,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "reasoning_tokens": null,
+      "cost_usd": null,
+      "actual_model": null,
+      "actual_provider": null,
+      "finish_reason": null,
+      "error": "OpenRouter请求失败（HTTP 404）：No endpoints found that can handle the requested parameters. To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection [status=404 provider_code=404 request_id=gen-1788236042-0Tb3pPJOFur665BxovgK request_id_header=x-generation-id occurred_at=2026-09-01T04:14:02.103356+00:00 profile_name=m5-b-t3a-v2:online]",
+      "error_metadata": {
+        "message": "OpenRouter请求失败（HTTP 404）：No endpoints found that can handle the requested parameters. To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection",
+        "status_code": 404,
+        "error_type": null,
+        "provider_code": 404,
+        "retry_after": null,
+        "retry_after_seconds": null,
+        "request_id": "gen-1788236042-0Tb3pPJOFur665BxovgK",
+        "request_id_header": "x-generation-id",
+        "occurred_at": "2026-09-01T04:14:02.103356+00:00",
+        "provider": null,
+        "profile_name": "m5-b-t3a-v2:online",
+        "latency_seconds": 0.07874080000328831,
+        "cooldown_drop": false,
+        "cooldown_remaining_seconds": null
+      },
+      "normalization_actions": []
+    },
+    {
+      "game_id": "ea-sports-fc-26",
+      "game_name": "EA Sports FC 26",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "openai/gpt-5.4-mini",
+      "requested_provider": null,
+      "response_text": "",
+      "parsed_answer": null,
+      "format_error": null,
+      "latency_seconds": 0.022018700023181736,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "reasoning_tokens": null,
+      "cost_usd": null,
+      "actual_model": null,
+      "actual_provider": null,
+      "finish_reason": null,
+      "error": "OpenRouter请求失败（HTTP 404）：No endpoints found that can handle the requested parameters. To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection [status=404 provider_code=404 request_id=gen-1788236042-yLDNBILV9vwNPBzA6HTe request_id_header=x-generation-id occurred_at=2026-09-01T04:14:02.126156+00:00 profile_name=m5-b-t3a-v2:online]",
+      "error_metadata": {
+        "message": "OpenRouter请求失败（HTTP 404）：No endpoints found that can handle the requested parameters. To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection",
+        "status_code": 404,
+        "error_type": null,
+        "provider_code": 404,
+        "retry_after": null,
+        "retry_after_seconds": null,
+        "request_id": "gen-1788236042-yLDNBILV9vwNPBzA6HTe",
+        "request_id_header": "x-generation-id",
+        "occurred_at": "2026-09-01T04:14:02.126156+00:00",
+        "provider": null,
+        "profile_name": "m5-b-t3a-v2:online",
+        "latency_seconds": 0.022018700023181736,
+        "cooldown_drop": false,
+        "cooldown_remaining_seconds": null
+      },
+      "normalization_actions": []
+    },
+    {
+      "game_id": "hades-ii",
+      "game_name": "Hades II",
+      "mode_id": "online",
+      "web_enabled": true,
+      "requested_model": "openai/gpt-5.4-mini",
+      "requested_provider": null,
+      "response_text": "",
+      "parsed_answer": null,
+      "format_error": null,
+      "latency_seconds": 0.03306469999370165,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "reasoning_tokens": null,
+      "cost_usd": null,
+      "actual_model": null,
+      "actual_provider": null,
+      "finish_reason": null,
+      "error": "OpenRouter请求失败（HTTP 404）：No endpoints found that can handle the requested parameters. To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection [status=404 provider_code=404 request_id=gen-1788236042-dHu6JXl9MOLs0udUn2Gq request_id_header=x-generation-id occurred_at=2026-09-01T04:14:02.160395+00:00 profile_name=m5-b-t3a-v2:online]",
+      "error_metadata": {
+        "message": "OpenRouter请求失败（HTTP 404）：No endpoints found that can handle the requested parameters. To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection",
+        "status_code": 404,
+        "error_type": null,
+        "provider_code": 404,
+        "retry_after": null,
+        "retry_after_seconds": null,
+        "request_id": "gen-1788236042-dHu6JXl9MOLs0udUn2Gq",
+        "request_id_header": "x-generation-id",
+        "occurred_at": "2026-09-01T04:14:02.160395+00:00",
+        "provider": null,
+        "profile_name": "m5-b-t3a-v2:online",
+        "latency_seconds": 0.03306469999370165,
+        "cooldown_drop": false,
+        "cooldown_remaining_seconds": null
+      },
+      "normalization_actions": []
+    }
+  ],
+  "dispatch_stats": [
+    {
+      "profile_name": "m5-b-t3a-v2:online",
+      "rate_limit_count": 0,
+      "cooldown_seconds": 0.0,
+      "cooldown_drop_count": 0,
+      "cooling_down": false,
+      "cooldown_remaining_seconds": 0.0
+    }
+  ]
+}
