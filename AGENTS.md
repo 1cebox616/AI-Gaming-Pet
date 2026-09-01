@@ -1,5 +1,5 @@
 # AGENTS.md
-最后更新：模型调用按功能分四条线（D-51）；B-T3 拆为 3a 选型探针 / 3b 游戏知识线 / 3c HUD 识别线；3a 已下发；游玩画面过滤已移除
+最后更新：B-T3a 选型完成（Gemini 3.1 Flash Lite，仅联网）；游戏卡契约加 knowledge 对象；B-T3b 游戏知识线已下发；新增 TD-51/52/53
 
 > 本文件是主干、端口、跨游戏共识、流程与工程原则的唯一来源。CS2 适配的契约与实测见 **CS2.md**；
 > 新游戏适配开工见 **ADAPTER_GUIDE.md**。每份事实只存在于一个文件中，其他文件引用不复制。
@@ -40,7 +40,7 @@
 | 检测器 | 块级自适应噪声地板的画面变化检测；职责是去重不是侦察 |
 | 两货架 | 游戏知识边界：货架一"玩前可得"（可查）、货架二"玩后所见"（只能观察） |
 
-**现在**：M5-B「跟得上」；**三个本地传感器全部就位**（OCR `ccd06c6`、场景指纹与命名 `a6e8881`、鼠标聚合 `f71c865`）；**B-T3a 游戏知识模型选型探针执行中**（3 个候选模型 × 15 个游戏，产品负责人人工判卷）；之后 3b 游戏知识线、3c HUD 识别线。限流冷却已就位（`3ac5b8e`）。详见 §6.2。
+**现在**：M5-B「跟得上」；**三个本地传感器全部就位**（OCR `ccd06c6`、场景指纹与命名 `a6e8881`、鼠标聚合 `f71c865`）；**B-T3b 游戏知识线执行中**（模型已定：`google/gemini-3.1-flash-lite` 仅联网，档位 `game_knowledge`）；之后 3c HUD 识别线。详见 §6.2。
 
 ---
 
@@ -210,7 +210,7 @@ HTTP 路由：适配经 http_router 挂载自己的接收端点（CS2 的 /gsi �
 EvidenceEvent —— 证词。只追加、不修改、错了也保留
     evidence_id, source（fast / deep / ocr / input / mouse / scene / detector / init / gsi）,
     kind（随来源定义：fast_observation / deep_observation / scene_verified / text_observed / key_window /
-    mouse_motion / scene_fingerprint / frame_metrics / init_fact …）,
+    mouse_motion / scene_fingerprint / frame_metrics / game_knowledge …）,
     root_capture_id（源自哪一帧的 seq；非帧来源 None），
     observed_at（内容时刻，会话内 T+秒）, learned_at（系统得知时刻）,
     scope（归一化 bbox 或方位词，无则 None）,
@@ -238,6 +238,8 @@ scene_verified（source="deep"，B-T2-4 起）—— 场景的命名与跨会话
     以及**复核链路**：matches_existing（true / false / null）、candidate_scene_id、candidate_label（复核前的旧名）、
     action（new / reused / replaced / rejected）。要求：仅凭 evidence.jsonl 就能重建"模型答了是还是不是、代码做了什么"。
     代码验证后执行（D-28）：引用的簇必须已过稳定门；uncertain 不得覆盖已有名字。v1 不含归并判决。
+game_knowledge（source="init"，B-T3b 起）—— 游戏知识线每次尝试一条，无论成败：game_id、mode、model、request_id、
+    outcome（ok / failed / cooldown_drop / timeout / schema_reject）、耗时、花费、写卡动作（initialized / refreshed / kept_previous）。
 视图 —— 皆由代码从 BeliefSnapshot 渲染，可丢弃可重生，不是数据库
     cognition.md（人读）、快线认知短视图（分钟级，长度硬顶）、深线待查队列、发言候选（M5-C）、调试证据图
 ```
@@ -250,16 +252,21 @@ B-T4（OCR 一帧多条）与 B-T5（鼠标无帧号）必须同批放宽。
 
 ```
 game_id（ASCII slug）, display_name（窗口标题原文，只管身份）,
-genre, perspective（来自运行时货架一查询，source=init，可空；B-T3 起）,
+knowledge —— 货架一，整体替换、带出处（B-T3b 起；顶层 genre / perspective 并入此处）
+    content（V3 合同的 JSON 原样，见 D-37；通过完整校验的才写入）,
+    status（initialized / refreshed / stale）, checked_at, model, mode（web / knowledge）, request_id,
+    attempts[]（有界历史：时间、结果 ok / failed / cooldown_drop / timeout / schema_reject、失败原因）
+    规则：新答案整份原子替换旧 content；任何失败都保留上一份有效 content，只把 status 记为 stale 并写入 attempts；
+    冷却丢弃、超时、格式不合一律不得污染既有 content
 scenes[] —— 一个视觉簇一个场景，一对一（v1 不做视觉变体，D-49）
     scene_id, representative_hash, label（人读名，未命名时 None）,
     label_status（unnamed / named / uncertain）,
     annotation（一句话说明这是什么界面、什么时候出现；未命名时 None）,
     dwell_seconds, visit_count, sessions_seen, first_seen, last_seen,
     evidence_ids（会话内指纹证据采样）, verified_at, deep_evidence_ids（命名的深线证据）
-hud_slots[]（ui:rN, bbox, semantic_role, role_status, evidence_ids）,      B-T3 起
-keybinds{}（键 → 含义, source: default_table / observed, support_count）,   B-T3 起
-view_constants（yaw_deg_per_count 若公开；user_sensitivity 由玩家提供，可空）,  B-T3 起
+hud_elements[]（B-T3c 定；开放式，不预设槽位）
+（原 keybinds{} 与 view_constants 移除：默认键位已在 knowledge.content.default_pc_keybinds 内，动作→键；
+  键位观察印证与角度常数暂不做）
 init（initialized_at, source_recordings, version）
 ```
 
@@ -447,8 +454,15 @@ init（initialized_at, source_recordings, version）
   它不改变快线合同——快线仍写散文，只是多一段稳定背景。
   **货架一通路（已定，原 TD-29）**：以网关的联网调用为主、模型自身知识兜底，不接独立搜索 API；按 a→b→c 尝试、每步测量。
   **节奏（B-T3 前修订）：游戏首次初始化一次，之后每个会话联网核查/更新一次**——版本更新、键位改动、meta 变化都要跟上，
-  不是"查一次缓存到死"。模型由 B-T3a 探针选型（3 个候选 × 15 个游戏，产品负责人人工判卷，目标 10 秒内返回）。
-  鼠标每计数角度常数与键位的观察印证**暂不做**（产品负责人定案）。
+  不是"查一次缓存到死"。鼠标每计数角度常数与键位的观察印证**暂不做**（产品负责人定案）。
+  **选型定案（B-T3a，产品负责人）：`google/gemini-3.1-flash-lite`，仅联网模式，通路为网关内置 web_search（Exa，每次 ≤5 条），
+  档位名 `game_knowledge`。** 依据：8/8 在 10 秒内（P50 4.1 / P90 5.1 秒），每次约 $0.0026，结构合规 7/8；
+  更强的候选延迟翻倍、花费 6 倍，且更长的答案带来更多过期知识与不确定键位。
+  **答案不是真值**：抽查已见键位错误（炉石"结束回合：Enter"、泰拉瑞亚"丢弃：T"）。写卡时一律 `modality=inferred`，
+  格式不合的整份拒收、不得本地猜补；消费方只能把它当背景提示，不得当事实。
+  **提示词合同 V3**（严格 JSON Schema）：genre[]、perspective、game_overview、gameplay{player_goal, core_loop, major_systems[],
+  modes_and_structure}、background{setting_and_premise, release_and_service_status}、default_pc_keybinds{动作→键}。
+  **明确不问**：HUD 惯例（归 HUD 识别线）、社区术语、手柄键位、剧情/结局/角色命运、关卡解法、地图与隐藏内容。
 - **D-38 场景指纹（感知哈希）是唯一进第一版的本地视觉特征；v1 只做全帧、整屏 UI 状态。**
   只用于场景重识别与 scene_reset 印证，**不参与上传与区域提示决策**。CPU 微秒级，零依赖。
   **不预设任何场景分类**——不是每个游戏都有背包或地图；簇是发现出来的、无名的，标签由 B-T3 深读去填；
@@ -706,6 +720,12 @@ WinRT 无置信度、多次识别可互相矛盾：OCR 输出是**证词不是�
 
 ### 5.6 传感器与认知层
 
+**游戏知识线选型（B-T3a，V3 合同下 8 题决赛）**：Gemini 3.1 Flash Lite 8/8 返回、7/8 原样合规、P50 4.12 / P90 5.08 / 最大 5.99 秒、
+8/8 ≤10 秒、8 次 $0.0209；Gemini 3.7 Flash 8/8 返回、6/8 合规、P50 7.95 / P90 10.73 秒、7/8 ≤10 秒、$0.120；
+GPT-5.4 Mini 当前联网 + 结构化输出 + 推理参数组合无可用端点（3/3 HTTP 404）。另测：DeepSeek V4 Instant 合同不合与高延迟反复出现；
+Qwen3.8 Flash 在长提示词下长推理、截断、限流，5/5 无可用答案；Gemini 3.5 Flash Lite 5 题 3/5 可解析、P50 6.7 秒、花费为 3.1 的 6.9 倍。
+**注意样本量**：完整 15×3 矩阵用的是旧提示词；V3 合同下的决赛只有每模型 8 次（TD-51）。
+
 **鼠标聚合（B-T5，四段录像 883 个非零窗口）**：按既有输入窗口聚合，口径 `Σ(|dx|+|dy|)`（路径长度而非净位移）；
 合并分布 P33=556 / P67=1620，取圆整边界 550 / 1600。各录像"大幅"占比：守望先锋 38.9%、灰区 29.7%、
 杀戮尖塔 28.7%、饥荒 20.2%。方向取净位移符号，幅度取路径长度——**两者口径不同**：来回扫动的窗口会是
@@ -766,7 +786,7 @@ M5 重定案一句话：通用视觉的状态不再是"散文笔记本"，而是
 | 2.5 | **B-T2-4 场景命名**（有条件通过 `73968b8`） | 深线首次接通：稳定簇 → 命名 + 跨会话复核（D-50）；12/12 成功、全 observed、$0.0096、P50 3.2s；提示词经查无游戏专属内容 | 已初验 | B-T2 |
 | 2.6 | **B-T2-5 命名收尾**（✅ `a6e8881`） | 判决链路可追溯（matches_existing / candidate / action / rejected 留痕）；uncertain 不覆盖旧名、改标 needs_review；上卡门槛改语义过滤，驻留降级为记录；四张卡重生共 11 个场景，饥荒三个场景回归，STS2 战斗簇被正确滤除 | 已验收 | B-T2-4 |
 | 3 | **B-T5 鼠标聚合证据**（✅ `f71c865`） | input_telemetry 把鼠标位移按 100ms 窗口聚合为方向 + 幅度，以 source=mouse 进证据流并同步进快线【玩家输入】行；游戏卡有角度常数、玩家提供了灵敏度且普通视角时附绝对角度。只出聚合信号。放宽 root_capture_id=None 的非帧证据 | 重放一段你记得转了约 90° 的片段：证据显示方向与幅度；若校准，角度在容差内（待实测） | B-T1（校准字段依赖 B-T3，可后补） |
-| 4 | **B-T3 游戏初始化**（拆三段） | **3a 游戏知识模型选型探针**（执行中）：agent 选 3 个候选模型、生成 15 个跨类型游戏名单，同一提示词各问一遍，记录答案与耗时（目标 ≤10 秒），产品负责人人工判卷后选型。零生产改动。**3b 游戏知识线**：初始化一次 + 每会话联网核查/更新，写卡。**3c HUD 识别线**：开放式——模型看游玩画面自述有哪些 HUD 元素、在哪、怎么读，持续 append 到卡；OCR 作旁证。键位印证、角度常数、游玩画面过滤均不做 | 3a：读判卷表逐题判对错；3b/3c：打开四张卡逐字段判 | B-T2、T7.8 |
+| 4 | **B-T3 游戏初始化**（拆三段） | **3a 选型探针**（✅ `64c3043`）：Gemini 3.1 Flash Lite 仅联网，见 D-37 与 §5.6。**3b 游戏知识线**（执行中）：初始化一次 + 每会话联网核查/更新，写卡 `knowledge` 对象，失败保留上一份；不注入帧观察线（那是 B-T8）。**3c HUD 识别线**：开放式——模型看游玩画面自述有哪些 HUD 元素、在哪、怎么读，持续 append 到卡；OCR 作旁证。键位印证、角度常数、游玩画面过滤均不做 | 3b：打开四张卡的 knowledge 段逐字段判，重点键位；3c：打开四张卡逐字段判 | B-T2、T7.8 |
 | 5 | B-T6 归并器与信念状态 v1 | core/belief/reducer：机械来源的 Claim 标准化（OCR → numeric_value / reads_text，指纹 → scene，键鼠 → doing / changed_from）；BeliefSlot 生命周期；三条策略 ui_numeric / ui_text / scene（参数化）；证据家族计独立组；按 observed_at 归位迟到证据；ActionLog；快照版本号；cognition.md 机械段渲染。回归测试含 ROOT CAUSE：迟到的 42 不覆盖 37、状态变化不判矛盾、同帧派生只算一组 | 四段录像重放：cognition.md 机械段对照现场记录；随机抽 5 条认知沿证据 ID 追到帧号 | B-T1–B-T5 |
 | 6 | **B-T7 笔记员 v1（提补丁）** | 文本档位、每 2 分钟（可配）：输入 = 上版本以来的快线 / 深线证词 + 信念短视图 + 未解矛盾；输出 = StatePatch（每条引用证据 ID）；归并器逐条验证、拒绝原因入账；cognition.md 语义段渲染（实体与命名 / 正在发生 / 存疑与矛盾 / 待查） | **第二场大考**：语义段对照记忆判真伪；看被拒补丁的数量与原因；能自动算的算：数值遗忘、改名次数、误判矛盾、迟到污染、可追溯率 | B-T6 |
 | 7 | **B-T8 快线重设计**（吸收原 B-T1.5） | 传感器齐备后重定快线职责（D-44）：先用四段录像量出"OCR / 指纹 / 键鼠 / 游戏卡已经答了哪些、快线还剩什么"，据此改提示词与上下文（游戏卡短视图 + 认知短视图作稳定前缀，附 context_version；【推测】按数据决定去留），并把候选输出形态在冻结 11 题 + 五个重放角色上 A/B（形态候选：现状 / 减法 / 方位标记散文 / 事实元组，**reads_text 列不再由快线承担**）。同批评估发送频率是否可降、哪些事件类型可不等快线 | A/B 表：核心覆盖、编造率、考卷分、输出 token、TTFT、端到端增量（对着 D-43 的 3–4 秒账）。合同改不改、【全局画面】去留，产品负责人定 | B-T3、B-T4、B-T5、B-T6 |
@@ -889,6 +909,13 @@ M5 重定案一句话：通用视觉的状态不再是"散文笔记本"，而是
     不胜任则新建更强档位并在报告中给出对照
 50. 限流退避的起点 1 秒、上限 60 秒是**无实测依据的保守占位**（服务商合法 Retry-After 不受上限截断）。
     偿还：B-T3 跑批后按实际 Retry-After 分布与限流频率校准；在此之前报告里不得把它当成调好的参数
+51. 游戏知识线的选型样本小且无正式真值：完整 15×3 矩阵跑在旧提示词上，V3 合同下每模型只有 8 次决赛；正式判卷表未填完，
+    产品负责人基于后续对比直接拍板。选型可逆（只是档位配置），但**知识答案没有任何经人工核对的真值**，抽查已见键位错误。
+    偿还：B-T3b 验收时产品负责人至少对四个有录像的游戏逐字段判一次 knowledge；不达标则换回候选二
+52. B-T3a 的评测产物未归档统一：根目录 `prompt.md` / `judging.md` 是旧合同，最终 V3 合同散在各轮子目录。
+    偿还：B-T3b 把生产提示词落到 `prompts/generic/game-knowledge.md`，旧产物标注作废
+53. 本机测试环境两处受限：pytest 默认临时目录无访问权限（需指定仓库内可写目录），且无 OneCore 中文语音（TD-15）。
+    "全量绿"在此环境只能以"非语音全量 + 指定临时目录"口径判。偿还：M10 前在干净 Windows 环境跑一次真正全量
 
 ### 6.5 暂不做
 
