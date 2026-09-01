@@ -26,10 +26,14 @@ def _answer() -> dict[str, object]:
             "setting_and_premise": "不剧透的测试背景。",
             "release_and_service_status": "测试状态。",
         },
-        "default_pc_keybinds": [
-            {"action": f"动作 {index}", "input": f"按键 {index}"}
-            for index in range(1, 7)
-        ],
+        "default_pc_keybinds": {
+            "前进": "W",
+            "后退": "S",
+            "左移": "A",
+            "右移": "D",
+            "跳跃": "Space",
+            "快捷物品栏1": "1",
+        },
     }
 
 
@@ -73,6 +77,8 @@ def test_v2_prompt_has_requested_scope_and_no_game_specific_content() -> None:
     assert "不要输出社区术语" in prompt
     assert '"platform"' not in prompt
     assert "控制器键位" in prompt
+    assert '"前进": "W"' in prompt
+    assert "禁止写成 WASD" in prompt
     for game in pilot.pilot_games():
         assert game.game_name not in prompt
 
@@ -89,8 +95,32 @@ def test_v2_strict_parser_accepts_contract_and_rejects_old_fields() -> None:
     assert parsed is None
     assert error is not None and "多出" in error
 
+    grouped = _answer()
+    grouped["default_pc_keybinds"] = {"移动": "WASD"}
+    parsed, error = pilot.parse_answer(json.dumps(grouped, ensure_ascii=False))
+    assert parsed is None
+    assert error is not None and "不是单一规范化 PC 输入" in error
 
-def test_fake_pilot_runs_three_games_online_only_and_writes_outputs(tmp_path) -> None:
+
+def test_parser_extracts_one_complete_contract_object_but_keeps_warning() -> None:
+    wrapped = "模型前言\n```json\n" + json.dumps(_answer(), ensure_ascii=False) + "\n```"
+    parsed, error = pilot.parse_answer(wrapped)
+    assert parsed == _answer()
+    assert error is not None and "JSON 外文本" in error
+
+    truncated = wrapped[:-20]
+    parsed, error = pilot.parse_answer(truncated)
+    assert parsed is None
+    assert error is not None and "不是合法 JSON" in error
+
+    alternatives = _answer()
+    alternatives["default_pc_keybinds"] = {"切换武器": "1/2"}
+    parsed, error = pilot.parse_answer(json.dumps(alternatives, ensure_ascii=False))
+    assert parsed is None
+    assert error is not None and "不是单一规范化 PC 输入" in error
+
+
+def test_fake_pilot_runs_five_games_online_only_and_writes_outputs(tmp_path) -> None:
     clients: dict[str, _FakeClient] = {}
 
     def factory(mode: pilot.ProbeMode) -> _FakeClient:
@@ -99,7 +129,7 @@ def test_fake_pilot_runs_three_games_online_only_and_writes_outputs(tmp_path) ->
         return client
 
     run = pilot.run_pilot(client_factory=factory)
-    assert len(run.attempts) == 3
+    assert len(run.attempts) == 5
     assert all(item.web_enabled and item.mode_id == "online" for item in run.attempts)
     assert set(clients) == {"online"}
     assert all(item.parsed_answer == _answer() for item in run.attempts)
@@ -110,6 +140,9 @@ def test_fake_pilot_runs_three_games_online_only_and_writes_outputs(tmp_path) ->
         and call["web_enabled"] is True
         and call["provider"] is None
         and call["reasoning_effort"] is None
+        and call["web_search_parameters"] == pilot.WEB_SEARCH_PARAMETERS
+        and call["provider_options"] == pilot.PROVIDER_OPTIONS
+        and call["response_format"] == pilot.RESPONSE_FORMAT
         for client in clients.values()
         for call in client.calls
     )
@@ -117,12 +150,19 @@ def test_fake_pilot_runs_three_games_online_only_and_writes_outputs(tmp_path) ->
     pilot.write_outputs(tmp_path, run)
     report = (tmp_path / "report.md").read_text(encoding="utf-8")
     answers = (tmp_path / "answers.md").read_text(encoding="utf-8")
-    prompt = (tmp_path / "prompt-v2.md").read_text(encoding="utf-8")
+    prompt = (tmp_path / "prompt-v3.md").read_text(encoding="utf-8")
     raw = json.loads((tmp_path / "results.json").read_text(encoding="utf-8"))
+    parsed_contexts = json.loads(
+        (tmp_path / "parsed-contexts.json").read_text(encoding="utf-8")
+    )
     assert "不作选型推荐" in report
-    assert "3/3" in report
+    assert "5/5" in report
     assert "每个游戏只跑联网模式" in report
     assert "知识模式" not in report
     assert "完整的测试游戏介绍" in answers
     assert pilot.SYSTEM_PROMPT_V2 in prompt
-    assert len(raw["attempts"]) == 3
+    assert len(raw["attempts"]) == 5
+    assert raw["web_search_parameters"] == pilot.WEB_SEARCH_PARAMETERS
+    assert raw["provider_options"] == pilot.PROVIDER_OPTIONS
+    assert len(parsed_contexts) == 5
+    assert all(item["context"] == _answer() for item in parsed_contexts)

@@ -344,6 +344,9 @@ class ProbeClient(Protocol):
         temperature: float,
         web_enabled: bool,
         reasoning_effort: str | None = None,
+        web_search_parameters: Mapping[str, object] | None = None,
+        provider_options: Mapping[str, object] | None = None,
+        response_format: Mapping[str, object] | None = None,
     ) -> LlmResult: ...
 
     def dispatch_stats(self) -> LlmDispatchStats: ...
@@ -365,6 +368,9 @@ class ProbeOpenRouterClient(OpenRouterClient):
         temperature: float,
         web_enabled: bool,
         reasoning_effort: str | None = None,
+        web_search_parameters: Mapping[str, object] | None = None,
+        provider_options: Mapping[str, object] | None = None,
+        response_format: Mapping[str, object] | None = None,
     ) -> LlmResult:
         if not web_enabled:
             return self.complete(
@@ -390,17 +396,27 @@ class ProbeOpenRouterClient(OpenRouterClient):
             "tools": [
                 {
                     "type": "openrouter:web_search",
-                    "parameters": {"max_results": 3},
+                    "parameters": dict(
+                        web_search_parameters or {"max_results": 3}
+                    ),
                 }
             ],
         }
         if provider is not None:
+            if provider_options is not None:
+                raise ValueError(
+                    "provider and provider_options cannot both be supplied"
+                )
             request_body["provider"] = {
                 "only": [provider],
                 "allow_fallbacks": False,
             }
+        elif provider_options is not None:
+            request_body["provider"] = dict(provider_options)
         if reasoning_effort is not None:
             request_body["reasoning"] = {"effort": reasoning_effort}
+        if response_format is not None:
+            request_body["response_format"] = dict(response_format)
         try:
             response = self._client.post("chat/completions", json=request_body)
         except httpx.TimeoutException as error:

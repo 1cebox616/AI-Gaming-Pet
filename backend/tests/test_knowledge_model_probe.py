@@ -200,11 +200,35 @@ def test_online_mode_can_leave_provider_routing_to_gateway() -> None:
             temperature=probe.TEMPERATURE,
             web_enabled=True,
             reasoning_effort="none",
+            web_search_parameters={
+                "engine": "exa",
+                "max_results": 5,
+                "max_total_results": 5,
+            },
+            provider_options={
+                "sort": "throughput",
+                "require_parameters": True,
+            },
+            response_format={"type": "json_object"},
         )
     finally:
         client.close()
-    assert "provider" not in bodies[0]
+    assert bodies[0]["tools"] == [
+        {
+            "type": "openrouter:web_search",
+            "parameters": {
+                "engine": "exa",
+                "max_results": 5,
+                "max_total_results": 5,
+            },
+        }
+    ]
+    assert bodies[0]["provider"] == {
+        "sort": "throughput",
+        "require_parameters": True,
+    }
     assert bodies[0]["reasoning"] == {"effort": "none"}
+    assert bodies[0]["response_format"] == {"type": "json_object"}
     assert result.provider == "Compliant Provider"
 
 

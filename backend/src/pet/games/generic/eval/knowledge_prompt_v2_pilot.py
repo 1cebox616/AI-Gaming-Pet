@@ -10,13 +10,13 @@ import html
 import json
 import os
 from pathlib import Path
+import re
 import statistics
 from typing import Protocol
 
 from pet.core.llm import LlmDispatchStats, LlmError, LlmResult
 from pet.games.generic.eval.knowledge_model_probe import (
     BACKEND_DIRECTORY,
-    GAMES,
     MODES,
     OPENROUTER_WEB_SEARCH_DOC,
     GameCase,
@@ -37,10 +37,56 @@ TEMPERATURE = 0.0
 MAX_TOKENS = 2400
 TIMEOUT_SECONDS = 45.0
 LATENCY_TARGET_SECONDS = 10.0
-PILOT_GAME_IDS = (
-    "overwatch-2",
-    "dont-starve-together",
-    "slay-the-spire-2",
+WEB_SEARCH_PARAMETERS: dict[str, object] = {
+    "engine": "exa",
+    "max_results": 5,
+    "max_total_results": 5,
+}
+PROVIDER_OPTIONS: dict[str, object] = {
+    "sort": "throughput",
+    "require_parameters": True,
+}
+PILOT_GAMES = (
+    GameCase(
+        "overwatch-2",
+        "Overwatch 2",
+        "守望先锋",
+        "英雄射击",
+        "长线运营",
+        "录像游戏；团队英雄射击与大量英雄专属键位。",
+    ),
+    GameCase(
+        "rainbow-six-siege",
+        "Tom Clancy's Rainbow Six Siege",
+        "彩虹六号：围攻",
+        "战术射击",
+        "长线运营",
+        "检验战术射击、破坏系统与姿态键位。",
+    ),
+    GameCase(
+        "genshin-impact",
+        "Genshin Impact",
+        "原神",
+        "开放世界动作 RPG",
+        "热门长线运营",
+        "检验动作 RPG、队伍切换与快捷菜单键位。",
+    ),
+    GameCase(
+        "kingdom-come-deliverance-2",
+        "Kingdom Come: Deliverance II",
+        "天国：拯救 2",
+        "开放世界角色扮演",
+        "2025 新作",
+        "检验复杂第一人称 RPG 与上下文动作键位。",
+    ),
+    GameCase(
+        "black-myth-wukong",
+        "Black Myth: Wukong",
+        "黑神话：悟空",
+        "动作角色扮演",
+        "热门近年作品",
+        "检验第三人称动作游戏与战斗键位。",
+    ),
 )
 
 
@@ -67,16 +113,19 @@ SYSTEM_PROMPT_V2 = """你是“游戏知识线”的公开资料整理器。你�
     "setting_and_premise": "不剧透的世界背景、时代或题材前提，只写理解画面与玩法所需内容",
     "release_and_service_status": "公开的发售、抢先体验、长线运营或重大版本状态；无法确认当前状态时写不确定"
   },
-  "default_pc_keybinds": [
-    {"action": "核心动作", "input": "PC 默认键盘鼠标输入"}
-  ]
+  "default_pc_keybinds": {
+    "前进": "W",
+    "快捷物品栏1": "1"
+  }
 }
 
 详细度要求：
 - game_overview 应为信息密度高的完整段落，不是一句话宣传语。
 - gameplay.core_loop 应覆盖开始、进行、反馈与继续循环；major_systems 写 4 至 10 个真正影响玩法的系统。
 - background 只提供理解游戏所需的公开前提，不复述故事。
-- default_pc_keybinds 写 6 至 15 个最常用核心动作；只写 PC 默认键盘鼠标。若该游戏没有统一可靠的 PC 默认绑定，对相应 input 写“不确定”，不要猜测。
+- default_pc_keybinds 是“动作名称 → 单一规范化 PC 输入”的对象，动作名称使用简体中文且不可重复。每个值只允许一个具体按键、鼠标输入或用 + 连接的组合键。
+- 移动方向和快捷栏必须逐项展开，例如“前进":"W"、“后退":"S"、“快捷物品栏1":"1"；禁止写成 WASD、1-0、Q/E、“某键或某键”或任何范围／备选缩写。
+- 输入名使用固定英文形式：单字母 A-Z、数字 0-9、F1-F24、Space、Tab、Escape、Enter、Backspace、CapsLock、LeftShift、RightShift、LeftCtrl、RightCtrl、LeftAlt、RightAlt、方向键 ArrowUp/ArrowDown/ArrowLeft/ArrowRight、MouseLeft、MouseRight、MouseMiddle、Mouse1-Mouse5、MouseWheelUp、MouseWheelDown、MouseMove，以及常见标点键名；组合键用 +，例如 LeftCtrl+F。只收录能够从公开资料确认的默认绑定；不确定的条目直接省略，不要猜测。
 - 所有字段使用简体中文；每个事实应能单独判定为对、错或不确定。"""
 
 USER_PROMPT_TEMPLATE = "游戏名称：{game_name}"
@@ -89,6 +138,154 @@ ANSWER_FIELDS = (
     ("background", "公开背景"),
     ("default_pc_keybinds", "PC 默认键位"),
 )
+
+_NAMED_PC_INPUTS = {
+    "Space",
+    "Tab",
+    "Escape",
+    "Enter",
+    "Backspace",
+    "CapsLock",
+    "LeftShift",
+    "RightShift",
+    "LeftCtrl",
+    "RightCtrl",
+    "LeftAlt",
+    "RightAlt",
+    "ArrowUp",
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+    "MouseLeft",
+    "MouseRight",
+    "MouseMiddle",
+    "MouseWheelUp",
+    "MouseWheelDown",
+    "MouseMove",
+    "Backquote",
+    "Minus",
+    "Equals",
+    "LeftBracket",
+    "RightBracket",
+    "Backslash",
+    "Semicolon",
+    "Apostrophe",
+    "Comma",
+    "Period",
+    "Slash",
+}
+_SIMPLE_PC_INPUT = re.compile(r"(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])")
+
+
+def _is_canonical_pc_input(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    parts = value.split("+")
+    return all(
+        part in _NAMED_PC_INPUTS or _SIMPLE_PC_INPUT.fullmatch(part) is not None
+        for part in parts
+    )
+
+
+_INPUT_PATTERN = (
+    r"^(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|"
+    r"(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|"
+    r"LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|"
+    r"ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|"
+    r"MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|"
+    r"RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash))"
+    r"(?:\+(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|"
+    r"(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|"
+    r"LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|"
+    r"ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|"
+    r"MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|"
+    r"RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash)))*$"
+)
+
+RESPONSE_FORMAT: dict[str, object] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "game_knowledge_context",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [key for key, _label in ANSWER_FIELDS],
+            "properties": {
+                "genre": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "items": {"type": "string", "minLength": 1},
+                },
+                "perspective": {"type": "string", "minLength": 1},
+                "game_overview": {"type": "string", "minLength": 1},
+                "gameplay": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "player_goal",
+                        "core_loop",
+                        "major_systems",
+                        "modes_and_structure",
+                    ],
+                    "properties": {
+                        "player_goal": {"type": "string", "minLength": 1},
+                        "core_loop": {"type": "string", "minLength": 1},
+                        "major_systems": {
+                            "type": "array",
+                            "minItems": 4,
+                            "maxItems": 10,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["name", "description"],
+                                "properties": {
+                                    "name": {"type": "string", "minLength": 1},
+                                    "description": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                    },
+                                },
+                            },
+                        },
+                        "modes_and_structure": {
+                            "type": "string",
+                            "minLength": 1,
+                        },
+                    },
+                },
+                "background": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "setting_and_premise",
+                        "release_and_service_status",
+                    ],
+                    "properties": {
+                        "setting_and_premise": {
+                            "type": "string",
+                            "minLength": 1,
+                        },
+                        "release_and_service_status": {
+                            "type": "string",
+                            "minLength": 1,
+                        },
+                    },
+                },
+                "default_pc_keybinds": {
+                    "type": "object",
+                    "maxProperties": 40,
+                    "propertyNames": {"type": "string", "minLength": 1},
+                    "additionalProperties": {
+                        "type": "string",
+                        "pattern": _INPUT_PATTERN,
+                    },
+                },
+            },
+        },
+    },
+}
 
 ONLINE_MODE = next(mode for mode in MODES if mode.web_enabled)
 PILOT_MODES = (ONLINE_MODE,)
@@ -137,6 +334,9 @@ class PilotClient(Protocol):
         temperature: float,
         web_enabled: bool,
         reasoning_effort: str | None = None,
+        web_search_parameters: Mapping[str, object] | None = None,
+        provider_options: Mapping[str, object] | None = None,
+        response_format: Mapping[str, object] | None = None,
     ) -> LlmResult: ...
 
     def dispatch_stats(self) -> LlmDispatchStats: ...
@@ -148,8 +348,7 @@ ClientFactory = Callable[[ProbeMode], PilotClient]
 
 
 def pilot_games() -> tuple[GameCase, ...]:
-    by_id = {game.game_id: game for game in GAMES}
-    return tuple(by_id[game_id] for game_id in PILOT_GAME_IDS)
+    return PILOT_GAMES
 
 
 def render_user_prompt(game_name: str) -> str:
@@ -160,15 +359,7 @@ def _nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def parse_answer(text: str) -> tuple[dict[str, object] | None, str | None]:
-    if not text.strip():
-        return None, "空答"
-    try:
-        value: object = json.loads(text)
-    except json.JSONDecodeError as error:
-        return None, (
-            f"不是合法 JSON：{error.msg}（line {error.lineno}, column {error.colno}）"
-        )
+def _validate_answer(value: object) -> tuple[dict[str, object] | None, str | None]:
     if not isinstance(value, dict):
         return None, "JSON 顶层不是对象"
     expected = {key for key, _label in ANSWER_FIELDS}
@@ -221,16 +412,48 @@ def parse_answer(text: str) -> tuple[dict[str, object] | None, str | None]:
         return None, "background 含空或非字符串值"
 
     keybinds = value["default_pc_keybinds"]
-    if not isinstance(keybinds, list) or not 6 <= len(keybinds) <= 15:
-        return None, "default_pc_keybinds 必须含 6 至 15 项"
-    for index, item in enumerate(keybinds):
-        if (
-            not isinstance(item, dict)
-            or set(item) != {"action", "input"}
-            or not all(_nonempty_string(item.get(key)) for key in item)
-        ):
-            return None, f"default_pc_keybinds[{index}] 字段不匹配或为空"
+    if not isinstance(keybinds, dict) or len(keybinds) > 40:
+        return None, "default_pc_keybinds 必须是最多 40 项的对象"
+    for action, input_name in keybinds.items():
+        if not _nonempty_string(action):
+            return None, "default_pc_keybinds 含空动作名称"
+        if not _is_canonical_pc_input(input_name):
+            return None, (
+                f"default_pc_keybinds[{action!r}] 不是单一规范化 PC 输入："
+                f"{input_name!r}"
+            )
     return value, None
+
+
+def _extract_contract_object(text: str) -> dict[str, object] | None:
+    decoder = json.JSONDecoder()
+    valid: list[dict[str, object]] = []
+    for match in re.finditer(r"\{", text):
+        try:
+            candidate, _end = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        parsed, error = _validate_answer(candidate)
+        if parsed is not None and error is None:
+            valid.append(parsed)
+    if len(valid) == 1:
+        return valid[0]
+    return None
+
+
+def parse_answer(text: str) -> tuple[dict[str, object] | None, str | None]:
+    if not text.strip():
+        return None, "空答"
+    try:
+        value: object = json.loads(text)
+    except json.JSONDecodeError as error:
+        extracted = _extract_contract_object(text)
+        if extracted is not None:
+            return extracted, "原始响应含 JSON 外文本；已机械提取唯一完整 JSON 对象"
+        return None, (
+            f"不是合法 JSON：{error.msg}（line {error.lineno}, column {error.colno}）"
+        )
+    return _validate_answer(value)
 
 
 def default_client_factory(mode: ProbeMode) -> PilotClient:
@@ -272,6 +495,9 @@ def run_pilot(
                         temperature=TEMPERATURE,
                         web_enabled=mode.web_enabled,
                         reasoning_effort=REASONING_EFFORT,
+                        web_search_parameters=WEB_SEARCH_PARAMETERS,
+                        provider_options=PROVIDER_OPTIONS,
+                        response_format=RESPONSE_FORMAT,
                     )
                     parsed, format_error = parse_answer(result.text)
                     attempt = PilotAttempt(
@@ -358,6 +584,8 @@ def _status(attempt: PilotAttempt) -> str:
         return "失败"
     if not attempt.response_text.strip():
         return "空答"
+    if attempt.parsed_answer is not None and attempt.format_error is not None:
+        return "可解析／包络不合"
     if attempt.format_error is not None:
         return "格式不合"
     return "成功"
@@ -369,7 +597,7 @@ def _cell(value: object) -> str:
 
 def render_report(run: PilotRun) -> str:
     lines = [
-        "# M5-B-T3a DeepSeek V4 提示词 V2 小样本报告",
+        "# M5-B-T3a DeepSeek V4 Instant 优化提示词小样本报告",
         "",
         "本轮只验证修改后的详细游戏 context 提示词，不替换上一轮正式 3 模型 × 15 游戏判卷，也不作选型推荐。",
         "",
@@ -381,25 +609,32 @@ def render_report(run: PilotRun) -> str:
         "- 每个游戏只跑联网模式。",
         f"- 联网模式只使用网关内置 [`openrouter:web_search`]({OPENROUTER_WEB_SEARCH_DOC})，不接独立搜索 API。",
         f"- 固定参数：temperature={TEMPERATURE}，max_tokens={MAX_TOKENS}，reasoning={REASONING_EFFORT or '模型默认'}，客户端超时={TIMEOUT_SECONDS:.0f} 秒；产品延迟目标仍按 ≤{LATENCY_TARGET_SECONDS:.0f} 秒统计。",
+        "- 搜索：Exa；每次最多 5 条、全请求累计最多 5 条；不限制每条结果字符数。",
+        "- 路由：合规上游中按吞吐量优先；要求上游支持请求参数。",
+        "- 输出：请求 OpenRouter JSON Schema 严格结构化输出；是否被实际上游执行按原始响应另行记录。",
         "- 这里的 httpx 超时是连接／读取等 I/O 阶段的超时，不是整次请求的总墙钟截止；联网端点持续传输数据时，实测总耗时可以明显超过 45 秒。",
         "",
         "## 提示词调整",
         "",
         "- 删除社区术语与 HUD 惯例。",
         "- 将一句话核心玩法扩成完整游戏介绍、详细玩法结构与不剧透的公开背景。",
-        "- 默认键位统一为 PC 键盘鼠标，只保留 action / input。",
+        "- 默认键位统一为可机械解析的“动作名称 → 单一规范化 PC 输入”对象；移动方向与快捷栏逐键展开。",
         "- 输出面向后续每个视觉模型的稳定 context，因此完整性优先于极端短小。",
         "",
         "## 耗时与花费",
         "",
-        "| 模式 | 返回 | 格式合规 | P50 / P90 / 最大（秒） | ≤10 秒 | 花费（USD） |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| 模式 | 返回 | 可机械解析 | 原样格式合规 | P50 / P90 / 最大（秒） | ≤10 秒 | 花费（USD） |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
     for mode in PILOT_MODES:
         attempts = [item for item in run.attempts if item.mode_id == mode.mode_id]
         returned = [item for item in attempts if item.error is None and item.response_text.strip()]
         latencies = [item.latency_seconds for item in attempts if item.latency_seconds is not None]
         valid = sum(item.parsed_answer is not None for item in attempts)
+        strict = sum(
+            item.parsed_answer is not None and item.format_error is None
+            for item in attempts
+        )
         target = sum(
             item.latency_seconds is not None
             and item.latency_seconds <= LATENCY_TARGET_SECONDS
@@ -416,6 +651,7 @@ def render_report(run: PilotRun) -> str:
         )
         lines.append(
             f"| {mode.label} | {len(returned)}/{len(attempts)} | {valid}/{len(attempts)} | "
+            f"{strict}/{len(attempts)} | "
             f"{metrics} | {target}/{len(attempts)} | ${cost:.9f} |"
         )
     lines.extend(
@@ -480,8 +716,9 @@ def render_report(run: PilotRun) -> str:
             "",
             "## 说明",
             "",
-            "- 这是 3 个游戏的小样本探针，不能替代正式跨类型判卷。",
+            f"- 这是 {len(pilot_games())} 个游戏的小样本探针，不能替代正式跨类型判卷。",
             "- 答案未由脚本判定事实正确性；完整原文见 answers.md。",
+            "- parsed-contexts.json 只剥离模型额外输出的文本／代码围栏并验证字段与键位形状，不修改 JSON 内容；原始包络不合仍计入格式错误。",
             "- 详细输出与 10 秒延迟目标存在客观张力，本表保留实测，不据此自动调短提示词。",
             "",
             "## 运行信息",
@@ -496,9 +733,9 @@ def render_report(run: PilotRun) -> str:
 
 def render_answers(run: PilotRun) -> str:
     lines = [
-        "# DeepSeek V4 提示词 V2 原始答案",
+        "# DeepSeek V4 Instant 优化提示词原始答案",
         "",
-        "以下内容按调用原样保存；不预填事实正确性判断。",
+        "以下内容保留调用正文，仅去除行尾空白以保持报告格式；不预填事实正确性判断。精确原始字符串见 results.json。",
     ]
     for game in pilot_games():
         lines.extend(("", f"## {game.game_name}", ""))
@@ -514,7 +751,10 @@ def render_answers(run: PilotRun) -> str:
             elif not attempt.response_text:
                 lines.append("（空答）")
             else:
-                lines.extend(("```json", attempt.response_text, "```"))
+                response_text = "\n".join(
+                    line.rstrip() for line in attempt.response_text.splitlines()
+                )
+                lines.extend(("```json", response_text, "```"))
             lines.append("")
     return "\n".join(lines)
 
@@ -522,7 +762,7 @@ def render_answers(run: PilotRun) -> str:
 def render_prompt() -> str:
     return "\n".join(
         (
-            "# M5-B-T3a 游戏知识线提示词 V2",
+            "# M5-B-T3a 游戏知识线提示词 V3",
             "",
             "本轮只跑联网模式；游戏名是运行时数据。",
             "",
@@ -546,7 +786,9 @@ def render_prompt() -> str:
             f"- max_tokens：`{MAX_TOKENS}`",
             f"- reasoning：`{REASONING_EFFORT or '模型默认'}`",
             f"- 客户端超时：`{TIMEOUT_SECONDS}` 秒",
-            "- 联网模式：只增加网关内置 `openrouter:web_search` Server Tool。",
+            "- 联网模式：网关内置 `openrouter:web_search` Server Tool；engine=exa，max_results=5，max_total_results=5，不设置 max_characters。",
+            "- provider：按 throughput 排序，require_parameters=true。",
+            "- response_format：严格 JSON Schema。",
             "",
         )
     )
@@ -562,9 +804,12 @@ def write_raw_results(output: Path, run: PilotRun) -> None:
         "temperature": TEMPERATURE,
         "max_tokens": MAX_TOKENS,
         "reasoning_effort": REASONING_EFFORT,
+        "web_search_parameters": WEB_SEARCH_PARAMETERS,
+        "provider_options": PROVIDER_OPTIONS,
+        "response_format": RESPONSE_FORMAT,
         "timeout_seconds": TIMEOUT_SECONDS,
         "latency_target_seconds": LATENCY_TARGET_SECONDS,
-        "pilot_game_ids": list(PILOT_GAME_IDS),
+        "pilot_game_ids": [game.game_id for game in pilot_games()],
         "attempts": [asdict(item) for item in run.attempts],
         "dispatch_stats": [asdict(item) for item in run.dispatch_stats],
     }
@@ -578,7 +823,38 @@ def write_outputs(output: Path, run: PilotRun) -> None:
     write_raw_results(output, run)
     (output / "report.md").write_text(render_report(run), encoding="utf-8")
     (output / "answers.md").write_text(render_answers(run), encoding="utf-8")
-    (output / "prompt-v2.md").write_text(render_prompt(), encoding="utf-8")
+    (output / "prompt-v3.md").write_text(render_prompt(), encoding="utf-8")
+    parsed_payload = [
+        {
+            "game_id": attempt.game_id,
+            "game_name": attempt.game_name,
+            "context": attempt.parsed_answer,
+            "format_warning": attempt.format_error,
+        }
+        for attempt in run.attempts
+    ]
+    (output / "parsed-contexts.json").write_text(
+        json.dumps(parsed_payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def reparse_existing(output: Path) -> PilotRun:
+    payload = json.loads((output / "results.json").read_text(encoding="utf-8"))
+    attempts: list[PilotAttempt] = []
+    for stored in payload["attempts"]:
+        item = dict(stored)
+        if item["error"] is None:
+            parsed, format_error = parse_answer(item["response_text"])
+            item["parsed_answer"] = parsed
+            item["format_error"] = format_error
+        attempts.append(PilotAttempt(**item))
+    return PilotRun(
+        payload["started_at"],
+        payload["finished_at"],
+        tuple(attempts),
+        tuple(LlmDispatchStats(**item) for item in payload["dispatch_stats"]),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -592,6 +868,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("default", "none", "minimal", "low", "medium", "high", "xhigh", "max"),
         default="default",
     )
+    parser.add_argument(
+        "--reprocess-existing",
+        action="store_true",
+        help="Re-validate the saved raw responses without making model calls.",
+    )
     return parser
 
 
@@ -604,7 +885,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     REASONING_EFFORT = (
         None if arguments.reasoning_effort == "default" else arguments.reasoning_effort
     )
-    run = run_pilot(checkpoint_output=arguments.output)
+    run = (
+        reparse_existing(arguments.output)
+        if arguments.reprocess_existing
+        else run_pilot(checkpoint_output=arguments.output)
+    )
     write_outputs(arguments.output, run)
     print(
         json.dumps(
