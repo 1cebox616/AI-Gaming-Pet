@@ -94,6 +94,14 @@ representative_frame_count = 3
 # 场景指纹核查图片保持原始宽高比缩放到 1920px；16:9 帧即 1920x1080。
 upload_width = 1920
 
+[games.generic.knowledge]
+enabled = true
+llm_profile = "game_knowledge"
+# T3a：P90 5 秒、最大 6 秒；总墙钟 10 秒留 4 秒余量，不重试。
+wall_timeout_seconds = 10.0
+# 待实测：B-T8 才接消费者；当前渲染器用 UTF-8 字节作保守 token 硬顶。
+short_view_token_limit = 512
+
 # 在线模型默认关闭。密钥只从 OPENROUTER_API_KEY 环境变量读取。
 [llm]
 enabled = true
@@ -124,3 +132,13 @@ timeout_seconds = 10.0
 max_tokens = 1024
 input_price_per_million_usd = 0.15
 output_price_per_million_usd = 0.47
+
+# 游戏知识线：T3a 定案，仅默认 OpenRouter 端点的 Exa web_search。
+[llm.profiles.game_knowledge]
+enabled = true
+model = "google/gemini-3.1-flash-lite"
+# 空字符串表示 OpenRouter 自动路由，不继承顶层的 Alibaba 锁定。
+provider = ""
+temperature = 0.0
+timeout_seconds = 10.0
+max_tokens = 8000

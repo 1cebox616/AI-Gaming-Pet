@@ -1,3 +1,5 @@
+# 已作废：M5-B-T3a 旧合同；生产使用 `prompts/generic/game-knowledge.md` 的 V3 合同
+
 # M5-B-T3a 统一提示词
 
 三个模型、知识／联网两种模式使用以下 system prompt，逐字相同。游戏名不属于提示词规则，而是运行时数据；用户消息固定使用同一模板，仅替换 `{game_name}`。

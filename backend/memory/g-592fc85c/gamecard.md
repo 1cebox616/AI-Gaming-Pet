@@ -3,8 +3,23 @@
 - 游戏 ID：`g-592fc85c`
 - 初始化时间：2026-08-27T21:18:16.270174+00:00
 - 版本：2
-- 类型：未学习
-- 视角：未学习
+
+## 游戏知识
+
+- 状态：stale
+- 最近核查：2026-09-01T16:34:38.129862+00:00
+- 模型：`google/gemini-3.1-flash-lite`
+- 模式：web
+- 请求 ID：`gk-b8c276b9-8523-4d78-9dde-e93d8b417071`
+
+没有通过完整 V3 合同的有效内容。
+
+### 核查尝试
+
+- 2026-09-01T15:05:52.624615+00:00：failed；原因：OpenRouter网络请求失败：[WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions [occurred_at=2026-09-01T15:05:52.624615+00:00]
+- 2026-09-01T16:29:51.671264+00:00：schema_reject；原因：未通过完整 V3 合同：1 validation error for GameKnowledgeContent Value error, game knowledge keybind '技能1' is not canonical: 'Shift' [type=value_error, input_value={'genre': ['第一人称...快捷物品栏4': '4'}}, input_type=dict] For further information visit https://errors.pydantic.dev/2.13/v/value_error
+- 2026-09-01T16:32:12.496587+00:00：schema_reject；原因：未通过完整 V3 合同：1 validation error for GameKnowledgeContent Value error, game knowledge keybind '技能1' is not canonical: 'Shift' [type=value_error, input_value={'genre': ['第一人称...快捷物品栏4': '4'}}, input_type=dict] For further information visit https://errors.pydantic.dev/2.13/v/value_error
+- 2026-09-01T16:34:38.129862+00:00：schema_reject；原因：未通过完整 V3 合同：1 validation error for GameKnowledgeContent Value error, game knowledge keybind '技能1' is not canonical: 'Shift' [type=value_error, input_value={'genre': ['第一人称...快捷物品栏4': '4'}}, input_type=dict] For further information visit https://errors.pydantic.dev/2.13/v/value_error
 
 ## 场景
 
@@ -56,11 +71,7 @@
 - 命名时间：2026-08-31T19:45:01.850798+00:00
 - 场景指纹核查证据：`f613:deep:1`
 
-## HUD 槽位
-
-暂无。
-
-## 键位
+## HUD 元素
 
 暂无。
 

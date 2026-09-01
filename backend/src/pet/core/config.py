@@ -114,7 +114,7 @@ class LlmProfileConfig(BaseModel):
     )
     temperature: float | None = Field(default=None, ge=0, le=2)
     timeout_seconds: float | None = Field(default=None, gt=0, le=30)
-    max_tokens: int | None = Field(default=None, ge=1, le=2048)
+    max_tokens: int | None = Field(default=None, ge=1, le=8192)
     input_price_per_million_usd: float | None = Field(default=None, ge=0)
     output_price_per_million_usd: float | None = Field(default=None, ge=0)
 
@@ -135,7 +135,7 @@ class LlmConfig(BaseModel):
     temperature: float = Field(default=0.9, ge=0, le=2)
     # M3-T10: 3 seconds is over three times the offline 0.8-second event P95.
     timeout_seconds: float = Field(default=3.0, gt=0, le=30)
-    max_tokens: int = Field(default=256, ge=1, le=2048)
+    max_tokens: int = Field(default=256, ge=1, le=8192)
     profiles: dict[str, LlmProfileConfig] = Field(default_factory=dict)
 
 
@@ -177,6 +177,19 @@ class SceneNamingConfig(BaseModel):
     max_requests_per_session: int = Field(default=8, ge=1, le=64)
     representative_frame_count: int = Field(default=3, ge=1, le=3)
     upload_width: int = Field(default=1920, ge=320, le=3840)
+
+
+class GameKnowledgeConfig(BaseModel):
+    """One asynchronous shelf-one lookup for each observed game session."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    enabled: bool = False
+    llm_profile: str = "game_knowledge"
+    # T3a measured P90=5s and max=6s; 10s leaves four seconds of wall margin.
+    wall_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    # 待实测：B-T8 决定实际消费者与合适长度；当前只提供有硬顶的渲染器。
+    short_view_token_limit: int = Field(default=512, ge=1, le=8192)
 
 
 class SceneConfig(BaseModel):
@@ -221,6 +234,7 @@ class GenericVisionConfig(BaseModel):
     cost_warn_per_hour: float = Field(default=1.0, gt=0)
     ocr: OcrConfig = Field(default_factory=OcrConfig)
     scene: SceneConfig = Field(default_factory=SceneConfig)
+    knowledge: GameKnowledgeConfig = Field(default_factory=GameKnowledgeConfig)
 
 
 GENERIC_VISION_FIELDS = frozenset(GenericVisionConfig.model_fields)
@@ -280,6 +294,7 @@ ConfigSection = TypeVar(
     PolicyConfig,
     PersonalityConfig,
     GenericVisionConfig,
+    GameKnowledgeConfig,
     SceneConfig,
     SceneNamingConfig,
     LlmProfileConfig,

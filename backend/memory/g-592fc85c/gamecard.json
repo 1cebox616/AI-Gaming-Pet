@@ -1,8 +1,36 @@
 {
   "game_id": "g-592fc85c",
   "display_name": "守望先锋",
-  "genre": null,
-  "perspective": null,
+  "knowledge": {
+    "content": null,
+    "status": "stale",
+    "checked_at": "2026-09-01T16:34:38.129862Z",
+    "model": "google/gemini-3.1-flash-lite",
+    "mode": "web",
+    "request_id": "gk-b8c276b9-8523-4d78-9dde-e93d8b417071",
+    "attempts": [
+      {
+        "attempted_at": "2026-09-01T15:05:52.624615Z",
+        "result": "failed",
+        "failure_reason": "OpenRouter网络请求失败：[WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions [occurred_at=2026-09-01T15:05:52.624615+00:00]"
+      },
+      {
+        "attempted_at": "2026-09-01T16:29:51.671264Z",
+        "result": "schema_reject",
+        "failure_reason": "未通过完整 V3 合同：1 validation error for GameKnowledgeContent Value error, game knowledge keybind '技能1' is not canonical: 'Shift' [type=value_error, input_value={'genre': ['第一人称...快捷物品栏4': '4'}}, input_type=dict] For further information visit https://errors.pydantic.dev/2.13/v/value_error"
+      },
+      {
+        "attempted_at": "2026-09-01T16:32:12.496587Z",
+        "result": "schema_reject",
+        "failure_reason": "未通过完整 V3 合同：1 validation error for GameKnowledgeContent Value error, game knowledge keybind '技能1' is not canonical: 'Shift' [type=value_error, input_value={'genre': ['第一人称...快捷物品栏4': '4'}}, input_type=dict] For further information visit https://errors.pydantic.dev/2.13/v/value_error"
+      },
+      {
+        "attempted_at": "2026-09-01T16:34:38.129862Z",
+        "result": "schema_reject",
+        "failure_reason": "未通过完整 V3 合同：1 validation error for GameKnowledgeContent Value error, game knowledge keybind '技能1' is not canonical: 'Shift' [type=value_error, input_value={'genre': ['第一人称...快捷物品栏4': '4'}}, input_type=dict] For further information visit https://errors.pydantic.dev/2.13/v/value_error"
+      }
+    ]
+  },
   "scenes": [
     {
       "scene_id": "scene:s1",
@@ -77,12 +105,7 @@
       ]
     }
   ],
-  "hud_slots": [],
-  "keybinds": {},
-  "view_constants": {
-    "yaw_deg_per_count": null,
-    "user_sensitivity": null
-  },
+  "hud_elements": [],
   "init": {
     "initialized_at": "2026-08-27T21:18:16.270174Z",
     "source_recordings": [

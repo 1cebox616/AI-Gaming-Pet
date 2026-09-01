@@ -6,7 +6,7 @@ import asyncio
 from collections import Counter
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import functools
 import json
@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import time
 import tomllib
+import uuid
 from typing import Literal, Protocol
 
 import numpy as np
@@ -29,6 +30,7 @@ from pet.core.belief import (
     EvidenceStore,
     FastObservationPayload,
     FrameMetricsPayload,
+    GameKnowledgePayload,
     KeyWindowPayload,
     MouseMotionPayload,
     OcrFramePayload,
@@ -41,8 +43,10 @@ from pet.core.belief import (
 from pet.core.input_telemetry import ActionInputWindow, MouseMotionAggregate
 from pet.core.config import AdapterConfig, LlmConfig, resolve_llm_profile
 from pet.core.gamecard import (
+    GameCard,
     GameCardRepository,
     GameCardSession,
+    GameKnowledgeWriteAction,
     SceneCardVerification,
     slugify_game_id,
 )
@@ -66,6 +70,12 @@ from pet.core.scene_fingerprint import (
     perceptual_hash,
 )
 from pet.games.generic.deep_read import DeepReadResult, DeepVisionReader
+from pet.games.generic.game_knowledge import (
+    GAME_KNOWLEDGE_MODE,
+    GameKnowledgeCallResult,
+    GameKnowledgeClientProtocol,
+    GameKnowledgeReader,
+)
 from pet.games.generic.scene_naming import (
     ExistingSceneNaming,
     SceneNamingFrame,
@@ -151,6 +161,10 @@ class InputContextLike(Protocol):
 CaptureBackendFactory = Callable[[], CaptureBackendLike]
 SelectorFactory = Callable[[float], FrameSelectorLike]
 ClientFactory = Callable[[str, str | None, str, float], LlmVisionClientProtocol]
+KnowledgeClientFactory = Callable[
+    [str, str | None, str, float],
+    GameKnowledgeClientProtocol,
+]
 InputListenerFactory = Callable[[CaptureBackendLike], InputContextLike]
 
 
@@ -191,6 +205,14 @@ class SceneNamingContext:
     frames: tuple[BufferedSceneFrame, ...]
     trigger_frame_ts: float
     existing_scene: ExistingSceneNaming | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GameKnowledgeContext:
+    game_id: str
+    game_name: str
+    card: GameCard
+    trigger_monotonic: float
 
 
 class WindowTitleMap:
@@ -453,6 +475,9 @@ class ObservationLog:
         self.deep_calls = 0
         self.deep_failures = 0
         self.deep_total_cost_usd = 0.0
+        self.game_knowledge_attempts = 0
+        self.game_knowledge_total_cost_usd = 0.0
+        self.game_knowledge_outcomes: Counter[str] = Counter()
         self.llm_errors: list[dict[str, object]] = []
         self.dispatch_profiles: dict[str, dict[str, object]] = {}
         self.visible_output_token_total = 0
@@ -829,6 +854,68 @@ class ObservationLog:
         self.record_deep_call(result.cost_usd, failed=validation_error is not None)
         return evidence_id
 
+    def append_game_knowledge(
+        self,
+        *,
+        trigger_monotonic: float,
+        learned_monotonic: float,
+        result: GameKnowledgeCallResult,
+        write_action: GameKnowledgeWriteAction,
+        game_id: str,
+    ) -> str:
+        observed_at = self._relative(trigger_monotonic)
+        learned_at = max(observed_at, self._relative(learned_monotonic))
+        evidence_id = self._evidence.new_evidence_id(None, "init")
+        event_outcome: EvidenceOutcome = {
+            "ok": "ok",
+            "cooldown_drop": "dropped",
+            "timeout": "dropped",
+            "failed": "failed",
+            "schema_reject": "failed",
+        }[result.outcome]
+        self._append_event(
+            EvidenceEvent(
+                evidence_id=evidence_id,
+                source="init",
+                kind="game_knowledge",
+                root_capture_id=None,
+                observed_at=observed_at,
+                learned_at=learned_at,
+                scope=None,
+                payload=GameKnowledgePayload(
+                    game_id=game_id,
+                    mode=GAME_KNOWLEDGE_MODE,
+                    model=result.model,
+                    request_id=result.request_id,
+                    outcome=result.outcome,
+                    latency_ms=result.latency_ms,
+                    cost_usd=result.cost_usd,
+                    write_action=write_action,
+                    actual_model=result.actual_model,
+                    provider=result.provider,
+                    prompt_tokens=result.prompt_tokens,
+                    completion_tokens=result.completion_tokens,
+                    failure_reason=result.failure_reason,
+                    normalization_actions=list(result.normalization_actions),
+                ),
+                derived_from=[],
+                context_version=None,
+                outcome=event_outcome,
+            )
+        )
+        self.game_knowledge_attempts += 1
+        self.game_knowledge_outcomes[result.outcome] += 1
+        self.game_knowledge_total_cost_usd += result.cost_usd
+        self.total_cost_usd += result.cost_usd
+        if result.error_metadata is not None:
+            self.record_llm_error(
+                result.error_metadata,
+                phase="game_knowledge",
+                write=False,
+            )
+        self._write_session(None)
+        return evidence_id
+
     def record_deep_call(self, cost_usd: float, *, failed: bool) -> None:
         if cost_usd < 0:
             raise ValueError("deep call cost must be nonnegative")
@@ -945,6 +1032,12 @@ class ObservationLog:
             "deep_call_count": self.deep_calls,
             "deep_failure_count": self.deep_failures,
             "deep_total_cost_usd": round(self.deep_total_cost_usd, 9),
+            "game_knowledge_attempt_count": self.game_knowledge_attempts,
+            "game_knowledge_total_cost_usd": round(
+                self.game_knowledge_total_cost_usd,
+                9,
+            ),
+            "game_knowledge_outcomes": dict(self.game_knowledge_outcomes),
             "rate_limit_count": rate_limit_count,
             "cooldown_seconds": round(cooldown_seconds, 6),
             "cooldown_drop_count": cooldown_drop_count,
@@ -983,6 +1076,20 @@ def _default_client_factory(
     )
 
 
+def _default_knowledge_client_factory(
+    profile_name: str,
+    base_url: str | None,
+    api_key_env: str,
+    timeout_seconds: float,
+) -> GameKnowledgeClientProtocol:
+    return OpenRouterClient.from_profile(
+        profile_name=profile_name,
+        base_url=base_url,
+        api_key_env=api_key_env,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 class GenericVisionAdapter:
     adapter_id = "generic"
     display_name = "通用视觉"
@@ -998,6 +1105,7 @@ class GenericVisionAdapter:
         selector_factory: SelectorFactory,
         client_factory: ClientFactory = _default_client_factory,
         deep_client_factory: ClientFactory | None = None,
+        knowledge_client_factory: KnowledgeClientFactory | None = None,
         input_listener_factory: InputListenerFactory | None = None,
         title_map: WindowTitleMap | None = None,
         clock: Callable[[], float] = time.perf_counter,
@@ -1009,6 +1117,9 @@ class GenericVisionAdapter:
         self._selector_factory = selector_factory
         self._client_factory = client_factory
         self._deep_client_factory = deep_client_factory or client_factory
+        self._knowledge_client_factory = (
+            knowledge_client_factory or _default_knowledge_client_factory
+        )
         self._input_listener_factory = input_listener_factory
         self._title_map = title_map or WindowTitleMap.load()
         self._clock = clock
@@ -1049,6 +1160,10 @@ class GenericVisionAdapter:
         self._scene_changed_since_selected = False
         self._deep_reader: DeepVisionReader | None = None
         self._deep_client: LlmVisionClientProtocol | None = None
+        self._knowledge_reader: GameKnowledgeReader | None = None
+        self._knowledge_client: GameKnowledgeClientProtocol | None = None
+        self._knowledge_configuration: LlmConfig | None = None
+        self._game_knowledge_tasks: set[asyncio.Task[None]] = set()
         self._scene_naming_tasks: set[asyncio.Task[None]] = set()
         self._scene_naming_attempted: set[int] = set()
         self._scene_naming_request_count = 0
@@ -1116,6 +1231,7 @@ class GenericVisionAdapter:
             "output_price_per_million_usd": self._output_price,
             "ocr": self._settings.ocr.model_dump(),
             "scene": self._settings.scene.model_dump(),
+            "knowledge": self._settings.knowledge.model_dump(),
         }
         if extra_parameters:
             parameters.update(extra_parameters)
@@ -1195,12 +1311,14 @@ class GenericVisionAdapter:
         self._close_input_context()
         await self._finish_ocr()
         await self._finish_scene_naming()
+        await self._finish_game_knowledge()
         close_client = getattr(self._client, "close", None)
         self._sync_dispatch_statistics()
         if callable(close_client):
             close_client()
         self._client = None
         self._close_deep_reader()
+        self._close_knowledge_reader()
         if self._log is not None:
             self._close_scene_session()
             self._log.close()
@@ -1236,12 +1354,14 @@ class GenericVisionAdapter:
             await asyncio.gather(*self._inflight, return_exceptions=True)
         await self._finish_ocr()
         await self._finish_scene_naming()
+        await self._finish_game_knowledge()
         close_client = getattr(self._client, "close", None)
         self._sync_dispatch_statistics()
         if callable(close_client):
             close_client()
         self._client = None
         self._close_deep_reader()
+        self._close_knowledge_reader()
         if self._log is not None:
             self._close_scene_session()
             self._log.close()
@@ -1424,14 +1544,39 @@ class GenericVisionAdapter:
         self._scene_naming_request_count = 0
         self._deep_reader = None
         self._deep_client = None
+        self._knowledge_reader = None
+        self._knowledge_client = None
+        self._knowledge_configuration = None
         settings = self._settings.scene
-        if not settings.enabled:
+        knowledge = self._settings.knowledge
+        if not settings.enabled and not knowledge.enabled:
             self._scene_repository = None
             return
         memory_root = Path(settings.memory_dir)
         if not memory_root.is_absolute():
             memory_root = BACKEND_DIRECTORY / memory_root
         self._scene_repository = GameCardRepository(memory_root)
+        if knowledge.enabled:
+            profile = self._llm_configuration.profiles.get(knowledge.llm_profile)
+            if profile is None:
+                raise RuntimeError(
+                    f"游戏知识模型档位不存在：{knowledge.llm_profile}"
+                )
+            effective_knowledge = resolve_llm_profile(
+                self._llm_configuration,
+                knowledge.llm_profile,
+            )
+            if not effective_knowledge.enabled or not effective_knowledge.model.strip():
+                raise RuntimeError(
+                    f"游戏知识模型档位 {knowledge.llm_profile} 未启用或未配置型号"
+                )
+            # Client creation is deliberately lazy and line-local.  A missing
+            # knowledge-only credential must produce one failed attempt after the
+            # game is known, not prevent capture/OCR/fingerprint/fast vision from
+            # starting at all.
+            self._knowledge_configuration = effective_knowledge
+        if not settings.enabled:
+            return
         naming = settings.naming
         if not naming.enabled:
             return
@@ -1464,7 +1609,7 @@ class GenericVisionAdapter:
         identity: GameIdentity,
     ) -> SceneFrameState | None:
         settings = self._settings.scene
-        if not settings.enabled:
+        if not settings.enabled and not self._settings.knowledge.enabled:
             return None
         assert self._scene_repository is not None
         if self._scene_game_id != identity.game_id:
@@ -1477,19 +1622,30 @@ class GenericVisionAdapter:
                 identity.display_name,
                 frame.metadata.captured_at,
             )
-            self._scene_session = GameCardSession(
-                self._scene_repository,
-                card,
-                frame.metadata.captured_at,
-            )
-            self._scene_clusterer = SceneClusterer(
-                settings.hamming_threshold,
-                settings.stable_min_seconds,
-                self._scene_repository.card_references(card),
-            )
+            if settings.enabled:
+                self._scene_session = GameCardSession(
+                    self._scene_repository,
+                    card,
+                    frame.metadata.captured_at,
+                )
+                self._scene_clusterer = SceneClusterer(
+                    settings.hamming_threshold,
+                    settings.stable_min_seconds,
+                    self._scene_repository.card_references(card),
+                )
             self._scene_game_id = identity.game_id
             self._scene_origin_monotonic = frame.metadata.monotonic_seconds
             self._scene_last_flush_at = 0.0
+            self._schedule_game_knowledge(
+                GameKnowledgeContext(
+                    game_id=identity.game_id,
+                    game_name=identity.context_name,
+                    card=card,
+                    trigger_monotonic=frame.metadata.monotonic_seconds,
+                )
+            )
+        if not settings.enabled:
+            return None
         assert self._scene_session is not None
         assert self._scene_clusterer is not None
         assert self._scene_origin_monotonic is not None
@@ -1519,6 +1675,140 @@ class GenericVisionAdapter:
             fingerprint=fingerprint,
             match=match,
             elapsed_ms=elapsed_ms,
+        )
+
+    def _schedule_game_knowledge(self, context: GameKnowledgeContext) -> None:
+        if (
+            not self._settings.knowledge.enabled
+            or self._knowledge_configuration is None
+        ):
+            return
+        task = asyncio.create_task(
+            self._run_game_knowledge(context),
+            name=f"generic-game-knowledge-{context.game_id}",
+        )
+        self._game_knowledge_tasks.add(task)
+        task.add_done_callback(self._game_knowledge_tasks.discard)
+
+    async def _run_game_knowledge(self, context: GameKnowledgeContext) -> None:
+        assert self._scene_repository is not None
+        assert self._knowledge_configuration is not None
+        started = self._clock()
+        try:
+            reader = self._ensure_knowledge_reader()
+            result = await reader.read(context.game_name)
+        except (LlmError, OSError, ValueError) as error:
+            metadata = error.metadata() if isinstance(error, LlmError) else {
+                "error_type": "local_initialization"
+            }
+            result = self._knowledge_initialization_failure(
+                error,
+                started=started,
+                error_metadata=metadata,
+            )
+        except Exception as error:
+            logger.exception("游戏知识线初始化出现未预期异常")
+            result = self._knowledge_initialization_failure(
+                error,
+                started=started,
+                error_metadata={"error_type": "unexpected_local"},
+            )
+        checked_at = datetime.now(timezone.utc)
+        try:
+            card, write_action = self._scene_repository.record_knowledge_attempt(
+                context.card,
+                checked_at=checked_at,
+                model=result.model,
+                mode=GAME_KNOWLEDGE_MODE,
+                request_id=result.request_id,
+                outcome=result.outcome,
+                failure_reason=result.failure_reason,
+                content=result.content,
+            )
+        except (OSError, ValueError) as error:
+            logger.exception("游戏知识结果写卡失败：%s", context.game_id)
+            result = replace(
+                result,
+                outcome="failed",
+                content=None,
+                failure_reason=f"游戏卡写入失败：{_one_line(error)}",
+            )
+            write_action = "kept_previous"
+            card = context.card
+        if (
+            self._scene_session is not None
+            and self._scene_session.card.game_id == context.game_id
+        ):
+            self._scene_session.card = card
+        if self._log is not None:
+            self._log.append_game_knowledge(
+                trigger_monotonic=context.trigger_monotonic,
+                learned_monotonic=self._clock(),
+                result=result,
+                write_action=write_action,
+                game_id=context.game_id,
+            )
+        self._sync_dispatch_statistics()
+        self._refresh_cost_warning()
+        if result.outcome == "ok":
+            logger.info(
+                "游戏知识线完成 %s：%s（%.3fs，$%.6f）",
+                context.game_id,
+                write_action,
+                result.latency_ms / 1000.0,
+                result.cost_usd,
+            )
+        else:
+            logger.warning(
+                "游戏知识线未更新 %s：%s；保留上一份内容",
+                context.game_id,
+                result.failure_reason,
+            )
+
+    def _ensure_knowledge_reader(self) -> GameKnowledgeReader:
+        if self._knowledge_reader is not None:
+            return self._knowledge_reader
+        assert self._knowledge_configuration is not None
+        settings = self._settings.knowledge
+        configuration = self._knowledge_configuration
+        client = self._knowledge_client_factory(
+            settings.llm_profile,
+            configuration.base_url,
+            configuration.api_key_env,
+            configuration.timeout_seconds,
+        )
+        reader = GameKnowledgeReader(
+            client,
+            configuration,
+            wall_timeout_seconds=settings.wall_timeout_seconds,
+            clock=self._clock,
+        )
+        self._knowledge_client = client
+        self._knowledge_reader = reader
+        return reader
+
+    def _knowledge_initialization_failure(
+        self,
+        error: Exception,
+        *,
+        started: float,
+        error_metadata: dict[str, object],
+    ) -> GameKnowledgeCallResult:
+        assert self._knowledge_configuration is not None
+        return GameKnowledgeCallResult(
+            request_id=f"gk-{uuid.uuid4()}",
+            outcome="failed",
+            model=self._knowledge_configuration.model,
+            actual_model=None,
+            provider=self._knowledge_configuration.provider or None,
+            latency_ms=max(0.0, (self._clock() - started) * 1000.0),
+            cost_usd=0.0,
+            prompt_tokens=None,
+            completion_tokens=None,
+            content=None,
+            failure_reason=f"游戏知识线初始化失败：{_one_line(error)}",
+            normalization_actions=(),
+            error_metadata=error_metadata,
         )
 
     def _record_scene_fingerprint(
@@ -1771,6 +2061,13 @@ class GenericVisionAdapter:
                 return_exceptions=True,
             )
 
+    async def _finish_game_knowledge(self) -> None:
+        if self._game_knowledge_tasks:
+            await asyncio.gather(
+                *tuple(self._game_knowledge_tasks),
+                return_exceptions=True,
+            )
+
     def _close_scene_frame_buffer(self) -> None:
         for frame in self._scene_frame_buffer:
             frame.image.close()
@@ -1802,6 +2099,13 @@ class GenericVisionAdapter:
         if reader is not None:
             reader.close()
         self._deep_client = None
+
+    def _close_knowledge_reader(self) -> None:
+        self._sync_dispatch_statistics()
+        reader, self._knowledge_reader = self._knowledge_reader, None
+        if reader is not None:
+            reader.close()
+        self._knowledge_client = None
 
     def _initialize_ocr(self) -> None:
         settings = self._settings.ocr
@@ -2263,7 +2567,7 @@ class GenericVisionAdapter:
     def _dispatch_statistics(self) -> tuple[LlmDispatchStats, ...]:
         snapshots: list[LlmDispatchStats] = []
         seen: set[int] = set()
-        for client in (self._client, self._deep_client):
+        for client in (self._client, self._deep_client, self._knowledge_client):
             if client is None or id(client) in seen:
                 continue
             seen.add(id(client))

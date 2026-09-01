@@ -408,6 +408,28 @@ class LlmClientProtocol(Protocol):
         ...
 
 
+class LlmWebClientProtocol(Protocol):
+    """The cancellable OpenRouter server-tool boundary for shelf-one lookup."""
+
+    async def complete_with_web_search(
+        self,
+        *,
+        model: str,
+        provider: str | None,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+        reasoning_effort: str,
+        web_search_parameters: Mapping[str, object],
+        provider_options: Mapping[str, object],
+        response_format: Mapping[str, object],
+        plugins: Sequence[Mapping[str, object]],
+    ) -> LlmResult:
+        """Return one web-grounded response without retrying."""
+        ...
+
+
 class LlmAnalysisClientProtocol(Protocol):
     """The synchronous streamed-analysis boundary used by offline evaluation."""
 
@@ -496,9 +518,13 @@ class OpenRouterClient:
         )
         parsed_url = urlparse(selected_base_url)
         self.endpoint_host = parsed_url.hostname or ""
+        self._base_url = f"{selected_base_url.rstrip('/')}/"
+        self._headers = {"Authorization": f"Bearer {api_key}"}
+        self._timeout_seconds = timeout_seconds
+        self._transport = transport
         self._client = httpx.Client(
-            base_url=f"{selected_base_url.rstrip('/')}/",
-            headers={"Authorization": f"Bearer {api_key}"},
+            base_url=self._base_url,
+            headers=self._headers,
             timeout=timeout_seconds,
             transport=transport,
         )
@@ -585,6 +611,51 @@ class OpenRouterClient:
             seed=seed,
             reasoning_effort=reasoning_effort,
             reasoning_enabled=reasoning_enabled,
+        )
+
+    async def complete_with_web_search(
+        self,
+        *,
+        model: str,
+        provider: str | None,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float,
+        reasoning_effort: str,
+        web_search_parameters: Mapping[str, object],
+        provider_options: Mapping[str, object],
+        response_format: Mapping[str, object],
+        plugins: Sequence[Mapping[str, object]],
+    ) -> LlmResult:
+        """Use OpenRouter's bounded web-search tool on the default endpoint."""
+        if not self._allows_provider_routing:
+            raise LlmError(
+                "自定义模型端点不支持 OpenRouter 联网工具；未发送服务商专有参数",
+                profile_name=self._profile_name,
+            )
+        self._cooldown.before_dispatch()
+        return await self._complete_messages_async(
+            model=model,
+            provider=provider,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            seed=None,
+            reasoning_effort=reasoning_effort,
+            reasoning_enabled=None,
+            provider_options=provider_options,
+            response_format=response_format,
+            tools=(
+                {
+                    "type": "openrouter:web_search",
+                    "parameters": dict(web_search_parameters),
+                },
+            ),
+            plugins=plugins,
         )
 
     def list_model_ids(self) -> tuple[str, ...] | None:
@@ -734,6 +805,59 @@ class OpenRouterClient:
             reasoning_enabled=reasoning_enabled,
         )
 
+    def _build_request_body(
+        self,
+        *,
+        model: str,
+        provider: str | None,
+        messages: list[dict[str, object]],
+        max_tokens: int,
+        temperature: float,
+        seed: int | None,
+        reasoning_effort: str | None,
+        reasoning_enabled: bool | None,
+        provider_options: Mapping[str, object] | None = None,
+        response_format: Mapping[str, object] | None = None,
+        tools: Sequence[Mapping[str, object]] | None = None,
+        plugins: Sequence[Mapping[str, object]] | None = None,
+    ) -> tuple[dict[str, object], str | None]:
+        request_body: dict[str, object] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        }
+        effective_provider = provider if self._allows_provider_routing else None
+        if effective_provider is not None and provider_options is not None:
+            raise ValueError("provider and provider_options cannot both be supplied")
+        if effective_provider is not None:
+            request_body["provider"] = {
+                "only": [effective_provider],
+                "allow_fallbacks": False,
+            }
+        elif provider_options is not None:
+            if not self._allows_provider_routing:
+                raise ValueError("provider options require the default OpenRouter endpoint")
+            request_body["provider"] = dict(provider_options)
+        if response_format is not None:
+            request_body["response_format"] = dict(response_format)
+        if tools is not None:
+            request_body["tools"] = [dict(tool) for tool in tools]
+        if plugins is not None:
+            request_body["plugins"] = [dict(plugin) for plugin in plugins]
+        if seed is not None:
+            request_body["seed"] = seed
+        if reasoning_effort is not None and reasoning_enabled is not None:
+            raise ValueError("reasoning effort and enabled flag are mutually exclusive")
+        if reasoning_effort is not None:
+            if reasoning_effort not in {"none", "minimal", "low", "medium", "high"}:
+                raise ValueError("unsupported reasoning effort")
+            request_body["reasoning"] = {"effort": reasoning_effort}
+        elif reasoning_enabled is not None:
+            request_body["reasoning"] = {"enabled": reasoning_enabled}
+        return request_body, effective_provider
+
     def _complete_messages(
         self,
         *,
@@ -745,32 +869,27 @@ class OpenRouterClient:
         seed: int | None,
         reasoning_effort: str | None,
         reasoning_enabled: bool | None,
+        provider_options: Mapping[str, object] | None = None,
+        response_format: Mapping[str, object] | None = None,
+        tools: Sequence[Mapping[str, object]] | None = None,
+        plugins: Sequence[Mapping[str, object]] | None = None,
     ) -> LlmResult:
         """Send one prepared non-streaming message list without retrying."""
         started_at = self._clock()
-        request_body: dict[str, object] = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "stream": False,
-        }
-        effective_provider = provider if self._allows_provider_routing else None
-        if effective_provider is not None:
-            request_body["provider"] = {
-                "only": [effective_provider],
-                "allow_fallbacks": False,
-            }
-        if seed is not None:
-            request_body["seed"] = seed
-        if reasoning_effort is not None and reasoning_enabled is not None:
-            raise ValueError("reasoning effort and enabled flag are mutually exclusive")
-        if reasoning_effort is not None:
-            if reasoning_effort not in {"none", "minimal", "low", "medium", "high"}:
-                raise ValueError("unsupported reasoning effort")
-            request_body["reasoning"] = {"effort": reasoning_effort}
-        elif reasoning_enabled is not None:
-            request_body["reasoning"] = {"enabled": reasoning_enabled}
+        request_body, effective_provider = self._build_request_body(
+            model=model,
+            provider=provider,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            seed=seed,
+            reasoning_effort=reasoning_effort,
+            reasoning_enabled=reasoning_enabled,
+            provider_options=provider_options,
+            response_format=response_format,
+            tools=tools,
+            plugins=plugins,
+        )
 
         try:
             response = self._client.post(
@@ -780,7 +899,10 @@ class OpenRouterClient:
         except httpx.TimeoutException as error:
             latency = self._clock() - started_at
             raise LlmError(
-                f"{self._endpoint_label}请求超时：{error}", latency_seconds=latency
+                f"{self._endpoint_label}请求超时：{error}",
+                latency_seconds=latency,
+                profile_name=self._profile_name,
+                error_type="timeout",
             ) from error
         except httpx.RequestError as error:
             latency = self._clock() - started_at
@@ -813,6 +935,84 @@ class OpenRouterClient:
                 latency_seconds=latency,
             ) from error
         return result
+
+    async def _complete_messages_async(
+        self,
+        *,
+        model: str,
+        provider: str | None,
+        messages: list[dict[str, object]],
+        max_tokens: int,
+        temperature: float,
+        seed: int | None,
+        reasoning_effort: str | None,
+        reasoning_enabled: bool | None,
+        provider_options: Mapping[str, object] | None = None,
+        response_format: Mapping[str, object] | None = None,
+        tools: Sequence[Mapping[str, object]] | None = None,
+        plugins: Sequence[Mapping[str, object]] | None = None,
+    ) -> LlmResult:
+        """Send one cancellable request so a wall deadline leaves no live worker."""
+        started_at = self._clock()
+        request_body, effective_provider = self._build_request_body(
+            model=model,
+            provider=provider,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            seed=seed,
+            reasoning_effort=reasoning_effort,
+            reasoning_enabled=reasoning_enabled,
+            provider_options=provider_options,
+            response_format=response_format,
+            tools=tools,
+            plugins=plugins,
+        )
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._base_url,
+                headers=self._headers,
+                timeout=self._timeout_seconds,
+                transport=self._transport,  # type: ignore[arg-type]
+            ) as client:
+                response = await client.post("chat/completions", json=request_body)
+        except httpx.TimeoutException as error:
+            latency = self._clock() - started_at
+            raise LlmError(
+                f"{self._endpoint_label}请求超时：{error}",
+                latency_seconds=latency,
+                profile_name=self._profile_name,
+                error_type="timeout",
+            ) from error
+        except httpx.RequestError as error:
+            latency = self._clock() - started_at
+            raise LlmError(
+                f"{self._endpoint_label}网络请求失败：{error}", latency_seconds=latency
+            ) from error
+
+        latency = self._clock() - started_at
+        if not response.is_success:
+            error = _response_llm_error(
+                response,
+                service_label=self._endpoint_label,
+                latency_seconds=latency,
+                fallback_provider=effective_provider,
+                profile_name=self._profile_name,
+            )
+            if error.status_code == 429:
+                self._cooldown.enter(error)
+            raise error
+
+        self._cooldown.record_success()
+        try:
+            payload: object = response.json()
+            return _parse_result(payload, latency_seconds=latency)
+        except (TypeError, ValueError, KeyError, IndexError) as error:
+            raise LlmError(
+                f"{self._endpoint_label}返回了无法解析的成功响应：{error}",
+                status_code=response.status_code,
+                latency_seconds=latency,
+            ) from error
 
     def _stream_messages(
         self,

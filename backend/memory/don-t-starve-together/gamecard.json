@@ -1,8 +1,96 @@
 {
   "game_id": "don-t-starve-together",
   "display_name": "Don't Starve Together",
-  "genre": null,
-  "perspective": null,
+  "knowledge": {
+    "content": {
+      "genre": [
+        "生存",
+        "动作冒险",
+        "沙盒"
+      ],
+      "perspective": "固定视角俯视（2.5D）",
+      "game_overview": "《饥荒联机版》是一款以生存为核心的合作类沙盒游戏。玩家扮演被困在充满异域生物与超自然现象的荒野世界中的角色，目标是在严酷的自然环境、饥饿、精神压力以及各种怪物的威胁下尽可能长久地生存下去。游戏支持多人联机，强调资源收集、基地建设、科技研发与团队协作。其核心特征在于独特的哥特式手绘艺术风格、极高的生存难度以及对季节更替、昼夜循环和理智值系统的深度模拟。",
+      "gameplay": {
+        "player_goal": "通过收集资源、制作工具、建立基地并抵御环境与怪物的威胁，在不断变化的季节中维持角色的生命值、饥饿值与理智值，以实现长期生存。",
+        "core_loop": "白天收集基础资源（木材、石块、食物）并探索地图；黄昏与夜晚利用光源维持视野并防止黑暗伤害；通过收集的材料在科技机器处解锁更高级的制作配方；利用制作出的装备与食物储备应对季节性灾难或敌对生物；在多人协作下分工完成基地建设与资源循环，持续提升生存能力。",
+        "major_systems": [
+          {
+            "name": "三维属性系统",
+            "description": "玩家需同时管理生命值、饥饿值与理智值，任何一项归零都可能导致角色死亡或产生负面幻觉。"
+          },
+          {
+            "name": "昼夜与季节循环",
+            "description": "游戏存在动态的昼夜交替与四季更迭，不同季节会带来气温变化、资源产出差异及特定的环境灾难。"
+          },
+          {
+            "name": "科技树系统",
+            "description": "玩家需建造科学机器、炼金引擎等设施来解锁更高级的工具、武器与建筑配方。"
+          },
+          {
+            "name": "基地建设系统",
+            "description": "玩家可放置各种建筑，如烹饪锅、冰箱、避雷针与围墙，用于加工食物、储存资源与防御基地。"
+          },
+          {
+            "name": "理智值系统",
+            "description": "角色在黑暗、靠近怪物或食用腐烂食物时会降低理智，理智过低会导致幻觉生物出现并攻击玩家。"
+          },
+          {
+            "name": "联机协作系统",
+            "description": "支持多名玩家共同生存，玩家间可共享资源、分担战斗压力，并利用不同角色的独特能力进行互补。"
+          }
+        ],
+        "modes_and_structure": "游戏以持续运行的服务器世界为基础，支持多人在线合作或对抗。玩家进入世界后即开始生存挑战，世界状态会随时间推移而演变，死亡后可通过特定机制复活。"
+      },
+      "background": {
+        "setting_and_premise": "玩家被神秘力量传送至一个荒凉、诡异且充满危险生物的异世界。这里不仅有常规的自然规律，还存在着超自然的魔法力量与未知的文明遗迹。",
+        "release_and_service_status": "游戏已正式发售，目前处于持续运营状态，定期更新内容、角色与季节性活动。"
+      },
+      "default_pc_keybinds": {
+        "前进": "W",
+        "后退": "S",
+        "向左移动": "A",
+        "向右移动": "D",
+        "攻击": "F",
+        "互动": "Space",
+        "快捷物品栏1": "1",
+        "快捷物品栏2": "2",
+        "快捷物品栏3": "3",
+        "快捷物品栏4": "4",
+        "快捷物品栏5": "5",
+        "打开地图": "M",
+        "打开背包": "Tab",
+        "打开制作栏": "Q",
+        "丢弃物品": "LeftCtrl+MouseLeft"
+      }
+    },
+    "status": "refreshed",
+    "checked_at": "2026-09-01T16:34:33.888576Z",
+    "model": "google/gemini-3.1-flash-lite",
+    "mode": "web",
+    "request_id": "gk-f0e8f30b-2b30-467c-89ce-6ae62886a3c8",
+    "attempts": [
+      {
+        "attempted_at": "2026-09-01T15:05:52.468333Z",
+        "result": "failed",
+        "failure_reason": "OpenRouter网络请求失败：[WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions [occurred_at=2026-09-01T15:05:52.468333+00:00]"
+      },
+      {
+        "attempted_at": "2026-09-01T16:29:46.179528Z",
+        "result": "ok",
+        "failure_reason": null
+      },
+      {
+        "attempted_at": "2026-09-01T16:32:08.409304Z",
+        "result": "ok",
+        "failure_reason": null
+      },
+      {
+        "attempted_at": "2026-09-01T16:34:33.888576Z",
+        "result": "ok",
+        "failure_reason": null
+      }
+    ]
+  },
   "scenes": [
     {
       "scene_id": "scene:s1",
@@ -96,12 +184,7 @@
       ]
     }
   ],
-  "hud_slots": [],
-  "keybinds": {},
-  "view_constants": {
-    "yaw_deg_per_count": null,
-    "user_sensitivity": null
-  },
+  "hud_elements": [],
   "init": {
     "initialized_at": "2026-08-28T00:39:26.386611Z",
     "source_recordings": [

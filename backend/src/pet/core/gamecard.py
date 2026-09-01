@@ -12,15 +12,131 @@ import tempfile
 import unicodedata
 from typing import Literal, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from pet.core.scene_fingerprint import CardSceneReference, SceneCluster
 
 GAMECARD_VERSION = 2
+KNOWLEDGE_ATTEMPT_HISTORY_LIMIT = 20  # 待实测：先限制跨会话卡文件无限增长。
+
+CANONICAL_PC_INPUT_PATTERN = (
+    r"^(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|"
+    r"(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|"
+    r"LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|"
+    r"ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|"
+    r"MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|"
+    r"RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash))"
+    r"(?:\+(?:(?:[A-Z]|[0-9]|F(?:[1-9]|1[0-9]|2[0-4])|Mouse[1-5])|"
+    r"(?:Space|Tab|Escape|Enter|Backspace|CapsLock|LeftShift|RightShift|"
+    r"LeftCtrl|RightCtrl|LeftAlt|RightAlt|ArrowUp|ArrowDown|ArrowLeft|"
+    r"ArrowRight|MouseLeft|MouseRight|MouseMiddle|MouseWheelUp|"
+    r"MouseWheelDown|MouseMove|Backquote|Minus|Equals|LeftBracket|"
+    r"RightBracket|Backslash|Semicolon|Apostrophe|Comma|Period|Slash)))*$"
+)
+
+GameKnowledgeMode = Literal["web", "knowledge"]
+GameKnowledgeOutcome = Literal[
+    "ok",
+    "failed",
+    "cooldown_drop",
+    "timeout",
+    "schema_reject",
+]
+GameKnowledgeStatus = Literal["initialized", "refreshed", "stale"]
+GameKnowledgeWriteAction = Literal["initialized", "refreshed", "kept_previous"]
 
 
 class GameCardModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class GameKnowledgeSystem(GameCardModel):
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+
+
+class GameKnowledgeGameplay(GameCardModel):
+    player_goal: str = Field(min_length=1)
+    core_loop: str = Field(min_length=1)
+    major_systems: list[GameKnowledgeSystem] = Field(min_length=4, max_length=10)
+    modes_and_structure: str = Field(min_length=1)
+
+
+class GameKnowledgeBackground(GameCardModel):
+    setting_and_premise: str = Field(min_length=1)
+    release_and_service_status: str = Field(min_length=1)
+
+
+class GameKnowledgeContent(GameCardModel):
+    """The complete V3 shelf-one answer; partial answers are never valid."""
+
+    genre: list[str] = Field(min_length=1, max_length=5)
+    perspective: str = Field(min_length=1)
+    game_overview: str = Field(min_length=1)
+    gameplay: GameKnowledgeGameplay
+    background: GameKnowledgeBackground
+    default_pc_keybinds: dict[
+        str,
+        str,
+    ] = Field(default_factory=dict, max_length=40)
+
+    @model_validator(mode="after")
+    def validate_nonempty_text_and_keybinds(self) -> GameKnowledgeContent:
+        strings = [
+            *self.genre,
+            self.perspective,
+            self.game_overview,
+            self.gameplay.player_goal,
+            self.gameplay.core_loop,
+            self.gameplay.modes_and_structure,
+            self.background.setting_and_premise,
+            self.background.release_and_service_status,
+        ]
+        for system in self.gameplay.major_systems:
+            strings.extend((system.name, system.description))
+        if any(not value.strip() for value in strings):
+            raise ValueError("game knowledge text fields must not be blank")
+        for action, input_name in self.default_pc_keybinds.items():
+            if not action.strip():
+                raise ValueError("game knowledge keybind actions must not be blank")
+            if re.fullmatch(CANONICAL_PC_INPUT_PATTERN, input_name) is None:
+                raise ValueError(
+                    f"game knowledge keybind {action!r} is not canonical: {input_name!r}"
+                )
+        return self
+
+
+class GameKnowledgeAttempt(GameCardModel):
+    attempted_at: datetime
+    result: GameKnowledgeOutcome
+    failure_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_failure_reason(self) -> GameKnowledgeAttempt:
+        if self.result == "ok" and self.failure_reason is not None:
+            raise ValueError("successful knowledge attempt cannot have a failure reason")
+        if self.result != "ok" and not (self.failure_reason or "").strip():
+            raise ValueError("failed knowledge attempt requires a failure reason")
+        return self
+
+
+class GameKnowledge(GameCardModel):
+    content: GameKnowledgeContent | None
+    status: GameKnowledgeStatus
+    checked_at: datetime
+    model: str = Field(min_length=1)
+    mode: GameKnowledgeMode
+    request_id: str = Field(min_length=1)
+    attempts: list[GameKnowledgeAttempt] = Field(
+        min_length=1,
+        max_length=KNOWLEDGE_ATTEMPT_HISTORY_LIMIT,
+    )
+
+    @model_validator(mode="after")
+    def validate_content_status(self) -> GameKnowledge:
+        if self.status in {"initialized", "refreshed"} and self.content is None:
+            raise ValueError("successful knowledge status requires complete content")
+        return self
 
 
 class GameCardScene(GameCardModel):
@@ -52,25 +168,6 @@ class SceneCardVerification(GameCardModel):
     evidence_id: str = Field(min_length=1)
 
 
-class GameCardHudSlot(GameCardModel):
-    slot_id: str
-    bbox: tuple[float, float, float, float]
-    semantic_role: str | None = None
-    role_status: str | None = None
-    evidence_ids: list[str]
-
-
-class GameCardKeybind(GameCardModel):
-    meaning: str
-    source: Literal["default_table", "observed"]
-    support_count: int = Field(ge=1)
-
-
-class GameCardViewConstants(GameCardModel):
-    yaw_deg_per_count: float | None = None
-    user_sensitivity: float | None = None
-
-
 class GameCardInit(GameCardModel):
     initialized_at: datetime
     source_recordings: list[str]
@@ -80,12 +177,10 @@ class GameCardInit(GameCardModel):
 class GameCard(GameCardModel):
     game_id: str = Field(min_length=1)
     display_name: str = Field(min_length=1)
-    genre: str | None = None
-    perspective: str | None = None
+    knowledge: GameKnowledge | None = None
     scenes: list[GameCardScene]
-    hud_slots: list[GameCardHudSlot]
-    keybinds: dict[str, GameCardKeybind]
-    view_constants: GameCardViewConstants
+    # B-T3c owns the element contract. Until then this field is deliberately empty.
+    hud_elements: list[object] = Field(default_factory=list, max_length=0)
     init: GameCardInit
 
 
@@ -118,12 +213,73 @@ def render_gamecard_markdown(card: GameCard) -> str:
         f"- 游戏 ID：`{card.game_id}`",
         f"- 初始化时间：{_iso(card.init.initialized_at)}",
         f"- 版本：{card.init.version}",
-        f"- 类型：{card.genre or '未学习'}",
-        f"- 视角：{card.perspective or '未学习'}",
         "",
-        "## 场景",
+        "## 游戏知识",
         "",
     ]
+    if card.knowledge is None:
+        lines.extend(("尚未尝试联网初始化。", ""))
+    else:
+        knowledge = card.knowledge
+        lines.extend(
+            (
+                f"- 状态：{knowledge.status}",
+                f"- 最近核查：{_iso(knowledge.checked_at)}",
+                f"- 模型：`{knowledge.model}`",
+                f"- 模式：{knowledge.mode}",
+                f"- 请求 ID：`{knowledge.request_id}`",
+                "",
+            )
+        )
+        if knowledge.content is None:
+            lines.extend(("没有通过完整 V3 合同的有效内容。", ""))
+        else:
+            content = knowledge.content
+            lines.extend(
+                (
+                    f"- 类型：{'、'.join(content.genre)}",
+                    f"- 视角：{content.perspective}",
+                    f"- 游戏概述：{content.game_overview}",
+                    f"- 玩家目标：{content.gameplay.player_goal}",
+                    f"- 核心循环：{content.gameplay.core_loop}",
+                    f"- 模式与结构：{content.gameplay.modes_and_structure}",
+                    f"- 背景前提：{content.background.setting_and_premise}",
+                    f"- 发售与运营：{content.background.release_and_service_status}",
+                    "",
+                    "### 主要系统",
+                    "",
+                )
+            )
+            lines.extend(
+                f"- {system.name}：{system.description}"
+                for system in content.gameplay.major_systems
+            )
+            lines.extend(("", "### PC 默认键位", ""))
+            if content.default_pc_keybinds:
+                lines.extend(
+                    f"- {action}：`{input_name}`"
+                    for action, input_name in content.default_pc_keybinds.items()
+                )
+            else:
+                lines.append("没有可确认的默认键位。")
+            lines.append("")
+        lines.extend(("### 核查尝试", ""))
+        for attempt in knowledge.attempts:
+            detail = (
+                f"；原因：{attempt.failure_reason}"
+                if attempt.failure_reason is not None
+                else ""
+            )
+            lines.append(
+                f"- {_iso(attempt.attempted_at)}：{attempt.result}{detail}"
+            )
+        lines.append("")
+    lines.extend(
+        (
+        "## 场景",
+        "",
+        )
+    )
     if not card.scenes:
         lines.append("暂无已升格场景。")
     for scene in card.scenes:
@@ -149,12 +305,47 @@ def render_gamecard_markdown(card: GameCard) -> str:
                 "",
             )
         )
-    lines.extend(("## HUD 槽位", "", "暂无。", "", "## 键位", "", "暂无。", ""))
+    lines.extend(("## HUD 元素", "", "暂无。", ""))
     if card.init.source_recordings:
         lines.extend(("## 来源录制", ""))
         lines.extend(f"- `{path}`" for path in card.init.source_recordings)
         lines.append("")
     return "\n".join(lines)
+
+
+def render_game_knowledge_short_view(
+    content: GameKnowledgeContent | None,
+    token_limit: int,
+) -> str:
+    """Render a conservative model context that cannot exceed the token cap.
+
+    Without adding a model-specific tokenizer, UTF-8 byte length is used as a
+    strict upper bound: a byte-fallback tokenizer cannot emit more tokens than
+    input bytes. The default cap remains marked as pending measurement in config.
+    """
+    if token_limit < 1:
+        raise ValueError("game knowledge short-view token limit must be positive")
+    if content is None:
+        return ""
+    systems = "；".join(
+        f"{item.name}：{item.description}" for item in content.gameplay.major_systems
+    )
+    keybinds = "；".join(
+        f"{action}={input_name}"
+        for action, input_name in content.default_pc_keybinds.items()
+    )
+    sections = (
+        f"【游戏知识｜推测背景】{content.game_overview}",
+        f"类型：{'、'.join(content.genre)}；视角：{content.perspective}",
+        f"目标：{content.gameplay.player_goal}",
+        f"循环：{content.gameplay.core_loop}",
+        f"系统：{systems}",
+        f"结构：{content.gameplay.modes_and_structure}",
+        f"背景：{content.background.setting_and_premise}",
+        f"运营：{content.background.release_and_service_status}",
+        f"默认键位：{keybinds}" if keybinds else "默认键位：无可确认条目",
+    )
+    return _truncate_utf8("\n".join(sections), token_limit)
 
 
 class GameCardRepository:
@@ -183,18 +374,26 @@ class GameCardRepository:
         return GameCard(
             game_id=game_id,
             display_name=display_name,
-            genre=None,
-            perspective=None,
+            knowledge=None,
             scenes=[],
-            hud_slots=[],
-            keybinds={},
-            view_constants=GameCardViewConstants(),
+            hud_elements=[],
             init=GameCardInit(
                 initialized_at=_utc(initialized_at),
                 source_recordings=recordings,
                 version=GAMECARD_VERSION,
             ),
         )
+
+    def load(self, game_id: str) -> GameCard:
+        path = self._directory(game_id) / "gamecard.json"
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        card = GameCard.model_validate_json(path.read_text(encoding="utf-8"))
+        if card.game_id != game_id:
+            raise ValueError(
+                f"game card path identity {game_id!r} conflicts with {card.game_id!r}"
+            )
+        return card
 
     def write(self, card: GameCard) -> None:
         directory = self._directory(card.game_id)
@@ -216,6 +415,83 @@ class GameCardRepository:
             )
             for scene in card.scenes
         )
+
+    def record_knowledge_attempt(
+        self,
+        card: GameCard,
+        *,
+        checked_at: datetime,
+        model: str,
+        mode: GameKnowledgeMode,
+        request_id: str,
+        outcome: GameKnowledgeOutcome,
+        failure_reason: str | None,
+        content: GameKnowledgeContent | None,
+    ) -> tuple[GameCard, GameKnowledgeWriteAction]:
+        """Atomically keep or replace the complete shelf-one answer."""
+        path = self._directory(card.game_id) / "gamecard.json"
+        working = self.load(card.game_id) if path.is_file() else card.model_copy(deep=True)
+        previous_content = (
+            working.knowledge.content if working.knowledge is not None else None
+        )
+        if outcome == "ok":
+            if content is None:
+                raise ValueError("successful game knowledge attempt requires content")
+            status: GameKnowledgeStatus = (
+                "initialized" if previous_content is None else "refreshed"
+            )
+            action: GameKnowledgeWriteAction = status
+            next_content = content
+            provenance_checked_at = _utc(checked_at)
+            provenance_model = model
+            provenance_mode = mode
+            provenance_request_id = request_id
+        else:
+            if content is not None:
+                raise ValueError("failed game knowledge attempt cannot provide content")
+            status = "stale"
+            action = "kept_previous"
+            next_content = previous_content
+            if working.knowledge is not None and previous_content is not None:
+                # ROOT CAUSE: a failed refresh must not make retained content look
+                # as though it came from the failed request.  These four fields
+                # remain the provenance of the current complete content; the new
+                # failure is represented by attempts[] and session evidence.
+                provenance_checked_at = working.knowledge.checked_at
+                provenance_model = working.knowledge.model
+                provenance_mode = working.knowledge.mode
+                provenance_request_id = working.knowledge.request_id
+            else:
+                # A first-ever failed attempt has no successful provenance to
+                # retain.  Its metadata identifies the only attempted lookup.
+                provenance_checked_at = _utc(checked_at)
+                provenance_model = model
+                provenance_mode = mode
+                provenance_request_id = request_id
+        attempts = (
+            list(working.knowledge.attempts)
+            if working.knowledge is not None
+            else []
+        )
+        attempts.append(
+            GameKnowledgeAttempt(
+                attempted_at=_utc(checked_at),
+                result=outcome,
+                failure_reason=failure_reason,
+            )
+        )
+        attempts = attempts[-KNOWLEDGE_ATTEMPT_HISTORY_LIMIT:]
+        working.knowledge = GameKnowledge(
+            content=next_content,
+            status=status,
+            checked_at=provenance_checked_at,
+            model=provenance_model,
+            mode=provenance_mode,
+            request_id=provenance_request_id,
+            attempts=attempts,
+        )
+        self.write(working)
+        return working, action
 
     def _directory(self, game_id: str) -> Path:
         if slugify_game_id(game_id) != game_id:
@@ -244,7 +520,12 @@ class GameCardSession:
         self._verifications: dict[int, SceneCardVerification] = {}
 
     def flush(self, clusters: Sequence[SceneCluster]) -> GameCard:
-        working = self.card.model_copy(deep=True)
+        path = self.repository._directory(self.card.game_id) / "gamecard.json"
+        working = (
+            self.repository.load(self.card.game_id)
+            if path.is_file()
+            else self.card.model_copy(deep=True)
+        )
         cluster_scene_ids = dict(self._cluster_scene_ids)
         flushed_dwell_seconds = dict(self._flushed_dwell_seconds)
         flushed_visit_counts = dict(self._flushed_visit_counts)
@@ -367,7 +648,12 @@ class GameCardSession:
             if cluster.card_candidate is not None
             else self._cluster_scene_ids.get(cluster.cluster_id)
         )
-        working = self.card.model_copy(deep=True)
+        path = self.repository._directory(self.card.game_id) / "gamecard.json"
+        working = (
+            self.repository.load(self.card.game_id)
+            if path.is_file()
+            else self.card.model_copy(deep=True)
+        )
         scene = _scene_by_id(working.scenes, candidate_id)
         if scene is None or scene.label_status == "unnamed":
             raise ValueError("scene review marker requires a named card candidate")
@@ -436,6 +722,13 @@ def _utc(value: datetime) -> datetime:
 
 def _iso(value: datetime) -> str:
     return _utc(value).isoformat()
+
+
+def _truncate_utf8(text: str, maximum_bytes: int) -> str:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= maximum_bytes:
+        return text
+    return encoded[:maximum_bytes].decode("utf-8", errors="ignore").rstrip()
 
 
 def _apply_verification(

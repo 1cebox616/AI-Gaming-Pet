@@ -7,6 +7,12 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from pet.core.gamecard import (
+    GameKnowledgeMode,
+    GameKnowledgeOutcome,
+    GameKnowledgeWriteAction,
+)
+
 EvidenceSource = Literal[
     "fast",
     "deep",
@@ -233,6 +239,37 @@ class SceneVerifiedPayload(EvidenceModel):
         return self
 
 
+class GameKnowledgePayload(EvidenceModel):
+    game_id: str = Field(min_length=1, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    mode: GameKnowledgeMode
+    model: str = Field(min_length=1)
+    request_id: str = Field(min_length=1)
+    outcome: GameKnowledgeOutcome
+    latency_ms: float = Field(ge=0.0)
+    cost_usd: float = Field(ge=0.0)
+    write_action: GameKnowledgeWriteAction
+    actual_model: str | None = None
+    provider: str | None = None
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    failure_reason: str | None = None
+    normalization_actions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_result(self) -> GameKnowledgePayload:
+        if self.outcome == "ok":
+            if self.write_action == "kept_previous":
+                raise ValueError("successful knowledge evidence must update the card")
+            if self.failure_reason is not None:
+                raise ValueError("successful knowledge evidence cannot have failure_reason")
+        else:
+            if self.write_action != "kept_previous":
+                raise ValueError("failed knowledge evidence must keep previous content")
+            if not (self.failure_reason or "").strip():
+                raise ValueError("failed knowledge evidence requires failure_reason")
+        return self
+
+
 EvidencePayload = (
     FastObservationPayload
     | FrameMetricsPayload
@@ -242,6 +279,7 @@ EvidencePayload = (
     | OcrFramePayload
     | SceneFingerprintPayload
     | SceneVerifiedPayload
+    | GameKnowledgePayload
 )
 
 
@@ -269,6 +307,7 @@ class EvidenceEvent(EvidenceModel):
             "ocr_frame": OcrFramePayload,
             "scene_fingerprint": SceneFingerprintPayload,
             "scene_verified": SceneVerifiedPayload,
+            "game_knowledge": GameKnowledgePayload,
         }
         expected = expected_payloads.get(self.kind)
         if expected is None or not isinstance(self.payload, expected):
@@ -282,10 +321,11 @@ class EvidenceEvent(EvidenceModel):
             "ocr_frame": "ocr",
             "scene_fingerprint": "scene",
             "scene_verified": "deep",
+            "game_knowledge": "init",
         }
         if self.source != expected_sources[self.kind]:
             raise ValueError(f"source does not match evidence kind {self.kind!r}")
-        if self.kind == "mouse_motion":
+        if self.kind in {"mouse_motion", "game_knowledge"}:
             if self.root_capture_id is not None:
                 raise ValueError("non-frame mouse evidence must not have root_capture_id")
             match = _NON_FRAME_ID_PATTERN.fullmatch(self.evidence_id)
@@ -315,8 +355,24 @@ class EvidenceEvent(EvidenceModel):
                 )
         if self.learned_at < self.observed_at:
             raise ValueError("learned_at must not precede observed_at")
-        if self.kind not in {"fast_observation", "scene_verified"} and self.outcome != "ok":
+        if self.kind not in {
+            "fast_observation",
+            "scene_verified",
+            "game_knowledge",
+        } and self.outcome != "ok":
             raise ValueError("mechanical evidence must have outcome=ok")
+        if isinstance(self.payload, GameKnowledgePayload):
+            expected_outcome: EvidenceOutcome = {
+                "ok": "ok",
+                "cooldown_drop": "dropped",
+                "timeout": "dropped",
+                "failed": "failed",
+                "schema_reject": "failed",
+            }[self.payload.outcome]
+            if self.outcome != expected_outcome:
+                raise ValueError(
+                    "game knowledge event outcome does not match payload outcome"
+                )
         if isinstance(self.payload, SceneVerifiedPayload):
             if self.outcome == "ok" and self.payload.validation_error is not None:
                 raise ValueError("accepted scene verification cannot have validation_error")
