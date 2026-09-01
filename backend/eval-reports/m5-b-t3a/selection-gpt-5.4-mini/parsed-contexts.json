@@ -1,0 +1,23 @@
+[
+  {
+    "game_id": "marvel-rivals",
+    "game_name": "Marvel Rivals",
+    "context": null,
+    "format_warning": null,
+    "normalization_actions": []
+  },
+  {
+    "game_id": "ea-sports-fc-26",
+    "game_name": "EA Sports FC 26",
+    "context": null,
+    "format_warning": null,
+    "normalization_actions": []
+  },
+  {
+    "game_id": "hades-ii",
+    "game_name": "Hades II",
+    "context": null,
+    "format_warning": null,
+    "normalization_actions": []
+  }
+]

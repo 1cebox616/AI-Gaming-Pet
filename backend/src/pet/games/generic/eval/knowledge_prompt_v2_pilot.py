@@ -843,7 +843,7 @@ def _cell(value: object) -> str:
 
 def render_report(run: PilotRun) -> str:
     lines = [
-        "# M5-B-T3a DeepSeek V4 Instant 优化提示词小样本报告",
+        f"# M5-B-T3a {MODEL_LABEL} 游戏知识探针报告",
         "",
         "本轮只验证修改后的详细游戏 context 提示词，不替换上一轮正式 3 模型 × 15 游戏判卷，也不作选型推荐。",
         "",
@@ -895,7 +895,9 @@ def render_report(run: PilotRun) -> str:
             for item in attempts
         )
         target = sum(
-            item.latency_seconds is not None
+            item.error is None
+            and bool(item.response_text.strip())
+            and item.latency_seconds is not None
             and item.latency_seconds <= LATENCY_TARGET_SECONDS
             for item in attempts
         )
@@ -992,7 +994,7 @@ def render_report(run: PilotRun) -> str:
 
 def render_answers(run: PilotRun) -> str:
     lines = [
-        "# DeepSeek V4 Instant 优化提示词原始答案",
+        f"# {MODEL_LABEL} 游戏知识探针原始答案",
         "",
         "以下内容保留调用正文，仅去除行尾空白以保持报告格式；不预填事实正确性判断。精确原始字符串见 results.json。",
     ]

@@ -195,6 +195,46 @@ def test_normalized_context_round_trips_through_strict_json() -> None:
     assert pilot._strict_json_loads(canonical) == parsed
 
 
+def test_latency_target_excludes_failed_calls() -> None:
+    failed = pilot.PilotAttempt(
+        "failed-game",
+        "Failed Game",
+        "online",
+        True,
+        pilot.MODEL,
+        None,
+        "",
+        None,
+        None,
+        0.1,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "synthetic failure",
+        None,
+    )
+    run = pilot.PilotRun(
+        "start",
+        "finish",
+        (failed,),
+        (
+            LlmDispatchStats(
+                profile_name="m5-b-t3a-v2:online",
+                rate_limit_count=0,
+                cooldown_seconds=0.0,
+                cooldown_drop_count=0,
+                cooling_down=False,
+                cooldown_remaining_seconds=0.0,
+            ),
+        ),
+    )
+    assert "| 联网模式 | 0/1 | 0/1 | 0/1 | 0.100 / 0.100 / 0.100 | 0/1 |" in pilot.render_report(run)
+
+
 def test_fake_pilot_runs_five_games_online_only_and_writes_outputs(tmp_path) -> None:
     clients: dict[str, _FakeClient] = {}
 
