@@ -48,7 +48,7 @@ PROVIDER_OPTIONS: dict[str, object] = {
     "sort": "throughput",
     "require_parameters": True,
 }
-PILOT_GAMES = (
+INITIAL_GAMES = (
     GameCase(
         "overwatch-2",
         "Overwatch 2",
@@ -90,6 +90,53 @@ PILOT_GAMES = (
         "检验第三人称动作游戏与战斗键位。",
     ),
 )
+FOLLOWUP_GAMES = (
+    GameCase(
+        "marvel-rivals",
+        "Marvel Rivals",
+        "漫威争锋",
+        "第三人称英雄射击",
+        "热门长线运营",
+        "检验英雄技能、团队目标与角色差异化键位。",
+    ),
+    GameCase(
+        "monster-hunter-wilds",
+        "Monster Hunter Wilds",
+        "怪物猎人：荒野",
+        "动作角色扮演",
+        "2025 新作",
+        "检验复杂武器动作、狩猎循环与上下文组合键。",
+    ),
+    GameCase(
+        "sid-meiers-civilization-vii",
+        "Sid Meier's Civilization VII",
+        "席德·梅尔的文明 VII",
+        "回合制策略",
+        "2025 新作",
+        "检验鼠标主导策略游戏、时代推进与回合结构。",
+    ),
+    GameCase(
+        "ea-sports-fc-26",
+        "EA Sports FC 26",
+        "EA Sports FC 26",
+        "体育模拟",
+        "2025 年度作品",
+        "检验以手柄为主流但仍需给出 PC 键盘默认绑定的边界。",
+    ),
+    GameCase(
+        "hades-ii",
+        "Hades II",
+        "哈迪斯 II",
+        "动作肉鸽",
+        "近年持续更新作品",
+        "检验即时战斗、局内循环与永久成长结构。",
+    ),
+)
+GAME_SUITES = {
+    "initial": INITIAL_GAMES,
+    "followup": FOLLOWUP_GAMES,
+}
+ACTIVE_GAME_SUITE = "initial"
 
 
 SYSTEM_PROMPT_V2 = """你是“游戏知识线”的公开资料整理器。你的输出会作为稳定的游戏背景 context，提供给每一个后续视觉模型。准确、完整和可核查优先，不要为了简短而省略决定游戏如何游玩的关键信息。
@@ -364,7 +411,7 @@ ClientFactory = Callable[[ProbeMode], PilotClient]
 
 
 def pilot_games() -> tuple[GameCase, ...]:
-    return PILOT_GAMES
+    return GAME_SUITES[ACTIVE_GAME_SUITE]
 
 
 def render_user_prompt(game_name: str) -> str:
@@ -606,21 +653,31 @@ def parse_answer_detailed(
         warning = "；".join(actions) if actions else None
         return parsed, warning, actions
 
+    balanced_candidates = _balanced_json_objects(text)
+    if len(balanced_candidates) == 1 and balanced_candidates[0] == text.strip():
+        return None, error, ()
+
     valid_candidates: list[
         tuple[dict[str, object], tuple[str, ...]]
     ] = []
-    for candidate in _balanced_json_objects(text):
-        candidate_parsed, _candidate_error, candidate_actions = _parse_candidate(
+    candidate_errors: list[str] = []
+    for candidate in balanced_candidates:
+        candidate_parsed, candidate_error, candidate_actions = _parse_candidate(
             candidate
         )
         if candidate_parsed is not None:
             valid_candidates.append((candidate_parsed, candidate_actions))
+        elif candidate_error is not None and candidate_error not in candidate_errors:
+            candidate_errors.append(candidate_error)
     if len(valid_candidates) == 1:
         extracted, candidate_actions = valid_candidates[0]
         all_actions = ("剥离 JSON 外文本／代码围栏", *candidate_actions)
         return extracted, "；".join(all_actions), all_actions
     if len(valid_candidates) > 1:
         return None, "响应中存在多个符合合同的 JSON 对象，无法确定唯一结果", ()
+    if candidate_errors:
+        details = "；".join(candidate_errors[:3])
+        return None, f"找到完整 JSON 对象，但未通过严格合同：{details}", ()
     return None, error, ()
 
 
@@ -792,6 +849,18 @@ def render_report(run: PilotRun) -> str:
         "- 输出：请求 OpenRouter JSON Schema 严格结构化输出；是否被实际上游执行按原始响应另行记录。",
         "- 这里的 httpx 超时是连接／读取等 I/O 阶段的超时，不是整次请求的总墙钟截止；联网端点持续传输数据时，实测总耗时可以明显超过 45 秒。",
         "",
+        "### 样本理由",
+        "",
+        "| 游戏 | 类型 | 新旧／热度 | 入选理由 |",
+        "|---|---|---|---|",
+    ]
+    for game in pilot_games():
+        lines.append(
+            f"| {_cell(game.game_name)} | {_cell(game.category)} | "
+            f"{_cell(game.era)} | {_cell(game.reason)} |"
+        )
+    lines.extend([
+        "",
         "## 提示词调整",
         "",
         "- 删除社区术语与 HUD 惯例。",
@@ -803,7 +872,7 @@ def render_report(run: PilotRun) -> str:
         "",
         "| 模式 | 返回 | 可机械解析 | 原样格式合规 | P50 / P90 / 最大（秒） | ≤10 秒 | 花费（USD） |",
         "|---|---:|---:|---:|---:|---:|---:|",
-    ]
+    ])
     for mode in PILOT_MODES:
         attempts = [item for item in run.attempts if item.mode_id == mode.mode_id]
         returned = [item for item in attempts if item.error is None and item.response_text.strip()]
@@ -999,6 +1068,7 @@ def write_raw_results(output: Path, run: PilotRun) -> None:
         "timeout_seconds": TIMEOUT_SECONDS,
         "latency_target_seconds": LATENCY_TARGET_SECONDS,
         "pilot_game_ids": [game.game_id for game in pilot_games()],
+        "game_suite": ACTIVE_GAME_SUITE,
         "attempts": [asdict(item) for item in run.attempts],
         "dispatch_stats": [asdict(item) for item in run.dispatch_stats],
     }
@@ -1055,6 +1125,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-label", default=MODEL_LABEL)
     parser.add_argument("--model-url", default=MODEL_URL)
     parser.add_argument(
+        "--suite",
+        choices=tuple(GAME_SUITES),
+        default=ACTIVE_GAME_SUITE,
+    )
+    parser.add_argument(
         "--max-tokens",
         type=int,
         default=MAX_TOKENS,
@@ -1075,7 +1150,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
-    global MODEL, MODEL_LABEL, MODEL_URL, MAX_TOKENS, REASONING_EFFORT
+    global ACTIVE_GAME_SUITE, MODEL, MODEL_LABEL, MODEL_URL, MAX_TOKENS, REASONING_EFFORT
+    ACTIVE_GAME_SUITE = arguments.suite
     MODEL = arguments.model
     MODEL_LABEL = arguments.model_label
     MODEL_URL = arguments.model_url

@@ -79,8 +79,23 @@ def test_v2_prompt_has_requested_scope_and_no_game_specific_content() -> None:
     assert "控制器键位" in prompt
     assert '"前进": "W"' in prompt
     assert "禁止写成 WASD" in prompt
-    for game in pilot.pilot_games():
-        assert game.game_name not in prompt
+    for games in pilot.GAME_SUITES.values():
+        for game in games:
+            assert game.game_name not in prompt
+
+
+def test_followup_suite_is_diverse_and_does_not_overlap_initial_suite() -> None:
+    initial_ids = {game.game_id for game in pilot.INITIAL_GAMES}
+    followup_ids = {game.game_id for game in pilot.FOLLOWUP_GAMES}
+    assert len(followup_ids) == 5
+    assert initial_ids.isdisjoint(followup_ids)
+    assert {game.category for game in pilot.FOLLOWUP_GAMES} == {
+        "第三人称英雄射击",
+        "动作角色扮演",
+        "回合制策略",
+        "体育模拟",
+        "动作肉鸽",
+    }
 
 
 def test_v2_strict_parser_accepts_contract_and_rejects_old_fields() -> None:
@@ -157,6 +172,12 @@ def test_parser_rejects_duplicate_keys_at_any_depth_and_nonstandard_constants() 
     parsed, error = pilot.parse_answer(nonstandard)
     assert parsed is None
     assert error == "JSON 含非标准常量：NaN"
+
+    wrapped_duplicate = "前言\n```json\n" + duplicate_nested + "\n```"
+    parsed, error = pilot.parse_answer(wrapped_duplicate)
+    assert parsed is None
+    assert error is not None and "找到完整 JSON 对象" in error
+    assert "重复键" in error
 
 
 def test_normalized_context_round_trips_through_strict_json() -> None:
