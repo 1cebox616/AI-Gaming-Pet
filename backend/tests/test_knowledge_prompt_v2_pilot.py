@@ -138,6 +138,37 @@ def test_parser_deterministically_normalizes_safe_json_and_key_aliases() -> None
     assert any("Backquote" in action for action in actions)
 
 
+def test_parser_rejects_duplicate_keys_at_any_depth_and_nonstandard_constants() -> None:
+    text = json.dumps(_answer(), ensure_ascii=False)
+    duplicate_top = text[:-1] + ',"genre":["重复"]}'
+    parsed, error = pilot.parse_answer(duplicate_top)
+    assert parsed is None
+    assert error == "JSON 含重复键：'genre'"
+
+    duplicate_nested = text.replace(
+        '"player_goal": "完成测试目标。",',
+        '"player_goal": "完成测试目标。", "player_goal": "重复",',
+    )
+    parsed, error = pilot.parse_answer(duplicate_nested)
+    assert parsed is None
+    assert error == "JSON 含重复键：'player_goal'"
+
+    nonstandard = text.replace('"genre": [', '"extra_number": NaN, "genre": [')
+    parsed, error = pilot.parse_answer(nonstandard)
+    assert parsed is None
+    assert error == "JSON 含非标准常量：NaN"
+
+
+def test_normalized_context_round_trips_through_strict_json() -> None:
+    parsed, error, _actions = pilot.parse_answer_detailed(
+        "```json\n" + json.dumps(_answer(), ensure_ascii=False) + "\n```"
+    )
+    assert error is not None
+    assert parsed is not None
+    canonical = json.dumps(parsed, ensure_ascii=False, allow_nan=False)
+    assert pilot._strict_json_loads(canonical) == parsed
+
+
 def test_fake_pilot_runs_five_games_online_only_and_writes_outputs(tmp_path) -> None:
     clients: dict[str, _FakeClient] = {}
 
@@ -154,7 +185,7 @@ def test_fake_pilot_runs_five_games_online_only_and_writes_outputs(tmp_path) -> 
     assert all(
         call["system_prompt"] == pilot.SYSTEM_PROMPT_V2
         and call["temperature"] == 0.0
-        and call["max_tokens"] == 2400
+        and call["max_tokens"] == 8000
         and call["web_enabled"] is True
         and call["provider"] is None
         and call["reasoning_effort"] is None
@@ -184,3 +215,9 @@ def test_fake_pilot_runs_five_games_online_only_and_writes_outputs(tmp_path) -> 
     assert raw["provider_options"] == pilot.PROVIDER_OPTIONS
     assert len(parsed_contexts) == 5
     assert all(item["context"] == _answer() for item in parsed_contexts)
+    assert pilot._strict_json_loads(
+        (tmp_path / "results.json").read_text(encoding="utf-8")
+    ) == raw
+    assert pilot._strict_json_loads(
+        (tmp_path / "parsed-contexts.json").read_text(encoding="utf-8")
+    ) == parsed_contexts

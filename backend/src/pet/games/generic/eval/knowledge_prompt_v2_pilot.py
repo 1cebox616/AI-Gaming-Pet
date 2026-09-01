@@ -34,7 +34,9 @@ MODEL_URL = "https://openrouter.ai/deepseek/deepseek-v4-pro-0813"
 PROVIDER: str | None = None
 REASONING_EFFORT: str | None = None
 TEMPERATURE = 0.0
-MAX_TOKENS = 2400
+# Safety ceiling rather than a requested answer length. The prompt itself does not
+# impose a word limit; 2400 truncated the Rainbow Six pilot response.
+MAX_TOKENS = 8000
 TIMEOUT_SECONDS = 45.0
 LATENCY_TARGET_SECONDS = 10.0
 WEB_SEARCH_PARAMETERS: dict[str, object] = {
@@ -373,6 +375,35 @@ def _nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+class _DuplicateJsonKeyError(ValueError):
+    pass
+
+
+class _NonstandardJsonConstantError(ValueError):
+    pass
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonKeyError(f"JSON 含重复键：{key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_nonstandard_constant(value: str) -> object:
+    raise _NonstandardJsonConstantError(f"JSON 含非标准常量：{value}")
+
+
+def _strict_json_loads(text: str) -> object:
+    return json.loads(
+        text,
+        object_pairs_hook=_reject_duplicate_keys,
+        parse_constant=_reject_nonstandard_constant,
+    )
+
+
 def _validate_answer(value: object) -> tuple[dict[str, object] | None, str | None]:
     if not isinstance(value, dict):
         return None, "JSON 顶层不是对象"
@@ -533,18 +564,36 @@ def _parse_candidate(
 ) -> tuple[dict[str, object] | None, str | None, tuple[str, ...]]:
     repaired, comma_count = _remove_trailing_commas(text)
     try:
-        value: object = json.loads(repaired)
+        value = _strict_json_loads(repaired)
     except json.JSONDecodeError as error:
         return None, (
             f"不是合法 JSON：{error.msg}（line {error.lineno}, column {error.colno}）"
         ), ()
+    except (_DuplicateJsonKeyError, _NonstandardJsonConstantError) as error:
+        return None, str(error), ()
     value, alias_actions = _normalize_keybind_aliases(value)
     parsed, validation_error = _validate_answer(value)
     actions: list[str] = []
     if comma_count:
         actions.append(f"移除 {comma_count} 个对象／数组尾随逗号")
     actions.extend(alias_actions)
-    return parsed, validation_error, tuple(actions)
+    if parsed is None:
+        return None, validation_error, tuple(actions)
+
+    try:
+        canonical_text = json.dumps(
+            parsed,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        round_tripped = _strict_json_loads(canonical_text)
+    except (TypeError, ValueError) as error:
+        return None, f"规范 JSON 序列化失败：{error}", tuple(actions)
+    round_trip_parsed, round_trip_error = _validate_answer(round_tripped)
+    if round_trip_parsed != parsed or round_trip_error is not None:
+        return None, "规范 JSON 二次解析未通过同一合同", tuple(actions)
+    return round_trip_parsed, None, tuple(actions)
 
 
 def parse_answer_detailed(
@@ -847,7 +896,7 @@ def render_report(run: PilotRun) -> str:
             "",
             f"- 这是 {len(pilot_games())} 个游戏的小样本探针，不能替代正式跨类型判卷。",
             "- 答案未由脚本判定事实正确性；完整原文见 answers.md。",
-            "- parsed-contexts.json 仅执行确定性规范化：剥离额外文本／代码围栏、移除语法上无歧义的尾随逗号、按白名单转换标点键名；不补全截断内容、不修改游戏知识。每一步都写入 normalization_actions，原始格式不合仍单独记录。",
+            "- parsed-contexts.json 仅执行确定性规范化：剥离额外文本／代码围栏、移除语法上无歧义的尾随逗号、按白名单转换标点键名；不补全截断内容、不修改游戏知识。解析器拒绝任意层级重复键与 NaN/Infinity 等非标准常量；通过合同后由标准库重新序列化并二次严格解析。每一步都写入 normalization_actions，原始格式不合仍单独记录。",
             "- 详细输出与 10 秒延迟目标存在客观张力，本表保留实测，不据此自动调短提示词。",
             "",
             "## 运行信息",
@@ -923,9 +972,20 @@ def render_prompt() -> str:
     )
 
 
+def _write_strict_json(path: Path, payload: object) -> None:
+    text = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        indent=2,
+    ) + "\n"
+    _strict_json_loads(text)
+    path.write_text(text, encoding="utf-8")
+
+
 def write_raw_results(output: Path, run: PilotRun) -> None:
     output.mkdir(parents=True, exist_ok=True)
-    payload = {
+    payload: dict[str, object] = {
         "started_at": run.started_at,
         "finished_at": run.finished_at,
         "model": MODEL,
@@ -942,10 +1002,7 @@ def write_raw_results(output: Path, run: PilotRun) -> None:
         "attempts": [asdict(item) for item in run.attempts],
         "dispatch_stats": [asdict(item) for item in run.dispatch_stats],
     }
-    (output / "results.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_strict_json(output / "results.json", payload)
 
 
 def write_outputs(output: Path, run: PilotRun) -> None:
@@ -963,10 +1020,7 @@ def write_outputs(output: Path, run: PilotRun) -> None:
         }
         for attempt in run.attempts
     ]
-    (output / "parsed-contexts.json").write_text(
-        json.dumps(parsed_payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_strict_json(output / "parsed-contexts.json", parsed_payload)
 
 
 def reparse_existing(output: Path) -> PilotRun:
@@ -1001,6 +1055,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-label", default=MODEL_LABEL)
     parser.add_argument("--model-url", default=MODEL_URL)
     parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=MAX_TOKENS,
+        help="Output safety ceiling; the prompt itself has no word limit.",
+    )
+    parser.add_argument(
         "--reasoning-effort",
         choices=("default", "none", "minimal", "low", "medium", "high", "xhigh", "max"),
         default="default",
@@ -1015,10 +1075,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
-    global MODEL, MODEL_LABEL, MODEL_URL, REASONING_EFFORT
+    global MODEL, MODEL_LABEL, MODEL_URL, MAX_TOKENS, REASONING_EFFORT
     MODEL = arguments.model
     MODEL_LABEL = arguments.model_label
     MODEL_URL = arguments.model_url
+    if arguments.max_tokens <= 0:
+        raise SystemExit("--max-tokens must be positive")
+    MAX_TOKENS = arguments.max_tokens
     REASONING_EFFORT = (
         None if arguments.reasoning_effort == "default" else arguments.reasoning_effort
     )
