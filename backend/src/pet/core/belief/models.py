@@ -7,6 +7,15 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from pet.core.belief.protocol import (
+    GRID_COLUMNS,
+    GRID_ROWS,
+    PROTOCOL_VERSION,
+    CoverageMode,
+    ParsedObservation,
+    PosMode,
+    PromptLanguage,
+)
 from pet.core.gamecard import (
     GameKnowledgeMode,
     GameKnowledgeOutcome,
@@ -38,6 +47,7 @@ MouseMotionMagnitude = Literal["slight", "moderate", "large"]
 
 _FRAME_ROOT_PATTERN = re.compile(r"f[1-9]\d*\Z")
 _NON_FRAME_ID_PATTERN = re.compile(r"n(?P<sequence>\d{12}):(?P<source>[a-z][a-z0-9_]*)\Z")
+_COVERED_REGION_PATTERN = re.compile(r"^r(?P<row>[1-9]\d*)c(?P<column>[1-9]\d*)$")
 
 
 class EvidenceModel(BaseModel):
@@ -83,6 +93,71 @@ class FastObservationPayload(EvidenceModel):
     actual_provider: str | None
     user_prompt: str | None
     drop_reason: str | None
+
+
+class ObservationEnvelope(EvidenceModel):
+    frame_seq: int = Field(ge=1)
+    frame_gap: int = Field(ge=0)
+    coverage_mode: CoverageMode
+    covered_regions: list[str]
+    enumeration_complete: bool
+    camera_change: Literal["none", "small", "large"]
+
+    @model_validator(mode="after")
+    def validate_coverage(self) -> ObservationEnvelope:
+        for region in self.covered_regions:
+            match = _COVERED_REGION_PATTERN.fullmatch(region)
+            if match is None:
+                raise ValueError("covered regions must use r<row>c<column>")
+            if not (
+                1 <= int(match.group("row")) <= GRID_ROWS
+                and 1 <= int(match.group("column")) <= GRID_COLUMNS
+            ):
+                raise ValueError("covered region is outside the 16-row, 9-column grid")
+        if self.coverage_mode == "salient_positive_only" and self.enumeration_complete:
+            raise ValueError("salient-positive coverage cannot claim complete enumeration")
+        if self.enumeration_complete and not self.covered_regions:
+            raise ValueError("complete enumeration requires covered regions")
+        return self
+
+
+class FrameObservationPayload(EvidenceModel):
+    raw_text: str
+    parsed: ParsedObservation | None
+    protocol_version: Literal["1.1"] = PROTOCOL_VERSION
+    pos_mode: PosMode
+    prompt_language: PromptLanguage
+    prompt_hash: str = Field(min_length=1)
+    envelope: ObservationEnvelope
+    latency_ms: float = Field(ge=0.0)
+    ttft_ms: float | None = Field(default=None, ge=0.0)
+    visible_output_tokens: int | None = Field(default=None, ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    cost_usd: float = Field(ge=0.0)
+    actual_model: str | None
+    actual_provider: str | None
+    user_prompt: str | None
+    provider_truncated: bool
+    drop_reason: str | None
+
+    @model_validator(mode="after")
+    def validate_protocol_consistency(self) -> FrameObservationPayload:
+        if self.parsed is not None:
+            if self.protocol_version != self.parsed.protocol_version:
+                raise ValueError("payload and parsed protocol versions must match")
+            if self.pos_mode != self.parsed.pos_mode:
+                raise ValueError("payload and parsed position modes must match")
+        if self.envelope.enumeration_complete:
+            if self.parsed is None:
+                raise ValueError("complete enumeration requires a parsed observation")
+            if (
+                self.parsed.parse_errors != 0
+                or self.parsed.truncated
+                or self.provider_truncated
+            ):
+                raise ValueError("incomplete output cannot claim complete enumeration")
+        return self
 
 
 class FrameMetricsPayload(EvidenceModel):
@@ -272,6 +347,7 @@ class GameKnowledgePayload(EvidenceModel):
 
 EvidencePayload = (
     FastObservationPayload
+    | FrameObservationPayload
     | FrameMetricsPayload
     | KeyWindowPayload
     | MouseMotionPayload
@@ -300,6 +376,7 @@ class EvidenceEvent(EvidenceModel):
     def validate_kind_and_outcome(self) -> EvidenceEvent:
         expected_payloads: dict[str, type[EvidenceModel]] = {
             "fast_observation": FastObservationPayload,
+            "frame_observation": FrameObservationPayload,
             "frame_metrics": FrameMetricsPayload,
             "key_window": KeyWindowPayload,
             "mouse_motion": MouseMotionPayload,
@@ -314,6 +391,7 @@ class EvidenceEvent(EvidenceModel):
             raise ValueError(f"payload does not match evidence kind {self.kind!r}")
         expected_sources: dict[str, EvidenceSource] = {
             "fast_observation": "fast",
+            "frame_observation": "fast",
             "frame_metrics": "detector",
             "key_window": "input",
             "mouse_motion": "mouse",
@@ -357,6 +435,7 @@ class EvidenceEvent(EvidenceModel):
             raise ValueError("learned_at must not precede observed_at")
         if self.kind not in {
             "fast_observation",
+            "frame_observation",
             "scene_verified",
             "game_knowledge",
         } and self.outcome != "ok":
@@ -388,4 +467,24 @@ class EvidenceEvent(EvidenceModel):
                     raise ValueError("successful fast evidence needs text and no drop reason")
             elif self.payload.text or not self.payload.drop_reason:
                 raise ValueError("non-success fast evidence needs empty text and a drop reason")
+        if isinstance(self.payload, FrameObservationPayload):
+            if self.outcome == "ok":
+                if (
+                    not self.payload.raw_text
+                    or self.payload.parsed is None
+                    or self.payload.drop_reason is not None
+                ):
+                    raise ValueError(
+                        "successful frame observation needs raw text, parsed output, "
+                        "and no drop reason"
+                    )
+            elif (
+                self.payload.raw_text != ""
+                or self.payload.parsed is not None
+                or not self.payload.drop_reason
+            ):
+                raise ValueError(
+                    "non-success frame observation needs empty text, no parsed output, "
+                    "and a drop reason"
+                )
         return self
