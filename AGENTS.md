@@ -1,18 +1,24 @@
-# AGENTS.md
-最后更新：B-T3 收官；HUD 识别线拆为独立后续任务 B-T3c（排在 B-T7 后、B-T8 前）；B-T6 归并器已下发
+# AGENTS.md ── 分支版 `feat/open-world-memory-v1`
+最后更新：W-T0 下发（2026-09-02）；M5-B 重定案为「开放世界观察与记忆层 v1」在分支执行；B-T6 / B-T7 / B-T8 作废，由 W-T 序列取代
 
 > 本文件是主干、端口、跨游戏共识、流程与工程原则的唯一来源。CS2 适配的契约与实测见 **CS2.md**；
 > 新游戏适配开工见 **ADAPTER_GUIDE.md**。每份事实只存在于一个文件中，其他文件引用不复制。
-> 三份 md coding agent 一律不得修改（例外条件见 §3.7）。架构师每轮验收第一个动作是拉仓库逐字 diff。
+> 三份 md coding agent 一律不得修改（例外条件见 §5.2）。架构师每轮验收第一个动作是拉仓库逐字 diff。
+>
+> **分支版说明**：本文件在 `feat/open-world-memory-v1` 上生效，自 main `27f7f82`（B-T3 收官）开出。
+> 与 main 的差异全部带「分支」字样；合回 main 时以本文件覆盖 main 的 AGENTS.md 并去掉分支标记。
+>
+> **文件结构**：§0 一页速览 → §1 项目 → §2 当前状态（任务在这里）→ §3 契约（数据模型与接口，改动前先找架构师）→
+> §4 决策 D-xx（一条一个规则，先读粗体句，依据在后）→ §5 原则与流程 → §6 失误模式 F-xx → §7 实测数据 → §8 技术债与暂不做。
 
 ---
 
 ## 0 先读这一页
 
-**开工顺序**：§0 铁律 → §6.2 当前任务 → 涉及的 §2 契约 → §3 相关规则 → §4 失误模式。
+**开工顺序**：§0.1 铁律 → §0.4 分支规则 → §2.2 当前任务 → 涉及的 §3 契约 → §4 相关决策 → §6 失误模式。
 改 `games/cs2/` 前读 CS2.md。规则条目带编号（D-xx 决策、F-xx 失误模式、TD-xx 技术债），提交信息与报告可直接引用。
 
-**铁律（违者打回）**
+### 0.1 铁律（违者打回）
 
 1. AGENTS.md / CS2.md / ADAPTER_GUIDE.md 不得修改，只在提交中带上。
 2. 分层：core 不 import games；游戏包互不 import；生产模块不 import 本游戏 eval/；pet/ 顶层只有 main.py（及 __init__.py）；
@@ -24,9 +30,11 @@
 5. 禁止桩代码、写死返回值、mock 混入生产路径、空实现、TODO、裸 except 静默吞异常。做不到就如实说明。
 6. 每任务 commit 并 push；提交信息以任务 ID 开头；`git ls-remote` 确认远端存在后再报告。
 7. 任何阈值必须附实测依据，或明写"此数待实测确定"。
-8. 「已实现」「未实现」「技术债」是覆盖语义不是追加（§3.1 原则 12）。
+8. 「已实现」「未实现」「技术债」是覆盖语义不是追加（§5.1 原则 12）。
+9. **【分支】隔离**：实验代码只放新模块 / 新目录；改动既有模块只允许在报告中逐处列出的接线点；分支定期把 main 合进来。
+   否则合不回去，也会与适配线（战雷）打架。
 
-**术语**
+### 0.2 术语表
 
 | 词 | 含义 |
 |---|---|
@@ -34,18 +42,49 @@
 | 四条调用线（D-51） | 模型调用按功能命名：**帧观察线**（旧称快线，每个上传帧、发言链路在等）、**场景命名线**、**游戏知识线**、**HUD 识别线**。后三条旧称合称"深线"——不在反射路径上、无人等 |
 | 快线 / 深线 | 旧称。本文件历史段落仍用它们：快线 = 帧观察线；深线 = 后三条线的总称，不再指某一个档位或提示词 |
 | 证据流 / 归并器 / 信念状态 | 一切观察写成只追加的证据；唯一写者（代码）按策略裁决成信念；散文是渲染视图 |
-| 笔记员 | 文本模型，每几分钟读证据提补丁（升格 / 驳回 / 翻案 / 合并 / 提问），归并器验证后执行 |
-| 游戏卡 | 每游戏一份跨会话持久记忆：场景图谱、HUD 槽位、键位、货架一事实。在线渐进生成，零预置 |
+| 笔记员 | 文本模型，每几分钟读证据提补丁（升格 / 驳回 / 翻案 / 合并 / 提问 / **情节**），归并器验证后执行 |
+| 游戏卡 | 每游戏一份跨会话持久记忆：场景图谱、HUD 槽位、货架一事实。在线渐进生成，零预置 |
 | 场景指纹 | 画面缩成 64 位感知哈希，只答"这画面见过没有"，微秒级、无模型无 GPU |
 | 检测器 | 块级自适应噪声地板的画面变化检测；职责是去重不是侦察 |
 | 两货架 | 游戏知识边界：货架一"玩前可得"（可查）、货架二"玩后所见"（只能观察） |
+| **观察语言【分支】** | 帧观察线的输出格式：固定语法、开放词汇的行式协议（S/E/A/R/V/U），§3.8 |
+| **观察信封【分支】** | 调用层机械生成、随每条观察证据保存的元数据：覆盖范围、是否穷举、截断、帧距、镜头变化等，§3.8 |
+| **屏幕空间 / 世界空间【分支】** | 屏幕空间 = 画面上看到的位置与出现 / 消失；世界空间 = 游戏世界里的位置与移动。两者不同谓词、不同事件，D-52 |
+| **ObservationTrack【分支】** | 相邻观察的局部 ID 按位置与标签串成的短链，只在同一场景簇内有效；是"观察关联"，不是追踪器，§3.10 |
+| **观察层事件 / 世界层事件【分支】** | 前者由代码从相邻观察差分得出（became_observed 等）；后者是有证据条件的升格（entered 等），§3.11 |
+| **词表归并【分支】** | 开放词汇 → 规范词的归一：别名层自动、向量层只推荐、未命中进桶人工审，§3.12 |
+| **检查器【分支】** | 本地网页，逐帧展示"帧 → 原始输出 → 解析 → 关联 → 归并 → 信念 → 事件 → 情节"全链路；是渲染视图，可丢可重生，§3.14 |
 
-**现在**：M5-B「跟得上」；**三个本地传感器全部就位**（OCR `ccd06c6`、场景指纹与命名 `a6e8881`、鼠标聚合 `f71c865`）；B-T3 收官（`4f7b854`）；**B-T6 归并器与信念状态 v1 执行中**（零模型，四段录像离线验收）。HUD 识别线是独立后续任务 B-T3c。详见 §6.2。
+### 0.3 现在在哪
+
+**M5-B 重定案（2026-09）**：产品负责人调研"机器语言替代散文 + 开放世界多层记忆"后，决定撤销 D-44 的"最后"、
+把帧观察线重设计提前，并在 `feat/open-world-memory-v1` 上建观察与记忆层 v1。验收物改为**记忆层本身**（检查器 + 录像回放），
+不再经由宠物发言。主线 main 暂停 M5-B，只接适配线（战雷）与 bug 修复。
+
+三个本地传感器全部就位（OCR `ccd06c6`、场景指纹与命名 `a6e8881`、鼠标聚合 `f71c865`）；B-T3 收官（`4f7b854`）。
+**当前任务：W-T0 观察协议 + 解析器 + A/B 跑台（执行中）**，见 §2.2。
+
+### 0.4 分支规则（产品负责人定案）
+
+本分支是实验性设计，放宽一部分项目级原则，但不放宽诚实与可验证性。
+
+**放宽**：原则 2（允许适度前瞻抽象，如观察存储分层与 store API 边界）、原则 4（可为已确认的下一步拆模块）、
+原则 7（协议**词汇**允许"先这样以后归并"——这正是词表归并的设计意图；协议**语法**与数据模型仍按长期方案定）、
+规格 70–80 行的长度上限。
+
+**不放宽**：铁律 5（桩代码 / 写死 / 空实现 / 伪装完成）、铁律 6（提交拆分与 push）、回归测试与 ROOT CAUSE 注释、
+自述必须与仓库交叉核对、任何阈值"待实测"。
+
+**隔离**：见铁律 9。B-T6 / B-T7 / B-T8 的旧规格在本分支作废，不得按旧规格施工。
+
+**语言（D-58）**：协议词汇、Claim 值、词表、新代码的注释 / 日志 / 命令行帮助一律英文；面向产品负责人的渲染视图
+（cognition.md、timeline.md、检查器界面文字）与产品内容（解说、事实句、词库）保持中文；OCR 原文保留原文；不做整批翻译。
+
+**毕业标准（A4，暂定）**：对一段 ≥10 分钟上帝视角录像回放：检查器给出可读事件时间线；episode 列表每句可追到事件、事件可追到证据与帧；
+错误合并为零、无证据世界层事件为零；**加产品负责人人工审核通过**。达标后由架构师出合回 main 的方案。
 
 ---
-
 ## 1 项目
-
 ### 1.1 目标与形状
 
 一个常驻 Windows 桌面的 AI 电子宠物，在用户玩游戏时实时观战、解说、吐槽。
@@ -53,6 +92,7 @@
 经统一端口向主干递「发言请求」。主干只负责嘴（语音与开关）、钱包（模型调用与花费）、安检（闸门引擎）、脸（前端桥）。
 已落地适配：CS2。战争雷霆适配由第二位开发者依 ADAPTER_GUIDE.md 开发中。
 通用视觉模式（M5）架构上是主干侧能力：相当于一个"用屏幕当数据源"的特殊适配，经既有端口产出发言请求。
+**【分支】观察与记忆层（本分支）只写记忆，不产出发言；发言层（M5-C）之后只读本地信念状态。**
 
 ### 1.2 技术栈
 
@@ -64,7 +104,8 @@
 | 语音 | Windows OneCore 系统语音：PowerShell 合成 WAV + WinMM 直播放，可从任意线程立即中断，零模型零 GPU。神经网络语音是 M7 |
 | 语言 / 视觉模型 | 经 OpenRouter（OpenAI 兼容协议）。产品负责人在北美，无法注册阿里云百炼，不走厂商直连。型号与上游一律配置传入 |
 | 截屏 | Windows Graphics Capture（zbl 0.7.1），按精确 HWND 抓单窗口 |
-| OCR | WinRT Windows.Media.Ocr（zh-Hans-CN 可用），原型阶段 |
+| OCR | PP-OCRv6 tiny / OpenVINO CPU（D-47 定型；WinRT 已出局，§7.4） |
+| 本地文本模型【分支】 | 句向量模型（MiniLM / bge-small 级，二三十 M 参数）跑 OpenVINO 同一运行时，CPU、1 线程；只用于词表归并推荐（D-55）。v1 零 GPU（D-39） |
 | 打包 | PyInstaller + Tauri bundler（尚未启用，bundle.active = false） |
 
 ### 1.3 目录结构
@@ -73,7 +114,7 @@
 /backend/src/pet/
     main.py                  读配置、装载当前适配、挂路由、生命周期
     core/                    主干，游戏无关（分层由 tests/test_layering.py 强制）
-        adapter_api.py       端口 v1：SpeechRequest / GameStatus / GameAdapter / CoreServices（§2.1）
+        adapter_api.py       端口 v1：SpeechRequest / GameStatus / GameAdapter / CoreServices（§3.1）
         speaker.py           发言执行：串行队列、模型调用、回退、花费、模式锁定
         gate.py              闸门引擎：按 vocabulary_id 解析词表绑定表为运行时闸门
         capture.py           截屏与画面变化检测（M5-T1/T3）：WGC 抓帧、块级检测器、全量录制、
@@ -84,8 +125,11 @@
         ocr_probe.py / ocr_selective.py / ocr_selective_probe.py
                              WinRT OCR 探针与选择性二次 OCR 原型（持久工作进程、文字行缓存差分、
                              预算与 scene_reset 爬坡）。尚未接管线（B-T4）
-        belief/              【B-T1 起新建】证据流、主张、归并器、信念状态、渲染器（§2.6）。
-                             零网络零模型：笔记员与深线的模型调用在适配侧发起，belief 只验证与执行补丁
+        belief/              证据流、主张、归并器、信念状态、渲染器（§3.6）。零网络零模型：笔记员与深线的模型调用在适配侧发起，
+                             belief 只验证与执行补丁。**【分支】新增**：protocol.py（观察语言唯一语法源，§3.8）、
+                             reducer.py（W-T2）、track.py（W-T4）、events.py（W-T5）、vocabulary.py（W-T6）、
+                             manifest 与 store API（W-T1）；文件名以各任务规格为准
+        inspector/           【分支 W-T3 起】检查器：FastAPI 路由 + 单文件 HTML（无框架），只绑 loopback（§3.14）
         config.py  network.py  bridge.py  speech.py  lines.py  llm.py  prompt.py
     games/<game_id>/         每游戏一个适配包，含完整管线与自己的 eval/（CS2 模块清单见 CS2.md）
     games/generic/           通用视觉模式（默认关闭 [games.generic].enabled）
@@ -93,17 +137,22 @@
                              并发与超时丢帧、输入上下文、观察日志落盘、状态发布
         eval/                视觉考卷（vision_exam / vision_endpoint_exam / vision_geo_exam）、
                              机械区域生成（region_assets）、离线重放与矩阵（observation_replay / observation_matrix）
-        【B-T2 起新增】场景指纹、游戏卡、初始化、笔记员调用等模块，文件名以各任务规格为准
+        deep_read.py  game_knowledge.py  scene_naming.py   深线三条线的调用
+        notetaker.py         【分支 W-T8 起】笔记员：读事件流提 add_episode 补丁
 /backend/tests               后端测试与 fixtures；test_layering.py 是分层警报器
 /backend/prompts/
     personality.md           共用性格层，产品负责人可直接编辑，重启生效
-    generic/                 通用视觉提示词：observation-fast.md（快线）与 observation-deep.md（深线）；
-                             B-T3 / B-T7 新增初始化与笔记员提示词。跨游戏通用，不得含任何游戏专属内容，
-                             游戏信息只以数据（游戏卡）身份进上下文
+    generic/                 通用视觉提示词：observation-fast.md（散文合同，非 topdown 视角继续使用）、observation-deep.md、
+                             game-knowledge.md、scene-naming.md。跨游戏通用，不得含任何游戏专属内容，游戏信息只以数据（游戏卡）身份进上下文
+    generic/observe/         【分支 W-T0 起】观察语言提示词：common 语法段由 protocol.py 生成不手写；topdown.md（上帝视角）；
+                             其他视角在各自任务前沿用散文合同（D-61）
     <game_id>/               每游戏的词库、闸门需求（gate-requirements.json）等
 /backend/data/<game_id>/     每游戏的场景与评测资产（回归资产，不得删除）
+/backend/data/generic/vocabulary.json   【分支 W-T6 起】规范词表（关系 / 动作 / 视图模式），带版本号；人工维护
+/backend/data/generic/embedding/        【分支 W-T6 起】句向量模型 IR 文件（TD-56）
 /backend/eval-reports/       评测输出（已 gitignore）
-/backend/recordings/         原始录制与观察日志会话目录（已 gitignore）
+/backend/recordings/<session>/   原始录制与会话产物（已 gitignore）：evidence.jsonl、snapshot、action_log；
+                             【分支】+ manifest.json、events.jsonl、episodes.jsonl、unmatched.jsonl、timeline.md（§3.13）
 /backend/memory/<game_id>/   【B-T2 起新建】游戏卡（gamecard.json + gamecard.md）与会话信念快照。跨会话持久的
                              用户数据，不是回归资产。**测试阶段暂允许进仓库**（产品负责人决定，便于验收对照），
                              分发前必须 gitignore（TD-41）；卡内不得含任何玩家身份信息
@@ -124,12 +173,86 @@
   离线初始化与信念重放入口随 B-T3 / B-T6 建
 - 前端：`cd frontend && npm.cmd install` / `npm.cmd run tauri dev`（需先启动后端）/ `npm.cmd run build` 与 `format:check`
 - 前端命令一律 `npm.cmd`；python 不可直呼时用 `py -3.12`；后端与前端由人手动分别启动，打包（M10）前不做自动拉起
+- 【分支】观察语言 A/B 与检查器回放入口随 W-T0 / W-T3 建，命令以各任务报告为准
 
 ---
+## 2 当前状态（覆盖语义）
 
-## 2 契约（改动前必须先与架构师确认；以下定义与代码逐字段一致）
+### 2.1 里程碑总览
 
-### 2.1 适配端口 v1（core/adapter_api.py，PORT_VERSION = 1）
+已实现：
+- **M1 桌面宠物**：置顶悬浮窗、拖动、显隐热键、托盘菜单、表情、气泡、系统语音（可中断）、WebSocket、待机播报
+- **M2 看得懂 CS2**：GSI 接入与自动安装、录制回放、会话与主体识别、事件检测、发言策略、模板话术、对局生命周期
+- **M3 每句话由大模型当场生成**：代码产事实句 + 模型只管文风、词库与闸门、线上接入与回退、评测基建、连杀收敛。产品负责人真实对局验收
+- **M4 多游戏地基**：删 4.4MB 过程产物并产出模块清单；端口 v1 定稿；一次性重构落地——core / games/cs2 / eval 三层分离、全目录英文化、
+  性格与游戏知识分层、每游戏独立配置段与模型档位、分层警报器上线。迁移前后：35 场景选中序列逐字节一致、提示词逐字节一致、通过数 414>409
+
+未实现（滚动细化，只细化当前里程碑；主线与适配线并行）：
+- **M5 通用视觉**（默认关闭），三段只含通用模式，CS2 视觉与战雷视觉归适配线：
+    - M5-A 看得见（收官冻结）：截屏 + 快线观察 + 窗口标题查表识游戏 + 滚动观察日志。验收物是观察日志；真机 10 分钟判词并入 B-T10
+    - **M5-B 跟得上（当前，重定案，分支执行）**：观察语言 + 证据流 + 归并器与信念状态 + ObservationTrack + 观察层 / 世界层事件 +
+      词表归并 + 笔记员情节 + 检查器。**验收物是记忆层本身**：录像回放后打开检查器，看当前状态 / 事件时间线 / episode，
+      对照自己的记忆判真伪，抽任意一条沿证据 ID 追到帧。此时还不能：开口（M5-C）；视觉认人（跨场景身份）；空间拓扑；
+      跨局记忆（M6）；3D / 横版视角的观察提示词
+    - M5-C 开口：发言仲裁读信念快照 + 最新快线证词 + 事件卡，只写"何时开口"；说话链路 M3/M4 早已就绪
+- **M6 跨局长期记忆**：游戏卡已是种子（B-T2 起持久）；剩下会话信念快照的持久化、下次开局装载与跨局翻案
+- **M7 神经网络语音**：必须保留可随时中断，延迟不得明显劣于系统语音
+- **M8 语音对话输入**
+- **M9 外观自定义、心情系统与设置面板**（设置面板：性格 / 外观 / 适配管理的 UI 壳）
+- **M10 打包分发，朋友可安装 —— MVP 完成线**
+
+Post-MVP：适配形态升级为独立分发（A→B→C）、设置面板的适配下载页、AI 玩杀戮尖塔、AI 玩文明 6（"AI 代玩"与本产品端口不通用，不预留设计）。
+
+### 2.2 当前任务序列【分支 W-T】
+
+M5-B 重定案一句话：**视觉模型是开放世界的观察者，本地代码是世界知识的裁判**——帧观察线改写固定语法、开放词汇的观察语言；
+归并器把观察串成轨迹、裁成信念、差分出事件；笔记员把事件聚成情节；一切可回溯到帧。屏幕空间与世界空间分开（D-52），
+缺席不是否定证据（D-53）。
+
+**作废**：B-T6（归并器）、B-T7（笔记员）、B-T8（帧观察线重设计）的旧规格，由 W-T2 / W-T8 / W-T0 取代。
+**保留在后**：B-T3c（HUD 识别线，排在 W-T5 后）、B-T9（深线在线触发，排在 W-T5 后、W-T7 前，为世界层升格与待查提供深读）、
+B-T10（真机验收，并入 W-T9）、B-T11（本地 CV 轨迹探针，条件不变）。**编号不重排**。
+
+任务单一职责、可独立回滚；任何阈值"待实测"。W-T0 与 W-T2 细化时各拆两段。
+
+| 序 | 任务 | 内容 | 产品负责人怎么验 | 依赖 |
+|---|---|---|---|---|
+| **0** | **W-T0 观察语言（拆五段，逐段敲定）** | **0a** 协议与解析器：`protocol.py` 唯一语法源（生成系统提示词格式段与用户消息格式指令、解析器、契约测试）、POS 两种编码（grid144 格码 / bbox）、`frame_observation` 证据 kind 与信封（执行中）。**0b** 抽样与标注工具：按机械信号分层抽 60 帧（上传帧集合内）、标注网页、truth.json。**0c** 跑台 + 无真值指标：当前模型上先测 POS 编码 × 叠加网格（2×2）再测提示词语言，三次重复，预注册判据。**0d** 模型横评：先探针（端点 / 推理关闭参数 / 严格 schema 支持 / 429），再在选定格式上跑 5 款，严格 schema 可用的模型加"紧凑 JSON"臂。**0e** 真值指标、总报告、拍板；之后 0f 接生产 adapter。**全程不碰归并器** | 0a：pytest + 读生成的格式段；0b：自己标 60 帧；0c / 0d：读表；0e：拍板协议、POS、语言、模型 | — |
+| 1 | W-T1 会话 manifest + store API 边界 + 幂等 | manifest 各版本号；append / snapshot / range / entity_history 四个 API；幂等键；读端容忍尾部半行 | 同一录像回放两次产物逐字节一致 | W-T0 |
+| 2 | W-T2 归并器 v1（原 B-T6 重设计） | 机械来源 Claim（OCR → ui.numeric / ui.text，指纹 → scene，键鼠 → input.doing）；frame_observation → 屏幕空间 Claim；(subject, predicate, qualifier) 多值槽位、valid_from / valid_to 版本化；三条策略参数化；证据家族计独立组；按 frame_seq 处理 + 重排窗口；ActionLog；basis[]；快照版本号；cognition.md 机械段。回归测试含 ROOT CAUSE：迟到的 42 不覆盖 37、状态变化不判矛盾、同帧派生只算一组、缺席不结束状态 | 四段录像回放对照现场记录；随机抽 5 条认知沿证据 ID 追到帧 | W-T1 |
+| 3 | W-T3 最小检查器 | 逐帧链路视图（帧 → 原始输出 → 解析 → Claim → 槽位）+ 快照 + 证据查找；回放模式读会话目录；loopback + 每会话 token；无写接口 | 打开网页点任意一帧看全链路 | W-T2 |
+| 4 | W-T4 ObservationTrack | 同簇内相邻观察一对一分配（代价矩阵）；镜头变化门控；TTL 只数有覆盖的帧；升实体（存活 T 秒 / 名字提议 / 重要事件）；名字锚定只写 identity.name_proposal | 检查器看轨迹：错合一次重罚，断轨可接受 | W-T3 |
+| 5 | W-T5 观察层事件 + 待查问题去重 | became_observed / became_unobserved / screen_position_changed / observed_state_changed / observed_action_changed / observed_relation_changed + 机械 value_changed / scene_epoch_changed / view_mode_changed；区间时间；按类型迟滞；frame_gap 缩放；修订与幂等；OpenQuestion 去重计数过期；timeline.md；检查器事件页 | 检查器事件页对照录像 | W-T4 |
+| 6 | W-T6 词表归并 | 别名层自动；句向量模型接入（含 tokenizer 选择报告）只推荐；未归并桶；记录存 canonical_at_ingest 与版本；检查器词表页（审计 / 版本自增 / 撤销 / 写接口 token） | 审一次桶 | W-T5 |
+| 6.5 | B-T3c HUD 识别线 | 见旧规格；给 ui:rN 槽位补 semantic_role | 对着代表帧看"说是血量的地方是不是血量" | W-T2 |
+| 6.6 | B-T9 深线 v1（在线触发） | 三种触发；帧环形缓冲（D-36）；U 行升级条件（§3.11） | ActionLog 显示深读解决了哪些待查；预算不超 | W-T5 |
+| 7 | W-T7 世界层事件升格 | entered / left / moved / started_doing / stopped_doing 的升格规则与证据条件（无镜头变化 + 有覆盖 + 多帧连续 + 深线） | 检查器看哪些升了、凭什么 | W-T5、B-T9 |
+| 8 | W-T8 笔记员 v1（原 B-T7 重设计） | 事件驱动切分 + 定时兜底（重叠窗口）；add_episode 补丁三段式（grounded_facts / interpretations / summary）；逐句验证；episodes.jsonl；检查器情节页 | 读 episode 列表判真伪；看被拒补丁数量与原因 | W-T7 |
+| 9 | W-T9 长录像评测 + 毕业审 | 三组评测集（微片段 / 追踪压力片段 / 长录像）；错合与无证据世界事件重罚；TD-38 交错开关帧时间对照；A4 + 人工审；决定 SQLite / CV 追踪器；合回 main 的 AGENTS.md | 全套 | 全部 |
+
+成本预估：观察语言 token 略高于散文（W-T0 实测）；笔记员 ≈ $0.01/小时；深线 ≈ $0.005/小时。成本不构成约束。
+
+### 2.3 排队、并行线与适配线
+
+- 【分支】main 暂停 M5-B；main 只接适配线与 bug 修复。分支定期 merge main（铁律 9）
+- T7.8（429 冷却，TD-25）已落地；任何跑批报告必须能区分"模型学不好"与"被限流打断"
+- 排队：【推测】去留并入 W-T0（改冻结提示词要跑回归，与重设计一次付清）；视觉美国区端点仍等服务商账号人工审核（TD-20）
+- 适配线（第二位开发者，代码审查归架构师）：战争雷霆实时数据适配**现在可开工**（开工文件 ADAPTER_GUIDE.md；对标 CS2 的 M2+M3 深度；
+  数据源为游戏自带 localhost:8111）；战雷视觉适配与 CS2 视觉适配（OCR + 地图识别等，落在 games/cs2）在 M5 之后；
+  CS2 地图战术建议（原 M3-T14）随时可做，触发于回合开始，可预生成。CS2 待办清单见 CS2.md
+
+### 2.4 多开发者协作约定（生效中）
+
+1. 适配开发者只允许改 games/<自己的游戏>/、prompts/<自己的游戏>/、data/<自己的游戏>/、docs/<自己的游戏>/ 与自己游戏的 md；主干改动经架构师下发
+2. 端口不够用时立即停下来找架构师改端口，不许在适配里绕路
+3. 主干与适配只经端口通信，双向都是；test_layering.py 会当场抓违规
+4. 端口带版本号；不匹配拒绝装载
+5. 【分支】适配开发者不改分支；分支不改 games/<其他游戏>/。两线只在 main 相遇
+
+---
+## 3 契约（改动前必须先与架构师确认；以下定义与代码逐字段一致）
+
+### 3.1 适配端口 v1（core/adapter_api.py，PORT_VERSION = 1）
 
 ```
 SpeechRequest —— 适配向主干递的唯一「发言条子」
@@ -151,7 +274,7 @@ CoreServices —— 适配对主干的全部认知，仅此五个回调
 
 端口带版本号；不匹配拒绝装载。端口不够用时**立即停下来找架构师改端口**，不许在适配里绕路——开发者只有两人，端口还能免费改。
 
-### 2.2 主干对发言条子的三项裁决与 speaker 行为
+### 3.2 主干对发言条子的三项裁决与 speaker 行为
 
 裁决（宠物的生理，不是游戏逻辑，永远留在主干）：
 1. 开关永远有效——静音时任何适配的条子都不播
@@ -161,14 +284,14 @@ CoreServices —— 适配对主干的全部认知，仅此五个回调
 speaker.py（自 M3 起不变）：请求串行队列先进先出；一次事件最多一次模型调用绝不重试；
 失败 / 空输出 / 闸门命中一律回退 fallback_text；连续失败 3 次锁定本局模板模式；花费统计与托盘显示。
 
-### 2.3 提示词拼装与闸门引擎
+### 3.3 提示词拼装与闸门引擎
 
 - core/prompt.py：系统提示 = prompts/personality.md + prompts/<vocabulary_id>/vocabulary.md（若有）。
-  性格层共用、游戏知识层随适配（D-04）。词库整份注入不做筛选（输入几乎免费，§5.5）。
+  性格层共用、游戏知识层随适配（D-04）。词库整份注入不做筛选（输入几乎免费，§7.5）。
 - core/gate.py：按 vocabulary_id 读取 prompts/<id>/ 下的词表绑定表与 gate-requirements.json，解析为运行时闸门；
   解析失败整表失效并回退保守规则。改词库不需要改代码。
 
-### 2.4 前端桥
+### 3.4 前端桥
 
 WebSocket `ws://127.0.0.1:8737/ws`：
 ```
@@ -182,7 +305,7 @@ WebSocket `ws://127.0.0.1:8737/ws`：
 Utterance（core/lines.py）：id 非空, text 非空, emotion ∈ neutral / happy / angry / surprised / speechless。
 HTTP 路由：适配经 http_router 挂载自己的接收端点（CS2 的 /gsi 规则见 CS2.md）。
 
-### 2.5 配置文件（backend/config.toml）
+### 3.5 配置文件（backend/config.toml）
 
 ```
 [active]  game = "cs2"
@@ -194,17 +317,22 @@ HTTP 路由：适配经 http_router 挂载自己的接收端点（CS2 的 /gsi �
                                  max_inflight=4, max_tokens=200（保险丝）, region_focus_max=0.50
                                  （吸收原 region_sparsity_max=0.25，TD-18 待扫统一）
 [llm.profiles.scene_fingerprint_verifier]   场景指纹核查模型（B-T2-4）。当前 qwen3.8-flash、推理 none、
-                                 温度 0、10 秒截止不重试。**上传宽度 1920**（深线不受快线 896 的约束——896 会毁掉小字，见 §5.4）
-【后续新增】按 D-51 每条线一个档位：游戏知识线（B-T3a 选型后命名）、HUD 识别线（B-T3c）、
-              [games.generic.belief]（笔记员周期、策略参数）、[llm.profiles.notetaker]（文本档）。
-              档位按线命名，不按模型命名；同一模型可被多条线引用
+                                 温度 0、10 秒截止不重试。**上传宽度 1920**（深线不受快线 896 的约束——896 会毁掉小字，见 §7.4）
+[llm.profiles.game_knowledge]   游戏知识线（B-T3a 定型 gemini-3.1-flash-lite，仅联网）
+【分支后续新增，键名由各任务定、报告中列出】
+  [games.generic.observation]    观察语言：protocol_version、pos_mode、max_lines、max_tokens、prompt_language（W-T0 定值）
+  [games.generic.belief]         归并器：重排窗口、track TTL、升实体时长、各事件迟滞（全部待实测）
+  [games.generic.vocabulary]     词表路径、版本、向量层开关（W-T6）
+  [games.generic.inspector]      enabled、端口沿用 8737、token 每会话随机生成不落配置（W-T3）
+  [llm.profiles.frame_observer]  帧观察线档位（`vision_fast` 改名随 W-T0，TD-59）；[llm.profiles.notetaker] 文本档（W-T8）
+档位按线命名，不按模型命名；同一模型可被多条线引用
 ```
 密钥值永远不进配置文件；指定的环境变量缺失时必须明确报错，不得回退到其他变量或默认端点。
 仅默认端点发送服务商特有的路由参数。
 
-### 2.6 信念层契约 v1（core/belief/，B-T1 起分任务落地）
+### 3.6 信念层契约 v1（core/belief/）
 
-数据模型属难回退决策（§3.1 原则 7）。
+数据模型属难回退决策（§5.1 原则 7）。
 
 ```
 EvidenceEvent —— 证词。只追加、不修改、错了也保留
@@ -219,17 +347,20 @@ EvidenceEvent —— 证词。只追加、不修改、错了也保留
     outcome（ok / dropped / superseded / failed）
 Claim —— 标准化后可裁决的最小主张
     subject（entity:eN / ui:rN / scene / player / game）,
-    predicate（通用层只有十个：visible / located_at / numeric_value / reads_text / same_as / has_label /
-    has_state / changed_from / doing / contains；游戏适配可加命名空间谓词，通用层不预定义任何游戏机制）,
+    predicate（**【分支修订】谓词按命名空间分空间，全表见 §3.9**；通用层不预定义任何游戏机制；游戏适配可加自己的命名空间）,
+    qualifier（【分支】多值谓词的限定：facet / (relation, object) / action；单值谓词为 None）,
     value, value_type, valid_from, evidence_ids, modality（observed / inferred / uncertain；不接受模型自报数值置信度）
-BeliefSlot —— 每个 (subject, predicate) 一格，格里是候选而非单值
+BeliefSlot —— 每个 (subject, predicate, qualifier) 一格【分支修订，§3.9】，格里是候选而非单值；每个值带 valid_from / valid_to，
+    结束是版本化不是删除
     key, current, status（candidate / confirmed / superseded / retracted；disputed 与 stale 由字段计算不落库）,
     valid_from, last_observed_at, support_groups（按 root_capture_id 家族分组，同帧派生只算一组）,
-    contradictions, policy（ui_numeric / ui_text / scene / default）, history
+    basis[]（【分支】支撑该值的证据类型清单，如 repeated_visual_observation / ocr_anchor，供检查器解释）,
+    contradictions, policy（ui_numeric / ui_text / scene / identity / default）, history
 StatePatch —— 笔记员与深线对语义层的提议，不是写入
-    ops[]：set_candidate / upgrade / retract / merge_entity / open_question，每条必须引用 evidence_ids 与 valid_at
-BeliefSnapshot —— version, generated_at, slots, entities（entity_id, aliases, current_label, identity_status, last_seen）,
-    open_questions, conflicts
+    ops[]：set_candidate / upgrade / retract / merge_entity / open_question / **add_episode（分支，§3.11）**，每条必须引用 evidence_ids 与 valid_at
+BeliefSnapshot —— version, generated_at, slots, entities（entity_id, aliases, current_label, identity_status, last_seen,
+    【分支】name_proposals, source_tracks）, tracks（【分支】活动中的 ObservationTrack，只在内存与快照，不进长期记忆）,
+    open_questions（【分支】结构见 §3.11）, conflicts
 ActionLog —— 每次升格 / 驳回 / 翻案 / 替代 / 合并 / 拒绝补丁一行，引用证据与规则名
 BeliefReducer —— 唯一写者、纯函数：(snapshot, evidence | patch) -> (snapshot', actions)
     验证：证据存在、时间合理、迁移合法、满足升格规则、不重复计数、推测与"仅光效"不成为事实、不删除未解释的矛盾
@@ -248,7 +379,7 @@ observations.md 渲染器。evidence.jsonl 按 learned 顺序追加，md 按帧�
 是"调度到判定"的耗时（此前恒 0）。当前校验器是封闭世界（kind 白名单、root_capture_id 必须非空、同帧同 kind 唯一），
 B-T4（OCR 一帧多条）与 B-T5（鼠标无帧号）必须同批放宽。
 
-### 2.7 游戏卡契约 v2（backend/memory/<game_id>/gamecard.json + gamecard.md）
+### 3.7 游戏卡契约 v2（backend/memory/<game_id>/gamecard.json + gamecard.md）
 
 ```
 game_id（ASCII slug）, display_name（窗口标题原文，只管身份）,
@@ -275,27 +406,148 @@ init（initialized_at, source_recordings, version）
 
 `gamecard.md` 必须能完全由 `gamecard.json` 重生。注入快线的短视图由渲染器生成，长度硬顶（待实测）。跨会话持久，是 M6 的种子。
 
+### 3.8 观察语言 v1.1 与观察信封【分支，W-T0 起】
+
+**语法**（`core/belief/protocol.py` 是唯一定义：提示词里的格式段与解析器都从它生成，配契约测试；D-54）：
+
+```
+S <facet> <free text>              关于整幅画面的陈述，facet 开放（weather / lighting / time_of_day …）；`mode`（gameplay / menu / cutscene …）
+                                   与 `place`（画面像什么地方，不是玩家的世界位置）是每帧要求各一条的两个 facet
+E oN <POS> <free text>             看见一个东西：局部 ID、位置、开放标签
+A oN <facet> <free text>           一个属性：facet 是 snake_case 单 token（pose / held_item / condition …开放），值到行尾
+R oN <relation> <oM|player>        关系：主-谓-宾；relation 是 snake_case 单 token（开放）
+V oN <action> [<oM|player>]        正在做的事：action 是 snake_case 单 token（开放）；只许现在进行时
+U <oN|POS> <facet> <free text>     看不清 / 不认识 / 拿不准（模型表达不确定的唯一渠道）
+.                                  终止符（缺失即判截断）
+```
+
+规则：opcode 在首；每种 opcode 字段数固定；最后一个字段是到行尾的自由文本、**不用引号**；一行一个 (实体, facet) 值，
+同一 (实体, facet) 多行取最后一行并计 duplicate；`oN` 只在当帧有效，绝不冒充实体 ID；`player` 固定 token；
+未知 opcode 与格式错行**原样保存、计 parse_error、不进信念**；不读数字与文字（reads_text 归 OCR）、不比较、不回溯、不写游戏名；
+拿不准写 U 不猜。词汇一律英文（D-58）。`<POS>` 两种编码：`grid144` 沿用检测器格码 `r<row>c<col>`（与 `Scope.cells` 同格式，允许 `r8c5-r9c6` 范围）、`bbox`（`x y w h`）；
+选哪种由 W-T0c A/B 判定后写回此处。`to_bbox()` 一律返回 `(x0, y0, x1, y1)`。行数上限（占位 24）与 max_tokens 待实测。
+固定字段间严格单个 ASCII 空格，不修复；只有 `.` 一行是合法的空观察；`truncated = 缺终止符 OR 终止符后有内容 OR 超行数`。
+
+**用户消息**：机械部分（游戏名、玩家输入窗口、聚焦区域模板及其三个数值、心跳与广域变化模板）不变；
+现散文合同里嵌在用户消息中的**格式指令**（"输出【画面】和【局部】两段…"）在观察语言臂下由 `protocol.py` 按信封 scope 生成
+（enumerative_roi：列出该区域内全部显著对象；salient_positive_only：只写显著对象），不手写第二份。OCR 结果**不进**帧观察线（D-30 独立印证：
+视觉与 OCR 是两个证据家族，喂进去等于让两家变一家），只进证据流供归并器 / HUD 线 / 深线消费。
+
+**观察信封**（调用层机械生成，模型不写；随 `frame_observation` 证据保存）：
+`frame_seq, frame_gap（距上一条被处理观察跳了几帧）, coverage_mode（salient_positive_only | enumerative_roi；不叫 scope——外层 EvidenceEvent.scope 是几何 bbox）,
+covered_regions（r<row>c<col>）, enumeration_complete, camera_change（取自 frame_metrics.global_change 的档位）`；`protocol_version, pos_mode, prompt_language, prompt_hash` 在 payload 本体。
+`enumeration_complete` 只在 enumerative_roi、有覆盖、零解析错误、未截断时可为 true——不完整的观察永远不得声称穷举。
+
+**frame_observation 证据**（source=fast，取代 topdown 视角下的 fast_observation）：payload 保存 `raw_text`、完整 `parsed`（ParsedObservation，不造精简形式）、
+信封与延迟 / token / 花费字段；成功 / 失败沿用外层 `outcome`（ok ⇔ raw_text 非空且 parsed 非空；截断仍是 ok）；`root_capture_id` / 几何 scope 只在外层不复制；旧散文合同的 fast_observation 在非 topdown 视角继续有效（D-61）。
+
+**基础语义**（D-53）：模型输出是**正证据集合**，不是画面清单。缺席默认不构成否定证据；只有信封说明该区域被覆盖、未截断、
+且满足 §3.11 的迟滞条件，缺席才可用于结束状态或轨迹。
+
+### 3.9 谓词表与槽位键【分支，W-T2 起】
+
+谓词按命名空间分空间；**屏幕空间与世界空间永不共用谓词**（D-52）。槽位键 = (subject, predicate, qualifier)。
+主体命名空间：`view`、`player`、`track:tN`、`entity:eN`、`ui:rN`、`scene:sN`；预留 `place:pN`、`thread:qN`（L4 / L7 后续）。
+
+| 谓词 | 主体 | qualifier | 值 | 来源 | 策略 |
+|---|---|---|---|---|---|
+| view.mode | view | — | 模式（归一后） | S mode | default |
+| view.place_candidate | view | — | 短语 | S place | default |
+| view.state | view | facet | 值（weather / lighting / time_of_day …开放） | S 其他 facet | default |
+| screen.observed | track:tN | — | true | E | 缺席≠否定 |
+| screen.position | track:tN | — | POS | E | default |
+| screen.label | track:tN | — | 标签 raw（v1 不归并） | E | default |
+| screen.state | track:tN | facet | 值 | A | default |
+| screen.relation | track:tN | (relation_canonical, object) | raw relation | R | default |
+| screen.doing | track:tN | action_canonical | target, raw action | V | default |
+| ui.numeric | ui:rN | — | 数字 | OCR | ui_numeric |
+| ui.text | ui:rN | — | 文本 | OCR | ui_text |
+| scene.cluster | view | — | cluster_id | 指纹 | scene |
+| scene.label | scene:sN | — | 名字 | 场景命名线 | scene |
+| input.doing | player | — | 机械动作描述 | 键鼠 | default |
+| identity.same_as | track / entity | entity | proposed / accepted / rejected | 归并器 / 笔记员 / 深线 | identity（W-T4） |
+| identity.name_proposal | track:tN | — | 名字 + 来源 | OCR + 关系 | 只提议（D-57） |
+| world.* | entity / player / place | 各自定 | — | W-T7 升格 | 待定 |
+| fact.* / thread.* | — | — | — | L6 / L7 预留命名空间 | v1 不实现 |
+
+**为后续层预留的不变量**（W-T2 的数据模型必须满足，否则 L4–L7 要改核心）：主体与谓词都是命名空间字符串，加新层不改归并器；
+每个值带 valid_from / valid_to 与 evidence_ids，可回答"当时"；同一 (subject, predicate) 可有多个 qualifier 并存；
+modality 只有 observed / inferred / uncertain（D-31），可靠度由证据家族数、稳定时长与 basis[] 表达；实体 ID 与名字分离（D-33）。
+
+### 3.10 ObservationTrack 与实体升格【分支，W-T4 起】
+
+- 只在同一指纹簇（场景 epoch）内有效；epoch 切换全部结束；断轨不删实体，只更新 last_seen（D-33）
+- 相邻观察做**一对一分配**（小代价矩阵）：代价 = 位置距离 + 标签距离（v1 别名层 / 字面；W-T6 后可加向量）+ 时间间隔 + 状态不连续 + 镜头变化惩罚；
+  camera_change 大时禁止关联；错合的代价远高于漏合
+- TTL 只数**有覆盖**的帧（信封 covered_regions 含该位置且未截断）；连续 K 次有覆盖未见才结束（K 待实测）
+- 升实体三条件之一：存活 ≥ T 秒（待实测）；有 identity.name_proposal；发生了重要事件（如 value_changed 大幅、对话）
+- 名字锚定：OCR 读到人名且当前只有一个 track 与 player 有 talking_to / near 类关系时，写 `identity.name_proposal`；
+  连续 N 帧一致或深线确认才成 alias；歧义进 OpenQuestion；v1 不写 canonical name（D-57）
+
+### 3.11 事件、待查问题与情节【分支，W-T5 / W-T8 起】
+
+```
+EventRecord —— event_id（由 root_capture_id + kind + subject + qualifier 派生，幂等）, layer（observation | world）,
+    kind_raw, kind_canonical, actor, target, qualifier, scene_cluster,
+    observed_after, observed_by（事件发生在两次观察之间：区间不是点）, detected_at（learned 时钟）,
+    evidence_ids[], origin（reducer | deep | notetaker）, modality, status（active / revised / superseded）, revises（旧 event_id）
+观察层 kind：became_observed / became_unobserved / screen_position_changed / observed_state_changed(facet) /
+    observed_action_changed / observed_relation_changed
+机械 kind：value_changed（ui_numeric 跨阈，阈值每槽自定 D-34）/ scene_epoch_changed（指纹）/ view_mode_changed
+世界层 kind（W-T7）：entered / left / moved / started_doing / stopped_doing …，只从观察层事件在证据条件下升格
+
+OpenQuestion —— dedupe_key（subject + facet 或 region + facet）, first_seen, last_seen, repeat_count, priority,
+    scene_cluster, subject_or_region, status（open / escalated / resolved / expired）, expires_at, resolved_by
+    升级给深线的条件：重复出现、涉及身份、涉及异常变化、影响当前状态判断、人工标记；否则只累计不升级
+
+EpisodeRecord —— episode_id, start, end, scene_cluster, participants[],
+    grounded_facts[]（每句带 event_ids）, interpretations[]（status=inferred，带 event_ids）, summary（渲染结果，不是事实载体）,
+    event_ids[], proposed_by（笔记员证据 id）, validation（逐句验证结果）
+```
+
+事件按 frame_seq / observed_at 处理，不按到达顺序；同帧证据在重排窗口内聚合后再差分；迟到证据只产生 revised / superseded，
+不改写历史（D-56）。每类 kind 有自己的迟滞（如 action_started：最近 3 次观察 ≥2 次出现；action_ended：连续 3 次有覆盖未出现或出现互斥动作），
+阈值全部待实测；frame_gap 大时迟滞按帧距缩放，跳帧后的画面不当相邻帧推导精确起止。
+情节切分 = 事件边界（scene_epoch_changed、view_mode_changed、长时间静默、参与者集合变化）+ 定时兜底（重叠窗口）。
+
+### 3.12 词表与归并【分支，W-T6 起】
+
+`data/generic/vocabulary.json`：`{version, entries[{canonical, definition, synonyms[], risk_class}]}`，覆盖 relation / action / view.mode；初版约 40 条由架构师给种子。
+三级：**别名层**（synonyms 精确 / 词形匹配）自动归入；**向量层**（句向量最近邻，需高相似度 + 前二名 margin）v1 **只推荐不改写**；
+**未命中**保留 raw、写 `unmatched.jsonl` 计数。方向 / 否定 / 数量 / 身份类（risk_class）永不自动归并（D-55）。
+记录保存 raw + canonical_at_ingest + vocabulary_version + normalizer_version；换词表只建派生索引，不改原记录，回放可复现。
+
+### 3.13 存储：manifest、store API 与幂等【分支，W-T1 起】
+
+- 会话目录（§1.3）v1 仍是 jsonl + 快照（D-59）；`manifest.json`：schema_version、protocol_version、model、prompt_hash、parser_version、
+  reducer_version、vocabulary_version、embedding_model_version、gamecard_version、recording_id
+- store 只暴露四个 API：`append(evidence | event | episode)`、`snapshot()`、`range(kind, t0, t1)`、`entity_history(entity_id)`；
+  归并器、笔记员、检查器一律经此，不直接遍历文件。以后换 SQLite 只换实现
+- 幂等：证据与事件 ID 由稳定输入派生；重复提交、回放重跑、笔记员重跑不得产生重复记录；读端容忍尾部半行
+- sidecar 索引不做，检查器慢了再立项
+
+### 3.14 检查器【分支，W-T3 起】
+
+- `http://127.0.0.1:8737/inspector`，单文件 HTML + 原生 JS（§1.2 不用 UI 框架）；是渲染视图，可丢可重生（D-36）
+- 主视图是**逐帧链路**：帧 → 原始模型输出 → 解析（accepted / rejected）→ track 关联 → 归并（raw / canonical）→ 信念槽位 → 派生事件 → episode 引用；
+  另有快照页、事件页、情节页、词表页（W-T6）
+- 接口：`/api/inspector/{snapshot, events?since=, episodes, evidence/{id}, frame/{root_capture_id}, unmatched}`；`POST /api/inspector/vocabulary`
+- 安全（D-60）：只绑 loopback；帧接口与写接口要求每会话随机 token（启动时打印 / 写入本地文件，不进配置）；不开宽 CORS；
+  词表写操作写审计日志、version 自增、可撤销
+- 帧的可回溯边界：回放模式有全部帧；实机只有环形缓冲最近 N 秒（TD-57）
+
 ---
+## 4 决策（一条一个规则：先读粗体句；依据与历史在后。带「分支」的条目只在本分支生效）
 
-## 3 规则
-
-### 3.1 工程原则（对架构师与 coding agent 同等适用）
-
-1. 不留向后兼容：过时代码直接删。（例外：已有真实数据的存储结构变更须先确认；模板回退路径是产品决策不是兼容层，必须保留。）
-2. 选满足当前需求的最简实现。不做预防性抽象。
-3. 先跑通最小端到端版本再往上加。绝不为未完成的功能拆掉能跑的东西。
-4. 关注点分离，按已存在的职责边界拆，不为设想拆。
-5. 优先用成熟且在维护的库。
-6. 加依赖或自己写之前，先查现有依赖能否解决并说明查过什么。
-7. 难以回退的决策（数据模型、核心接口、技术栈）按长期方案定；**适配端口与信念层数据模型属于此类**。易替换的实现按原则 2 从简。
-8. 先看成熟产品如何解决同类问题，按本项目规模裁剪。
-9. 底层行为不把假设写成诊断：按 a→b→c 尝试、每步测量、够用就停。
-10. 修好一处规则后，主动搜索还有哪些地方适用同一条。
-11. "能做什么"的清单优先用程序从真实数据生成，不由人或 agent 撰写。
-12. 「已实现」「未实现」「技术债」是覆盖语义不是追加。自查方法：只比对两个清单中以 `- ` 或数字编号开头的条目行的
-    任务 / 里程碑 ID 是否有交集；不要在全文范围统计 ID 出现次数（交叉引用不构成重复）。
-
-### 3.2 跨游戏决策（仍在生效，不要重新讨论）
+| 组 | 编号 | 主题 |
+|---|---|---|
+| 4.1 跨游戏 | D-01…D-09 | 代码算事实、模型管文风；策略随适配；游戏身份查表 |
+| 4.2 输入侧 | D-10…D-19 | 并发时间线；检测器去重；帧选取；键鼠遥测与隐私 |
+| 4.3 调用线 | D-20…D-26、D-43…D-47 | 快 / 深两条线；单图上下文；输出合同（分支修订）；OCR 定型 |
+| 4.4 认知层 | D-27…D-39、D-48…D-51 | 证据 → 主张 → 信念；两个时钟；实体身份；场景指纹与命名；四条调用线 |
+| 4.5 知识与评测 | D-40…D-42 | 两货架；题干同构；通用提示词零游戏内容 |
+| 4.6 观察与记忆层【分支】 | D-52…D-61 | 屏幕≠世界；缺席≠否定；语法唯一源；词表三级；事件迟滞；轨迹与名字；英文规则；存储；检查器；视角 |
+### 4.1 跨游戏决策（仍在生效，不要重新讨论）
 
 - **D-01 确定性的事实用代码算，需要品味的表达用大模型生成。** 事件判定、局势累计、事实句全部由代码确定性产出；
   模型只负责"把事实句用网友口气重说一遍"。所有适配同一形状。
@@ -311,21 +563,21 @@ init（initialized_at, source_recordings, version）
 - **D-09 游戏身份由窗口标题与进程名确定性获得，不是模型的推理任务。** 准确率 100%、成本 0、延迟 0。让模型去猜是设计倒退。
   查表**只管身份**，不扩知识字段；不在表内的游戏以标题原文作为名称（D-37）。
 
-### 3.3 通用视觉 · 输入侧（截屏、检测器、输入遥测）
+### 4.2 通用视觉 · 输入侧（截屏、检测器、输入遥测）
 
-- **D-10 时间线的更新频率靠并发，不靠单次变快。** 单次往返已接近管道物理下限（§5.3）；每秒发一帧、允许数个请求在飞、按时间戳入库。
+- **D-10 时间线的更新频率靠并发，不靠单次变快。** 单次往返已接近管道物理下限（§7.3）；每秒发一帧、允许数个请求在飞、按时间戳入库。
   串行队列是"嘴"的规矩，不是"眼睛"的。
 - **D-11 通用检测器的职责是去重，不是侦察。** "准心里的远处小目标"在块平均度量下物理上不可分（5% 像素 × 大变化被稀释成 5/255），
   可靠检测此类目标是游戏特化视觉适配的职责。缓解：固定基线的累积效应（晚发现而非发现不了）、60 秒心跳、中心加权 margin（TD-24）。
 - **D-12 帧选取不做时间持久性门控（P=1 定案）。** 1 秒采样下真实事件多数只在一帧里表现为剧变，"连续两轮才算数"把它们成批滤掉
-  （§5.2 P=2 数据）。滤闪烁由块级自适应噪声地板独立承担。**门控的时间尺度必须与目标事件的时间尺度比对后再设。**
+  （§7.2 P=2 数据）。滤闪烁由块级自适应噪声地板独立承担。**门控的时间尺度必须与目标事件的时间尺度比对后再设。**
 - **D-13 camera_motion 规则已删除。** "镜头移动"在像素空间不是可分类别（转向 / 非转向块占比分布严重重叠：中位 13.2% vs 4.9%，
   P75 22.6% vs 19.3%，非转向最大 97.9%）。其作用由 P=1 下的 persistent_change 上传与稀疏抑制承担。
 - **D-14 上传与区域提示是两个独立决策，不得重新耦合。** 是否上传只看有无 confirmed 块；是否附区域提示只看 confirmed 占比是否
   ≤ region_focus_max。超过上限时清空提示但照常上传。
 - **D-15 检测器参数选型用"带约束筛选"，不用字典序排序。** 纯"漏帧优先"会一路推到 k=0.8/margin=0 的"全都传"角落（纯静止画面也传 62%，等于检测器关闭）。
   硬约束（字幕 / UI 剧变零漏检、过渡段漏检个位数、世界事件命中不垫底）之内最小化真阴性锚点（B-idle 与 A-static）的上传率；
-  燕云类"零输入动态世界"只作成本列。生产定值 N=10 / k=1.2 / margin=4/255 / P=1（依据 §5.2）。
+  燕云类"零输入动态世界"只作成本列。生产定值 N=10 / k=1.2 / margin=4/255 / P=1（依据 §7.2）。
 - **D-16 两条时间线（画面 / 输入）用同一个单调时钟；帧时间尽量取内容时刻。** 键鼠几乎零延迟，画面天生滞后，实测错位约一轮。
   修法三层：统一 perf_counter、帧时间戳取 WGC 呈现时刻（若 zbl 暴露）、互相关校准兜底（TD-22）。
   发给模型的场景对精度宽容，校准真值才吃精度。
@@ -338,7 +590,7 @@ init（initialized_at, source_recordings, version）
   玩家自己的动作（打击"出现了敌人"类误报）。绝对角度只在游戏卡有公开的每计数角度常数、玩家提供了灵敏度、且为普通视角时给，
   否则只给相对量。光流自校准不做。
 
-### 3.4 通用视觉 · 快线与深线
+### 4.3 通用视觉 · 快线与深线
 
 - **D-20 快慢两条线，成本性质相反。** 输入几乎免费、输出串行昂贵，同一次请求无法兼得"快"与"深"。
   快线（热路径）：每个上传帧都跑，发言链路在等，预算 ≤1 秒，一句话硬顶，不联网，产出进证据流（source=fast）。
@@ -346,11 +598,11 @@ init（initialized_at, source_recordings, version）
   两者以"证词"身份进同一条证据流：机械事实由归并器裁决，语义由笔记员提补丁、归并器验证。
   触发深线只有三种：归并器待查（矛盾槽位、未标注场景簇、实体歧义）、笔记员提问、闲时补课；快线举手用现成信号
   （观察含"读不清 / 不确定"），提示词不为此改动。**再多的深度需求都表达为"待查问题"，不加第三条线。**
-- **D-21 快线上下文永远是单图，且只放分钟级稳定或机械生成的信息。** 判据：并发使一切秒级更新的上下文必然过期。
+- **D-21 快线上下文永远是单图，且只放分钟级稳定或机械生成的信息。**【分支不动：观察语言仍是单图无状态，模型看不到上一帧，一切"变化"由归并器差分（§3.11）】 判据：并发使一切秒级更新的上下文必然过期。
   清单：当前帧 + 游戏名 + 区域提示（含真实基线秒差）+ 键鼠输入窗口（机械聚合）+ 游戏卡短视图（稳定前缀首位）+
   认知短视图（分钟级，cover 语义，附 context_version；B-T8 接入）。文字帧时间线已移除——秒级信息并发下必然过期，
   且实测为复读抄袭的病灶。不做多帧并送。提示词组装"稳定前缀在前、变化部分在后"以吃前缀缓存。
-- **D-22 快线输出合同（T7.9 版，冻结）：模型只写散文，数字全部机械注入。** 输出【全局画面】（一到两句）+【局部】
+- **D-22 快线输出合同（T7.9 版，冻结）：模型只写散文，数字全部机械注入。**【分支修订：topdown 视角改为观察语言（§3.8），是否推广到其他视角由 W-T0 A/B 与后续视角任务判定；散文合同在非 topdown 视角继续有效（D-61）】 输出【全局画面】（一到两句）+【局部】
   （仅当提供聚焦区域时）。允许复读——重复即"场景稳定"的证据，去重归后续层。回溯禁令：现在进行时合法，"出现了 / 比之前"非法。
   日志渲染器机械注入三指标（全局像素变化、区域占比、区域强度）与【玩家输入】行；模型一个数都不写，无从编造。
   聚焦区域以外接框方位词 + 占比表述（"画面中央偏左、约 30% 的区域"），**格子编号不发送给模型**；区域占比 >0.5 不提供聚焦（"占比高=镜头动"已被否证）；
@@ -361,13 +613,13 @@ init（initialized_at, source_recordings, version）
   快线不做推理已定案：现任模型推理为开关无档位，开启延迟不可接受（T7.11）。轻推理若重开只作单变量 A/B，M5-C 前重新评估。
   **常设偏好：能在本地用程序算出来的，绝不交给线上模型。** 检测器、OCR、场景指纹、鼠标聚合、GSI、帧环形缓冲都是这条的产物；
   每加一个本地传感器，就重新审视快线提示词里还有哪一段可以删。
-- **D-25 拒绝有状态记忆模型方案。** 与并发数学不相容（有状态要求按序）；丢帧即失同步且模型不自知；图像 token 缓存支持参差不可赌；
+- **D-25 拒绝有状态记忆模型方案。**【分支不动】 与并发数学不相容（有状态要求按序）；丢帧即失同步且模型不自知；图像 token 缓存支持参差不可赌；
   违反 D-36。提示词缓存作为正交小优化保留。
 - **D-43 态势感知层延迟预算：MVP 端到端 ≤ 3–4 秒。** 从帧被选中到宠物开口，反射路径 = 检测器（毫秒）+ 快线 + 归并器（毫秒）+
   发言模型 + 语音出声（0.4 秒）。分配初值：快线 P50 ≤ 2.0 秒、发言模型 ≤ 1.0 秒，合计约 3.5 秒；分配待实测修订。
-  **现阶段允许超出**，但每个碰快线的任务必须报告延迟增量，并对照 §5.3 的账。快线输出改结构化的探针（B-T1.5）
+  **现阶段允许超出**，但每个碰快线的任务必须报告延迟增量，并对照 §7.3 的账。快线输出改结构化的探针（B-T1.5）
   必须把输出解码速率补进账本。
-- **D-44 传感器先行，快线只做残差；快线合同的重设计排在所有本地/前置传感器落地之后。**
+- **D-44 传感器先行，快线只做残差；~~快线合同的重设计排在所有本地/前置传感器落地之后~~。**【"最后"已撤销（产品负责人 2026-09 定案）：三个传感器已就位，重设计提前为 W-T0；"快线只做残差 = 开放世界语义"这半句仍生效】
   快线的职责 = 全部所需信息 − 本地传感器能确定性给出的部分。已确定属于传感器而非快线的：
   画面何时值得看（检测器）、屏幕上写着什么字与在哪（OCR + 游戏卡的槽位归属）、玩家按了什么转了多少（键鼠遥测）、
   这是哪个界面（场景指纹 + 游戏卡）、这个游戏怎么玩（游戏卡）、看不清时凑近看（深线）。
@@ -413,17 +665,17 @@ init（initialized_at, source_recordings, version）
   **输入路径只能是内存直传**（D-46）：4a-2 里"文件"档只是探针从磁盘读素材的产物，生产中不存在这条路。
   4a-2 内存档 RSS 偏高是探针持有解码数组所致，4b 实测为准。
   其余优化（量化 TD-36、crop 缓存等 4c 机制）一律推后，先把功能做出来（原则 3）。
-- **D-26 深线允许结构化输出，快线不允许（待 B-T8 复核）。** 深线不受延迟约束，输出 ObservationPatch（JSON）：本地引用 local:oN 只在当帧有效，
+- **D-26 深线允许结构化输出，快线不允许（待 B-T8 复核）。**【分支修订："快线不允许"改为待 W-T0 A/B 判定；观察语言不是 JSON（无键名重复），判据是解析率、语义质量与 D-43 延迟账，不是猜】 深线不受延迟约束，输出 ObservationPatch（JSON）：本地引用 local:oN 只在当帧有效，
   绝不冒充实体 ID；事件 ID、时间戳、帧号、像素指标、OCR 数值、键鼠数据由代码填写，模型不得重生成。
   快线改 JSON 或 DSL 不省时间（键名重复反增 token），还需解析与降级路径——不动。
 
-### 3.5 通用视觉 · 认知层（M5 重定案）
+### 4.4 通用视觉 · 认知层（M5 重定案）
 
 - **D-27 通用视觉的状态是"证据 → 主张 → 信念"，自然语言只在两端。** 视觉模型把像素写成证词；信念状态渲染成人读的 cognition.md
   与给模型的短视图；中间是带类型的记录和一个代码归并器。理由：散文作为唯一状态库经历两次有损转换，丢掉对象 ID、坐标、数值、
   持续时间、来源与不确定性；并发下按到达顺序追加的文字必然乱序。跨模型不存在文字之外的通道（视觉 token 只有同族模型能读，
   托管 API 不暴露），所以精确的东西走代码通道（OCR、键鼠、指纹、检测器），视觉模型只做开放世界语义。
-  **它提升的是认知更新速度（数字与输入毫秒级入状态），不是反应速度**——反应速度受 TTFT 固定开销支配（§5.3）。
+  **它提升的是认知更新速度（数字与输入毫秒级入状态），不是反应速度**——反应速度受 TTFT 固定开销支配（§7.3）。
 - **D-28 模型提出判决，代码执行法律。** 视觉模型与笔记员的一切输出只能产生候选或补丁；升格为 confirmed 只由归并器按策略执行。
   模型不得直接重写整份状态。
 - **D-29 两个时钟；迟到证据只补历史。** observed_at 与 learned_at 分开存，按 observed_at 归位。T+10 的"42"在 T+13 才返回时，
@@ -528,7 +780,7 @@ init（initialized_at, source_recordings, version）
 - **D-39 本地 GPU 允许，但有硬预算。** 任何本地视觉组件（轨迹、embedding 等）必须：显存与占用上限可配、可一键关闭、
   真机实测对游戏帧时间的影响并写入本文件、未实测不得常驻。首版主线不含 GPU 组件；本地短时轨迹为条件任务 B-T11。
 
-### 3.6 知识边界与评测
+### 4.5 知识边界与评测
 
 - **D-40 两货架规则。** 分界线是"玩前可得 vs 玩后所见"。货架一·开箱即知（可 web search，每游戏一次，本地缓存）：类型、世界观一句话、
   机制体系、模式结构、世界观基础设定、发行与运营状态——机制可以查到饱。货架二·亲眼所见（只能从观察与推理积累）：剧情、角色命运、
@@ -539,9 +791,60 @@ init（initialized_at, source_recordings, version）
 - **D-42 通用提示词（含示例）不得含任何具体游戏的机制、道具、事件名词**，只允许"某界面元素出现 / 某区域亮度变化"这一抽象层级（F-16）。
   按线分提示词合法；按游戏分永远非法；游戏信息只以数据身份进上下文。
 
-### 3.7 文档与流程
+### 4.6 观察与记忆层【分支新增】
 
-- **任务规格写需求、边界与验收，不写实现算法（2026-08 起）。** 规格必须讲清：要什么功能、为什么、不许碰什么、
+- **D-52 屏幕空间与世界空间分离：不同谓词、不同事件、不同升格条件。** 画面显示酒馆不等于玩家在酒馆（过场 / 监控 / 地图预览 / 观战）；
+  对象从画面中央到右侧不等于它在世界里动了（镜头动了）；不再出现不等于离开。帧观察线只产屏幕空间 Claim（§3.9），观察层事件只说
+  became_observed / screen_position_changed（§3.11）；entered / moved / left 是世界层，只在证据条件下升格（W-T7）。
+  下游任何模块不得把屏幕空间记录当世界事实用。
+- **D-53 帧观察线输出是正证据集合，缺席默认不是否定证据。** 模型行数有限、只写显著对象，第二帧没提守卫不等于守卫走了。
+  "本轮覆盖了什么"由调度器写进观察信封（scope / covered_regions / enumeration_complete / truncated），不由模型自称。
+  结束状态或轨迹必须同时满足：有覆盖、未截断、连续 K 次未见、无镜头大变、无遮挡 / UI 覆盖的明显原因。模型的 U 表示看不清，不表示覆盖。
+- **D-54 观察语言的语法只在 protocol.py 定义一次，提示词格式段与解析器都由它生成。** 本项目曾因 tag 改名不同步 prompt 使精度崩盘；
+  根治是单一来源 + 契约测试。解析器容错：坏行原样保存、计数、不进信念；丢弃率是评测指标，超阈值说明提示词坏了。
+- **D-55 词表归并三级，v1 只有别名层自动，向量层只推荐。** 句向量把 toward / away、open / close、enter / leave 放得很近；
+  方向 / 否定 / 数量 / 身份类永不自动归并。记录存 raw + canonical_at_ingest + 版本号，换词表建派生索引，回放可复现。
+  无监督聚类不做：几千条以下聚出来的是噪声，且黑箱错聚会悄悄改变槽位键的含义；等未归并桶大到人工审不过来再立项。
+- **D-56 事件按捕获顺序处理、时间是区间、按类型迟滞、ID 幂等、迟到只修订。** 同一帧的指纹 20ms、OCR 300ms、帧观察 2.5s、深线 8s 到达，
+  不能按到达顺序当时间顺序；事件发生在两次观察之间 (observed_after, observed_by]，不是下一帧时间戳；每类 kind 的迟滞独立、阈值待实测；
+  跳帧后的画面不当相邻帧推导精确起止；迟到证据产生 revised / superseded，不改写历史。
+- **D-57 轨迹是"观察关联"不是追踪器；名字锚定只提议。** ObservationTrack 用位置 + 标签 + 时间 + 状态连续 + 镜头惩罚做一对一分配；
+  同类单位交叉、镜头快转、遮挡重现、标签漂移（guard / soldier / armored man）都会断轨——**断轨可接受，错合不可接受**。
+  对话框的名字不等于画面里的人（画外音、立绘、被谈论者），所以只写 identity.name_proposal，连续多帧一致或深线确认才成 alias；
+  出现 2 秒但交任务的 NPC 因"重要事件"保留为临时实体。
+- **D-58 内部英文，对外中文。** 协议词汇、Claim 值、词表、新代码注释 / 日志 / 命令行帮助用英文（跨模型、跨游戏的中间语言，同义归并工具链成熟）；
+  渲染视图、检查器界面文字、产品内容（解说、事实句、词库）中文；OCR 原文与游戏专名保留原文不翻译。
+  M4 已完成目录与标识符英文化；剩余中文（约 4300 行字符串多为产品内容与 fixture、约 250 行注释）**不做整批翻译**，碰到旧文件顺手改。
+- **D-59 存储 v1 是 jsonl + 快照 + manifest；store 只暴露四个 API。** append / snapshot / range / entity_history（§3.13）；
+  以后按需让两种存储各做合适的事（产品负责人定案），换实现不改归并器与检查器。证据与事件 ID 由稳定输入派生，回放重跑不重复。
+- **D-60 检查器是渲染视图；本地不裸奔。** 只绑 loopback、帧接口与写接口要求每会话 token、不开宽 CORS；
+  词表写操作有审计、版本自增、可撤销。浏览器里的恶意网页仍可能打本地端口，帧画面可能含私人信息。
+- **D-61 观察提示词按视角类别选，v1 只做上帝视角。** 三类：3D（第一 / 第三人称）、上帝视角（2D 或 45° 俯视）、2D 横版。
+  协议语法三类共用；提示词、cheap-CV 提示与评测集分开。选择依据 `gamecard.knowledge.perspective`（inferred 档，只作提示）+
+  `perspective_override`；缺失或非 topdown 沿用散文合同。上帝视角内部也是三种问题：实时精灵世界（星露谷 / 饥荒 / 以撒 / 暗黑）、
+  地图加菜单（文明 / 钢雄，靠 OCR）、竞技节奏（LOL，时机比内容要命）——v1 评测锚在前者。
+
+---
+## 5 原则、流程与编码规范
+### 5.1 工程原则（对架构师与 coding agent 同等适用；分支放宽范围见 §0.4）
+
+1. 不留向后兼容：过时代码直接删。（例外：已有真实数据的存储结构变更须先确认；模板回退路径是产品决策不是兼容层，必须保留。）
+2. 选满足当前需求的最简实现。不做预防性抽象。
+3. 先跑通最小端到端版本再往上加。绝不为未完成的功能拆掉能跑的东西。
+4. 关注点分离，按已存在的职责边界拆，不为设想拆。
+5. 优先用成熟且在维护的库。
+6. 加依赖或自己写之前，先查现有依赖能否解决并说明查过什么。
+7. 难以回退的决策（数据模型、核心接口、技术栈）按长期方案定；**适配端口与信念层数据模型属于此类**。易替换的实现按原则 2 从简。
+8. 先看成熟产品如何解决同类问题，按本项目规模裁剪。
+9. 底层行为不把假设写成诊断：按 a→b→c 尝试、每步测量、够用就停。
+10. 修好一处规则后，主动搜索还有哪些地方适用同一条。
+11. "能做什么"的清单优先用程序从真实数据生成，不由人或 agent 撰写。
+12. 「已实现」「未实现」「技术债」是覆盖语义不是追加。自查方法：只比对两个清单中以 `- ` 或数字编号开头的条目行的
+    任务 / 里程碑 ID 是否有交集；不要在全文范围统计 ID 出现次数（交叉引用不构成重复）。
+
+### 5.2 文档与流程
+
+- **任务规格写需求、边界与验收，不写实现算法（2026-08 起）。**【分支：长度上限放宽，其余不变】 规格必须讲清：要什么功能、为什么、不许碰什么、
   产品负责人怎么验、以及哪些数字必须实测而非拍定；**具体算法、数据结构与代码组织交给 coding agent 决定**，
   架构师在 code review 时把关。契约级的东西（端口、证据 / 信念数据模型、游戏卡字段、配置键名）仍由架构师定死，
   因为它们跨任务、难回退（原则 7）。
@@ -554,7 +857,7 @@ init（initialized_at, source_recordings, version）
 - 提交进仓库的测试不得依赖未提交的机器本地数据：所引用的本地文件缺失时必须以明确理由 skip，不得 fail。
 - 偏离本文件技术栈或分层职责必须在完成报告显式标出。
 
-### 3.8 编码规范
+### 5.3 编码规范
 
 - Python 全量类型注解；跨模块数据必须 dataclass 或 pydantic，禁止裸 dict
 - 后端只绑定 127.0.0.1；端口 8737 前后端各只允许一处常量
@@ -568,11 +871,11 @@ init（initialized_at, source_recordings, version）
 - 窗口尺寸位置一律逻辑像素（DIP）按 scale_factor 换算，禁止硬编码像素补偿
 - 前端 Prettier 统一格式化；Rust 过 cargo fmt --check；前端视觉组件独立模块，外部不得直接访问其内部 DOM
 - 回归测试对已修复缺陷加 ROOT CAUSE 注释，写明当年怎么错的
+- 【分支】新代码注释 / 日志 / 命令行帮助英文（D-58）；观察语言与词表词汇英文；渲染视图与界面文字中文
+- 【分支】events.jsonl / episodes.jsonl 与 evidence.jsonl 同样只追加；修订以新记录 revises 旧记录，不原地改写
 
 ---
-
-## 4 反复出现的失误模式（引以为戒）
-
+## 6 反复出现的失误模式（引以为戒）
 本项目实际发生过、同类形状出现过多次的错误。每条：现象 → 规则。
 
 - **F-01 把未验证的分析当成诊断。** 曾按回合号分组统计而录制含三局比赛，虚构出不存在的缺陷并施工一轮。→ 从数据得出结论前先核对数据的组织结构。
@@ -587,46 +890,47 @@ init（initialized_at, source_recordings, version）
 - **F-10 规则与内容自相矛盾 / 自查范围不明。** → 自查方法必须写明匹配范围。
 - **F-11 需要人工判读的指标被自动统计代替。** → 把"逐项给出判定与理由"写成硬性验收项。
 - **F-12 底层行为靠读代码推断。** → 涉及系统 API / GPU / 网络 / 外部服务时，规格写成"按 a→b→c 顺序尝试，每步测量，够用就停"。
-- **F-13 架构师连续用"等定型了一起写"推迟 AGENTS.md 更新。** M4 关闭后连续 14 个任务未更新。→ 每三个任务必须更新一次（§3.7）。
+- **F-13 架构师连续用"等定型了一起写"推迟 AGENTS.md 更新。** M4 关闭后连续 14 个任务未更新。→ 每三个任务必须更新一次（§5.2）。
 - **F-14 评测的题干泄露了答案。** 规格批准了"题目专属提示词"，抗幻觉题的题干里写着"若无显著事件则必须返回空"，整题作废。→ D-41。
 - **F-15 采购了条款禁止本用途的服务套餐。** 某订阅套餐明写"仅限编程工具中交互式使用，禁止用于自动化脚本与应用后端"。
   → 本项目是自动化后端，任何"仅限交互式使用"的套餐一律不可用，购买任何额度前先读用途条款。
 - **F-16 通用提示词的示例走私了具体游戏内容。** T7.3 修订在示例里写了"闪电、手电筒"，等于告诉模型往这类事件上靠，真值回归 2/5。→ D-42。
 - **F-17 为滤噪声加的时间门控把真实事件成批滤掉。** "连续两轮才算数"在 1 秒采样下恰好滤掉只持续一帧的真实剧变，漏检十倍。
   → 任何门控 / 滤波 / 收敛窗口，设立前必须先量目标事件的持续时长，确认事件能活过这道门。
-- **F-22 传感器的选帧规则照搬了另一个传感器的，没按它自己的目的定。** B-T2 把 OCR 的门控（只跑检测器选中帧）
-  原样给了场景指纹。对 OCR 这是对的——没变化的帧文字不会变；对指纹这是反的——检测器去重掉的"没变化"恰恰是
-  指纹要找的"稳定界面"。结果四段录像四张空卡，守望先锋 617 帧切出 543 个簇。→ **每个传感器的输入集合按"它要检测什么"
-  单独定**；一个传感器要找的信号如果正是上游过滤掉的，就不能接在那个过滤器后面。
-- **F-21 无监督校准时没先看数据的主体是什么。** B-T2 的阈值规则写的是"相邻帧距离的主体就是同一画面的抖动，取其 P95 作下限"——
-  这在菜单为主的录像里成立，在五分钟第一人称游玩录像里，相邻帧的主体是**镜头运动**，P95 于是高到 34/64，
-  规则无解，agent 只能把扫描上界 25 当临时值，结果把连续的游玩片段升格成了四个"场景"（单次访问、帧号连续）。
-  → **写无监督规则前先回答"这组数据的主体是什么"**；"同一画面"的噪声底必须用能证明是同一画面的子集来估
-  （检测器判 no_change 的相邻对，或人工区间），不能用全体相邻对。
-- **F-24 把一个天然有歧义的字段设为整份合同的必填项。** 游戏知识合同 V3 把默认键位列为必填且严格校验，结果守望先锋
-  类型、玩法、背景全部有效的答案，因为 Shift 对应哪个动作说不清而连续三次整份被拒——最不可靠的字段否决了最可靠的字段。
-  → **严格 schema 只对"必须可靠"的字段严格**；天然多解的信息要么允许留空，要么根本不进这份合同。
-- **F-23 用一张关键词表去过滤模型的自由文本输出。** B-T2-5 判定"是不是普通游玩画面"用的是硬编码词表
-  （"战斗界面""游玩画面"…）。它在四段录像上恰好全对，但下一个游戏说"探索中的世界""驾驶舱视角"就漏了，
-  而误伤的代价是把真界面挡在卡外。→ **需要模型判断的分类，让模型直接返回一个受控字段**（如 `is_ui: true/false`），
-  不要在代码里猜它的措辞。词表可以留作兜底，但不能是唯一依据。
+- **F-18 提出优化前不对照本文件的实测账本。** 架构师曾提议砍掉快线【全局画面】段以"减半延迟"，而账本早已写明快线可见输出仅约 30 token、
+  解码占比可忽略。→ 任何提速 / 降本主张必须先引用 §7 的具体数字，账对不上就不提。
+
+---
+- **F-19 评测的答案键由参赛者生成。** B-T4a 的 OCR 真值集初稿是用候选之一（WinRT）的输出生成的，再拿它评 WinRT，
+  得到"100% 准确率"——只证明了评测管线能复现自己的输出。独立重评后真实召回 58.3%。与 F-14 同形状：答案来自被考者。
+  → **真值必须独立于全体候选**（人工穷举、或至少来自不参赛的第三方来源），并在任何横向比较之前完成校对。
 - **F-20 代理指标当门，与分段 A/B 当因果。** 两个连着犯的错，都出自架构师：
   ① D-45 的三条量化门（P50 100ms、峰值 2 核、RSS 600MB）没有一条有实测依据，全是"后台传感器应该长什么样"拍出来的，
   三条里两条在数据面前作废。→ **拍出来的代理指标必须当场标注"待实测校准"，且不得单独作为打回依据**；
   真正的门要选能直接回答"这会不会伤害用户"的量。
   ② 4b 的实机 A/B 分两段跑（先关后开），测出"开 OCR 后帧时间反而好一倍"——环境波动远大于被测效应。
   → **凡是效应量可能小于环境波动的对照，一律在同一段会话内交错开关**（与 4a-2 的交错重复同一条道理）。
-- **F-19 评测的答案键由参赛者生成。** B-T4a 的 OCR 真值集初稿是用候选之一（WinRT）的输出生成的，再拿它评 WinRT，
-  得到"100% 准确率"——只证明了评测管线能复现自己的输出。独立重评后真实召回 58.3%。与 F-14 同形状：答案来自被考者。
-  → **真值必须独立于全体候选**（人工穷举、或至少来自不参赛的第三方来源），并在任何横向比较之前完成校对。
-- **F-18 提出优化前不对照本文件的实测账本。** 架构师曾提议砍掉快线【全局画面】段以"减半延迟"，而账本早已写明快线可见输出仅约 30 token、
-  解码占比可忽略。→ 任何提速 / 降本主张必须先引用 §5 的具体数字，账对不上就不提。
+- **F-21 无监督校准时没先看数据的主体是什么。** B-T2 的阈值规则写的是"相邻帧距离的主体就是同一画面的抖动，取其 P95 作下限"——
+  这在菜单为主的录像里成立，在五分钟第一人称游玩录像里，相邻帧的主体是**镜头运动**，P95 于是高到 34/64，
+  规则无解，agent 只能把扫描上界 25 当临时值，结果把连续的游玩片段升格成了四个"场景"（单次访问、帧号连续）。
+  → **写无监督规则前先回答"这组数据的主体是什么"**；"同一画面"的噪声底必须用能证明是同一画面的子集来估
+  （检测器判 no_change 的相邻对，或人工区间），不能用全体相邻对。
+- **F-22 传感器的选帧规则照搬了另一个传感器的，没按它自己的目的定。** B-T2 把 OCR 的门控（只跑检测器选中帧）
+  原样给了场景指纹。对 OCR 这是对的——没变化的帧文字不会变；对指纹这是反的——检测器去重掉的"没变化"恰恰是
+  指纹要找的"稳定界面"。结果四段录像四张空卡，守望先锋 617 帧切出 543 个簇。→ **每个传感器的输入集合按"它要检测什么"
+  单独定**；一个传感器要找的信号如果正是上游过滤掉的，就不能接在那个过滤器后面。
+- **F-23 用一张关键词表去过滤模型的自由文本输出。** B-T2-5 判定"是不是普通游玩画面"用的是硬编码词表
+  （"战斗界面""游玩画面"…）。它在四段录像上恰好全对，但下一个游戏说"探索中的世界""驾驶舱视角"就漏了，
+  而误伤的代价是把真界面挡在卡外。→ **需要模型判断的分类，让模型直接返回一个受控字段**（如 `is_ui: true/false`），
+  不要在代码里猜它的措辞。词表可以留作兜底，但不能是唯一依据。
+- **F-24 把一个天然有歧义的字段设为整份合同的必填项。** 游戏知识合同 V3 把默认键位列为必填且严格校验，结果守望先锋
+  类型、玩法、背景全部有效的答案，因为 Shift 对应哪个动作说不清而连续三次整份被拒——最不可靠的字段否决了最可靠的字段。
+  → **严格 schema 只对"必须可靠"的字段严格**；天然多解的信息要么允许留空，要么根本不进这份合同。
 
 ---
+## 7 关键实测数据（主干；CS2 专属数据见 CS2.md）
 
-## 5 关键实测数据（主干；CS2 专属数据见 CS2.md）
-
-### 5.1 前端、后端、语音
+### 7.1 前端、后端、语音
 
 - 前端：release 空闲 4.19% 单核、隐藏 1.12%；呼吸动画外置 + 8Hz 较优化前降 88.9%（单纯提升合成层反而更差）。
   静态约 408 MiB / 7 个 WebView2 进程，为固定成本。
@@ -634,7 +938,7 @@ init（initialized_at, source_recordings, version）
 - 语音：20 字中文出声延迟最坏 0.42 秒；停止 1.01 秒内返回。`speak()` 先 `stop()`——**新句子掐掉正在播的那句，不是排队**（M3-T12 实测确认）。
   一句 19–30 汉字约 2–3.5 秒说完；加上模型 0.5–1.5 秒，**一句话从选中到说完约占 4 秒**——任何发言策略都要对着这本物理账设计。
 
-### 5.2 截屏与画面变化检测（M5-T1 / T1.5 / T3 / T4 / T5）
+### 7.2 截屏与画面变化检测（M5-T1 / T1.5 / T3 / T4 / T5）
 
 - WGC（zbl 0.7.1）按精确 HWND 抓单窗口：抓帧最大 38 毫秒；六指标含块级统计合计中位 9.4 毫秒（1920x1080）；
   1 秒轮询单核 CPU 约 3.3%，2 秒档约 2.1%
@@ -652,7 +956,7 @@ init（initialized_at, source_recordings, version）
   **真阴性锚点只剩 B-idle（灰区暴雨静止）与会话 A 的静止段**
 - 互相关滞后测量：四个过渡段测出 2.1 / 7.0 / 2.1 / 23.1 秒、相关口径含负值——过渡段不是干净阶跃，当前素材测不出可信常数（TD-22）
 
-### 5.3 视觉模型（M5-T2 系列 11 题考卷 × 多模型；T7 / T8）
+### 7.3 视觉模型（M5-T2 系列 11 题考卷 × 多模型；T7 / T8）
 
 - **TTFT ≈ 1324 毫秒固定开销 + 0.97 毫秒/token**，三个不同规模的模型在同一上传宽度下 TTFT 几乎相同（896 档：2061 / 2078 / 2077 毫秒）——
   **该固定开销来自管道而非模型计算，换模型救不了它**
@@ -671,7 +975,7 @@ init（initialized_at, source_recordings, version）
 - 真机快线延迟中位曾降至 1.55 秒（删上下文后，未锁变量，不下因果结论）
 - 四段 1080p 片段答案键（会话背景 + 现场记录 + 判卷专名表，专名表与模型上下文结构隔离）已入库
 
-### 5.4 本地 OCR（M5-T7.10 / T7.10b / B-T4a）
+### 7.4 本地 OCR（M5-T7.10 / T7.10b / B-T4a / B-T4b）
 
 **引擎横评（B-T4a，40 帧 1080p，324 条独立视觉参考 anchor，整行精确匹配）**：
 
@@ -719,7 +1023,7 @@ init（initialized_at, source_recordings, version）
 选择性二次 OCR 原型（持久工作进程 + 缓存差分 + 预算）已落地但**未必会用**（D-45 先最简后加机制）。
 WinRT 无置信度、多次识别可互相矛盾：OCR 输出是**证词不是事实**，稳定性由 D-34 的策略按跨帧一致性裁决。
 
-### 5.5 语言模型（当前 CS2 档位锁定单一上游）
+### 7.5 语言模型（当前 CS2 档位锁定单一上游）
 
 - 事件 P95 约 0.8 秒；约 ¥0.5/小时；长尾可达 15.7 秒——线上必须配短超时与模板回退
 - **输入几乎免费，输出是延迟大头**：多 1200 输入 token 仅 +0.119 秒，多 87 输出 token +2.234 秒。提示词想写多长写多长，生产坚持单行输出
@@ -727,7 +1031,7 @@ WinRT 无置信度、多次识别可互相矛盾：OCR 输出是**证词不是�
 - **固定种子会让温度失效**：多样性采样不传种子；正式评测保留种子以复现
 - 上游不锁定则延迟不可比（OpenRouter 单次运行出现过八家分发）
 
-### 5.6 传感器与认知层
+### 7.6 传感器与认知层
 
 **游戏知识线选型（B-T3a，V3 合同下 8 题决赛）**：Gemini 3.1 Flash Lite 8/8 返回、7/8 原样合规、P50 4.12 / P90 5.08 / 最大 5.99 秒、
 8/8 ≤10 秒、8 次 $0.0209；Gemini 3.7 Flash 8/8 返回、6/8 合规、P50 7.95 / P90 10.73 秒、7/8 ≤10 秒、$0.120；
@@ -749,81 +1053,16 @@ Qwen3.8 Flash 在长提示词下长推理、截断、限流，5/5 无可用答�
 **名字不稳定**：同一簇不同调用出现过"休闲比赛匹配界面 / 主菜单匹配界面 / 比赛搜索界面"三种说法，语义一致措辞不同——
 D-50 的"匹配时复用旧名、不许模型改写"是目前唯一的稳定性来源（TD-44）。
 
-暂无实测。B-T2（指纹聚簇）、B-T3（游戏卡）、B-T7（笔记员）、B-T8（背景注入 A/B）起逐项填入。
+**观察语言（W-T0）、归并器（W-T2）、轨迹（W-T4）、事件（W-T5）、词表（W-T6）、笔记员（W-T8）**起逐项填入。
 
 ---
+## 8 技术债与暂不做
 
-## 6 现状（覆盖语义）
-
-### 6.1 里程碑总览
-
-已实现：
-- **M1 桌面宠物**：置顶悬浮窗、拖动、显隐热键、托盘菜单、表情、气泡、系统语音（可中断）、WebSocket、待机播报
-- **M2 看得懂 CS2**：GSI 接入与自动安装、录制回放、会话与主体识别、事件检测、发言策略、模板话术、对局生命周期
-- **M3 每句话由大模型当场生成**：代码产事实句 + 模型只管文风、词库与闸门、线上接入与回退、评测基建、连杀收敛。产品负责人真实对局验收
-- **M4 多游戏地基**：删 4.4MB 过程产物并产出模块清单；端口 v1 定稿；一次性重构落地——core / games/cs2 / eval 三层分离、全目录英文化、
-  性格与游戏知识分层、每游戏独立配置段与模型档位、分层警报器上线。迁移前后：35 场景选中序列逐字节一致、提示词逐字节一致、通过数 414>409
-
-未实现（滚动细化，只细化当前里程碑；主线与适配线并行）：
-- **M5 通用视觉**（默认关闭），三段只含通用模式，CS2 视觉与战雷视觉归适配线：
-    - M5-A 看得见（收官冻结）：截屏 + 快线观察 + 窗口标题查表识游戏 + 滚动观察日志。验收物是观察日志；真机 10 分钟判词并入 B-T10
-    - **M5-B 跟得上（当前）**：游戏卡 + 证据流 + 归并器与信念状态 + 笔记员提补丁 + 背景注入 + 深线。验收物是**游戏卡与 cognition.md**：
-      玩 20 分钟后打开两者，对照自己的记忆判每一条真伪，并抽查任意一条认知能否沿证据 ID 追到具体帧。
-      此时还不能：开口（M5-C）；联网查货架一之外的内容；Live2D；跨局翻案（M6）
-    - M5-C 开口：发言仲裁读信念快照 + 最新快线证词 + 事件卡，只写"何时开口"；说话链路 M3/M4 早已就绪
-- **M6 跨局长期记忆**：游戏卡已是种子（B-T2 起持久）；剩下会话信念快照的持久化、下次开局装载与跨局翻案
-- **M7 神经网络语音**：必须保留可随时中断，延迟不得明显劣于系统语音
-- **M8 语音对话输入**
-- **M9 外观自定义、心情系统与设置面板**（设置面板：性格 / 外观 / 适配管理的 UI 壳）
-- **M10 打包分发，朋友可安装 —— MVP 完成线**
-
-Post-MVP：适配形态升级为独立分发（A→B→C）、设置面板的适配下载页、AI 玩杀戮尖塔、AI 玩文明 6（"AI 代玩"与本产品端口不通用，不预留设计）。
-
-### 6.2 当前里程碑 M5-B：任务序列
-
-M5 重定案一句话：通用视觉的状态不再是"散文笔记本"，而是"证据 → 主张 → 信念"的结构化状态（§3.5）。
-**执行策略：传感器先行，快线最后重设计（D-44）。** 先把所有本地/前置输入做齐——检测器（已有）、OCR、键鼠（已有）、
-场景指纹、游戏卡、深线原语——每落地一个就从快线职责里减去一项；等减完再一次性重定快线合同（B-T8）。
-在此之前快线合同（D-22）、检测器参数（D-15）、上传宽度 896 一律不动。
-旧 B-T1（两栏笔记本骨架）规格已作废（未交付）；新 B-T1 整份取代。
-
-任务 ≤ 一天粒度、单一职责、可独立回滚；任何阈值一律"待实测"。推荐顺序即列序；产品负责人暂无时间判游戏卡时 B-T4 / B-T5 可先于 B-T3。
-
-| 顺序 | 任务 | 内容 | 产品负责人怎么验 | 依赖 |
-|---|---|---|---|---|
-| ✅ | **B-T1 证据流骨架**（`301f825`） | core/belief/ 的 EvidenceEvent / EvidenceStore / 渲染器；三类证据齐全，md 与改前逐字节相等且可从证据重生 | 已验收 | — |
-| 1 | **B-T4 OCR 接管线**（4b 执行中） | **4a 选引擎**（✅ 完成，`a6be790`）：真值集初稿被 F-19 推翻后以独立参考重评；三款 OpenVINO CPU 候选入围，WinRT 因召回 58.3%/数字 40.8% 出局；判据据此改写（D-45）。**4a-2 收口**（✅ 完成）：线程数是 CPU 主杠杆；detector 尺寸对召回零影响；定型 **v6 tiny / OpenVINO CPU + detector 上限 1280 + 内存输入 + 线程数可配**（§5.4）。**4b 最简单遍式**（有条件通过，`4971fae`）：已接管线——独立线程、不阻塞、只跑检测器帧与心跳帧、行差分、证据流；生产召回 83.3% 与探针零漂移。未达成项：实机 A/B 无效（TD-38）。**4b-2 收尾**（✅ 通过，`ccd06c6`）：四项小修落地，网络断言经违规注入验证；numpy 降级为 openvino 2026 硬约束（`numpy<2.5.0`）；`backend/docs/ocr-pipeline.md` 经架构师逐句核对属实。**OCR 线收口**——D-44 职责表上第一个划掉的格子。**4c 按需加机制**（条件）：仅当 4b 超标才加，每加一项报告换来多少毫秒/多少召回；若 4b 达标则删除 ocr_selective.py 中未被使用的 crop/预算/爬坡代码。全程**不碰快线提示词**（D-44）。放宽 models.py/render.py：新 kind、同帧多条同 kind。顺带从重放的 evidence.jsonl 算出**输出解码速率**补进 §5.3 | 4a 读对照表（含漏读/错读样例）拍板选型；4b 重放四段 1080p，抽查 OCR 条目与画面对得上、中位耗时是否达标；4c 只在必要时发生 | B-T1 |
-| 2 | **B-T2 场景指纹 + 游戏卡骨架**（✅ `81b1967`） | 全轮询帧 pHash64 / 汉明 8 / 连续稳定 4s / 累计驻留 8s；1632 个原始候选 → 12 个正式簇 → 8 个写卡场景，人工复核零普通游玩误收。语义归并不做（D-49 v1） | 已验收 | — |
-| 2.5 | **B-T2-4 场景命名**（有条件通过 `73968b8`） | 深线首次接通：稳定簇 → 命名 + 跨会话复核（D-50）；12/12 成功、全 observed、$0.0096、P50 3.2s；提示词经查无游戏专属内容 | 已初验 | B-T2 |
-| 2.6 | **B-T2-5 命名收尾**（✅ `a6e8881`） | 判决链路可追溯（matches_existing / candidate / action / rejected 留痕）；uncertain 不覆盖旧名、改标 needs_review；上卡门槛改语义过滤，驻留降级为记录；四张卡重生共 11 个场景，饥荒三个场景回归，STS2 战斗簇被正确滤除 | 已验收 | B-T2-4 |
-| 3 | **B-T5 鼠标聚合证据**（✅ `f71c865`） | input_telemetry 把鼠标位移按 100ms 窗口聚合为方向 + 幅度，以 source=mouse 进证据流并同步进快线【玩家输入】行；游戏卡有角度常数、玩家提供了灵敏度且普通视角时附绝对角度。只出聚合信号。放宽 root_capture_id=None 的非帧证据 | 重放一段你记得转了约 90° 的片段：证据显示方向与幅度；若校准，角度在容差内（待实测） | B-T1（校准字段依赖 B-T3，可后补） |
-| 4 | **B-T3 游戏初始化**（拆三段） | **3a 选型探针**（✅ `64c3043`）：Gemini 3.1 Flash Lite 仅联网，见 D-37 与 §5.6。**3b 游戏知识线**（✅ `4f7b854`，含 3b-2 合同 V4 与 3b2.5 时效核查；四卡全 ok/refreshed，$0.036）：初始化一次 + 每会话联网核查/更新，写卡 `knowledge` 对象，失败保留上一份；短视图 512 UTF-8 字节；不注入帧观察线（那是 B-T8）。**3c HUD 识别线**：**拆为独立后续任务**（产品负责人定案），排在 B-T7 之后、B-T8 之前，见下表 6.5 行。键位印证、角度常数、游玩画面过滤均不做 | 3b：打开四张卡的 knowledge 段逐字段判（TD-51） | B-T2、T7.8 |
-| 5 | **B-T6 归并器与信念状态 v1**（执行中） | core/belief/reducer：机械来源的 Claim 标准化（OCR → numeric_value / reads_text，指纹 → scene，键鼠 → doing / changed_from）；BeliefSlot 生命周期；三条策略 ui_numeric / ui_text / scene（参数化）；证据家族计独立组；按 observed_at 归位迟到证据；ActionLog；快照版本号；cognition.md 机械段渲染。回归测试含 ROOT CAUSE：迟到的 42 不覆盖 37、状态变化不判矛盾、同帧派生只算一组 | 四段录像重放：cognition.md 机械段对照现场记录；随机抽 5 条认知沿证据 ID 追到帧号 | B-T1–B-T5 |
-| 6 | **B-T7 笔记员 v1（提补丁）** | 文本档位、每 2 分钟（可配）：输入 = 上版本以来的快线 / 深线证词 + 信念短视图 + 未解矛盾；输出 = StatePatch（每条引用证据 ID）；归并器逐条验证、拒绝原因入账；cognition.md 语义段渲染（实体与命名 / 正在发生 / 存疑与矛盾 / 待查） | **第二场大考**：语义段对照记忆判真伪；看被拒补丁的数量与原因；能自动算的算：数值遗忘、改名次数、误判矛盾、迟到污染、可追溯率 | B-T6 |
-| 6.5 | B-T3c HUD 识别线 | 开放式：模型看"不属于任何已命名场景"的游玩画面，自述有哪些 HUD 元素、各在画面哪个区域、大致怎么读；持续、按节奏、结果 append 到卡；反复看到才升格。给 B-T6 里按位置建的 ui:rN 槽位补 semantic_role。不读值（OCR 已做）、不求坐标级精度、不做设置菜单（TD-54） | 打开四张卡的 HUD 段，对着代表帧看"说是血量的地方是不是血量" | B-T6 |
-| 7 | **B-T8 帧观察线重设计**（吸收原 B-T1.5） | 传感器齐备后重定快线职责（D-44）：先用四段录像量出"OCR / 指纹 / 键鼠 / 游戏卡已经答了哪些、快线还剩什么"，据此改提示词与上下文（游戏卡短视图 + 认知短视图作稳定前缀，附 context_version；【推测】按数据决定去留），并把候选输出形态在冻结 11 题 + 五个重放角色上 A/B（形态候选：现状 / 减法 / 方位标记散文 / 事实元组，**reads_text 列不再由快线承担**）。同批评估发送频率是否可降、哪些事件类型可不等快线 | A/B 表：核心覆盖、编造率、考卷分、输出 token、TTFT、端到端增量（对着 D-43 的 3–4 秒账）。合同改不改、【全局画面】去留，产品负责人定 | B-T3、B-T4、B-T5、B-T6 |
-| 8 | B-T9 深线 v1（在线触发） | 复用 B-T3 原语；三种触发（归并器待查、笔记员提问、闲时补课）；每小时预算上限（初值 6，待实测）；结果以 source=deep 进证据流，local:oN 只在当帧有效；待查队列落盘供闲时消化；帧环形缓冲供回看（D-36） | ActionLog 显示深读升格或解决了哪些槽位；预算不超 | B-T6、B-T7 |
-| 9 | B-T10 里程碑验收 | 真机 20 分钟：一个游戏从初始化到游玩；读游戏卡与 cognition.md；M5-A 的 10 分钟判词并入；**OCR 交错开关的帧时间对照（TD-38）**；AGENTS.md 双里程碑关闭大更新 | 上述验收物全套 | 全部 |
-| 条件 | B-T11 本地短时轨迹探针 | 开启条件：B-T8 A/B 显示实体命名稳定度仍不达标（目标由产品负责人定）且失败源于转视角后的身份丢失而非命名。内容：本地高频低分辨率帧、按 frame_seq 串行的短时 tracker、TrackletEvent 进证据流、特征只在内存；GPU 硬预算与帧时间影响实测先行 | 探针报告：帧时间影响、断轨率、保守认亲的正确率 | B-T8 数据 |
-
-**编号不重排**（避免与已下发规格错位），执行顺序以"顺序"列为准。**B-T1.5 已撤回**：在传感器齐备前优化快线格式，是为一份即将作废的职责清单做优化（D-44）；其变体、判据与判卷表设计并入 B-T8。
-
-成本预估：初始化每游戏一次性约 $0.1–0.3；笔记员 ≈ $0.01/小时；深线 ≈ $0.005/小时；快线不变 $0.28/小时。成本不构成约束。
-
-### 6.3 排队、并行线与适配线
-
-- **T7.8（429 冷却，TD-25）已下发，排在 B-T3 之前**（产品负责人拍板）：B-T2-5 的在线跑批被上游间歇 429 打断（TD-47），
-  而 B-T3 要连发十几次深读。B-T3 的验收报告必须能区分"模型学不好"与"被限流打断"，这是前置条件
-- 排队：【推测】去留并入 B-T8（改冻结提示词要跑回归，与重设计一次付清）；视觉美国区端点仍等服务商账号人工审核（TD-20）
-- 适配线（第二位开发者，代码审查归架构师）：战争雷霆实时数据适配**现在可开工**（开工文件 ADAPTER_GUIDE.md；对标 CS2 的 M2+M3 深度；
-  数据源为游戏自带 localhost:8111）；战雷视觉适配与 CS2 视觉适配（OCR + 地图识别等，落在 games/cs2）在 M5 之后；
-  CS2 地图战术建议（原 M3-T14）随时可做，触发于回合开始，可预生成。CS2 待办清单见 CS2.md
-
-### 6.4 技术债（编号固定，已销条目保留编号）
+### 8.1 技术债（编号固定，已销条目保留编号）
 
 1. `prompts/cs2/gate-requirements.json` 与 CS2 代码中的事件名 / 场景标签是两份无测试同步的清单。偿还：下一个 CS2 任务顺带加断言测试
 2. 各游戏的配置模型仍定义在 core/config.py。偿还：战雷适配开工任务中移交各游戏包
-3. 频率保险丝（§2.2 之三）已定设计未实现。偿还：战雷适配接入主干之前
+3. 频率保险丝（§3.2 之三）已定设计未实现。偿还：战雷适配接入主干之前
 4. 语句多样性不足、词库利用率待提升。偿还：CS2 适配内做，时机自定
 5. `games/cs2/eval/fact_sentence_audit.py` 与 `template_rules.py` 的脏字单字项会命中常用词（「操作」命中「操」）。偿还：下次动 CS2 闸门数据时
 6. speaker 的 30 汉字输出硬上限比产品目标 19 字长 50%，不得因沿用成为事实标准。偿还：M7 用语音时长实测定
@@ -854,7 +1093,7 @@ M5 重定案一句话：通用视觉的状态不再是"散文笔记本"，而是
     按档位隔离的派发级冷却，冷却期在图像编码前丢弃、不排队不重试；冷却丢弃不计入连续失败、不锁模板模式。已销
 26. 锁定单一上游的可用性代价已实测（限流时整段失明、零故障转移）。受限回退清单暂不建——合格名单仅一家。重开条件：第二合格上游出现或 TD-20 落地
 27. 本地 OCR 接管线：原型已落地（T7.10b），定位定案为**证词不是事实**——以 source=ocr 进证据流，稳定 HUD 由 D-34 策略升格，瞬时文字保留单帧候选。偿还：B-T4
-28. 信念层阈值全部为待实测占位：~~指纹汉明距离~~（已定 8/64，B-T2-2）、稳定时长（B-T2-3 在全帧时间线上重校）、实体存续时长、
+28. 信念层阈值全部为待实测占位（分支：track TTL、升实体时长、各事件迟滞、重排窗口、向量层相似度与 margin 一并计入）：~~指纹汉明距离~~（已定 8/64，B-T2-2）、稳定时长（B-T2-3 在全帧时间线上重校）、实体存续时长、
     ui_numeric 印证组数与 stale 时长、键位印证窗口、深线每小时预算、游戏卡短视图长度。
     偿还：各自任务内用四段 1080p 录像实测定值，规格不得写死
 29. ~~货架一联网查询通路未选型~~ 已定：网关联网为主、模型知识兜底、不接独立搜索 API（D-37）。已销
@@ -869,7 +1108,7 @@ M5 重定案一句话：通用视觉的状态不再是"散文笔记本"，而是
     偿还：B-T3 之后评估；在此之前不得为 HUD 数字单独优化 OCR
 33. `eval-reports/*` 已被 .gitignore 覆盖，但 B-T4a 强制提交了 2.3 MB `metrics.json` 与 2276 行报告。
     M4-a 曾为同类过程产物做过一次 4.4 MB 清理。偿还：4a-2 提交中从版本库移除（保留本地），只留 ocr-truth/ 与 audit/probe.py
-34. OCR CPU 占用：离线核心秒数已实测（§5.4，前半已偿）；**游戏运行中的帧时间 / 1% low 对照仍未测**，
+34. OCR CPU 占用：离线核心秒数已实测（§7.4，前半已偿）；**游戏运行中的帧时间 / 1% low 对照仍未测**，
     而这是 D-45 判据 2 的真正门。偿还：4b 必测，未测不得判定达标
 35. 4a-2 的 CPU 取样有已知向上偏差（收尾取样计入核心秒未计入墙钟），且 1 线程测出 2.0 核峰值自相矛盾——
     线程限制可能未覆盖全部阶段（检测/识别/前后处理可能各有线程池）。偿还：4b 同时设 OpenVINO 推理线程与
@@ -899,7 +1138,7 @@ M5 重定案一句话：通用视觉的状态不再是"散文笔记本"，而是
     与 F-19 同理：标注不得由指纹算法或检测器生成。**B-T2 后加急**：当前四张卡上的"场景"多为单次访问、帧号连续的
     游玩片段，B-T2-2 已证实（阈值 8 下四卡零场景，旧场景全为过松产物）。真值仍缺，B-T2-3 后的卡需产品负责人看代表帧确认
 43. ~~`game_id` slug 非 ASCII~~ 已随 B-T2-2 改为 ASCII 安全（CJK / 纯符号名用 SHA-1 后缀），目录已迁移。已销
-44. 场景名不稳定：同一簇不同调用给出不同措辞。当前靠 D-50 的"匹配即复用旧名"压住，但首次命名仍是一次性抽签，
+44. 场景名不稳定（偿还时点改为 W-T6 词表 / W-T8 笔记员）：同一簇不同调用给出不同措辞。当前靠 D-50 的"匹配即复用旧名"压住，但首次命名仍是一次性抽签，
     且不同游戏间无命名规范（"主菜单" vs "主菜单大厅" vs "主菜单休闲比赛界面"）。下游若需要精确 label 才需处理。
     偿还：B-T8 背景注入时评估；届时若快线/笔记员对 label 措辞敏感，再加代码侧规范化或提示词层级约束
 45. 场景命名档位是 flash 级模型（qwen3.8-flash），对"这是什么界面"够用（12/12 observed）。
@@ -928,7 +1167,7 @@ M5 重定案一句话：通用视觉的状态不再是"散文笔记本"，而是
     偿还：B-T3b 把生产提示词落到 `prompts/generic/game-knowledge.md`，旧产物标注作废
 53. 本机测试环境两处受限：pytest 默认临时目录无访问权限（需指定仓库内可写目录），且无 OneCore 中文语音（TD-15）。
     "全量绿"在此环境只能以"非语音全量 + 指定临时目录"口径判。偿还：M10 前在干净 Windows 环境跑一次真正全量
-54. **玩家实际键位靠设置菜单的视觉识别获得**（货架二）。边界：只表示实际观察到的绑定，必须引用画面/OCR 证据；
+54. **玩家实际键位靠设置菜单的视觉识别获得**（货架二）。（偿还时点中的 B-T8 读作 W-T0）边界：只表示实际观察到的绑定，必须引用画面/OCR 证据；
     未显示、读不清、有歧义一律保持未知；不得用公开默认键位覆盖，不得从类型或惯例推断。要处理滚动列表、多列布局、
     手柄与键鼠模式、组合键、重复绑定、未绑定动作、本地化语言。**不并入 B-T3c**——设置菜单是临时界面，触发与策略都与常驻
     HUD 不同；天然触发点是场景命名线给出的"控制/键位设置界面"这类场景。偿还：B-T3c 之后、B-T8 之前评估是否立项；
@@ -937,8 +1176,17 @@ M5 重定案一句话：通用视觉的状态不再是"散文笔记本"，而是
     来源 URL、来源日期，并在本地做时效校验（早于核查日期若干天的运营状态自动降为 stale）。另：提示词含"无联网工具则用自身知识"
     的兜底条款——插件静默失效时模型会凭记忆作答而不报错，只能靠证据里的 `mode` 事后审计。
     偿还：B-T8 之前若判卷发现过期内容再立项；在此之前 knowledge 一律 inferred 不升格
+56. 【分支】句向量模型的权重文件与 tokenizer：requirements 里没有 tokenizer 运行时；W-T6 按原则 6 在"自写 WordPiece（几十行，随模型 vocab.txt）"与
+    "加 `tokenizers` 轮子"之间报告选择；权重 IR 文件的分发体积在 M10 打包前评估
+57. 【分支】实机模式下检查器的帧回溯只到帧环形缓冲最近 N 秒（D-36，随 B-T9 落地）；此前实机只显示帧元数据，回放模式不受影响；
+    要实机回溯需开调试落盘开关。偿还：B-T9
+58. 【分支】观察语言评测真值靠人工标注（微片段实体框与标签 / 追踪压力片段同一-不同配对 / 长录像检查点与事件表，全由产品负责人标，F-19）。
+    未标注前 W-T0 只有解析率 / 截断率 / token / 延迟四项客观指标；标注工具随 W-T0 交付
+59. 【分支】`vision_fast` 档位改名 `frame_observer`（D-51 留给 B-T8 的事）随 W-T0 第二阶段接生产 adapter 时一并做；此前配置键不动
+60. 【分支】旧 `fast_observation` 证据 kind 与新 `frame_observation` 并存到所有视角切到观察语言为止；届时删旧 kind 与散文合同（原则 1），
+    删除前确认无回归资产依赖（F-04）
 
-### 6.5 暂不做
+### 8.2 暂不做
 
 - 读游戏内存、注入进程、规避反作弊（永久禁止）；AI 操控竞技网游（永久禁止）
 - macOS / Linux；账号系统、云存储、自动更新；语音推理占用 GPU（视觉侧本地 GPU 见 D-39）
@@ -947,16 +1195,12 @@ M5 重定案一句话：通用视觉的状态不再是"散文笔记本"，而是
 - 同时解说多个游戏（一次一个，按 [active].game 切换，托盘手动选）
 - 适配动态加载与插件市场（端口按可升级形状设计，现阶段 main.py 显式装载）
 - 为"AI 代玩"类 post-MVP 做端口设计（操作输出与陪玩解说不通用）
-- 对象跟踪 / 分割、视觉 embedding、latent 世界模型进主线（条件重开：B-T11 触发条件）
-- 快线输出 JSON 或 DSL（不省时间，需解析与降级路径；深线可结构化）
+- 对象跟踪 / 分割、视觉 embedding、latent 世界模型进主线（条件重开：B-T11 触发条件）。【分支】ObservationTrack 是观察关联不是 CV 追踪，
+  文本句向量只用于词表归并推荐——两者都不在此列
+- ~~快线输出 JSON 或 DSL（不省时间，需解析与降级路径）~~【分支改为待 W-T0 A/B 判定；观察语言不是 JSON，见 D-22 / D-26 修订】
 - 光流自校准视角转角（先看鼠标相对量够不够）
 - 初始化或深线联网查剧情类内容（D-40，永久）
 - 让模型直接重写整份信念状态或 cognition.md（只许提补丁）
 - 各游戏数据层面做不到的事项见各自 md 的「数据边界」
-
-### 6.6 多开发者协作约定（生效中）
-
-1. 适配开发者只允许改 games/<自己的游戏>/、prompts/<自己的游戏>/、data/<自己的游戏>/、docs/<自己的游戏>/ 与自己游戏的 md；主干改动经架构师下发
-2. 端口不够用时立即停下来找架构师改端口，不许在适配里绕路
-3. 主干与适配只经端口通信，双向都是；test_layering.py 会当场抓违规
-4. 端口带版本号；不匹配拒绝装载
+- 【分支 v1 不做】视觉认人（跨场景身份）；空间拓扑图与方位 / 距离带；无监督语义聚类；跨局记忆 L6 / L7 / L8；快线上的本地生成式模型；
+  3D 与横版视角的观察提示词；SQLite（按需再换）；sidecar 索引
